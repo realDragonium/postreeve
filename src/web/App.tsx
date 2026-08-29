@@ -453,7 +453,7 @@ function App() {
         <section className="message-column">
           <div className="mailbox-heading">
             <div><p>{currentAccount?.email ?? "Mailbox"}</p><h1>{currentFolder?.name ?? "Messages"}</h1></div>
-            {currentFolder ? <div className="mailbox-heading-actions"><span>{currentFolder.total} messages</span><button className="icon-button" aria-label="Refresh mailbox" disabled={messagesQuery.isFetching || foldersQuery.isFetching} onClick={() => void refreshMailbox()}><Icon name="refresh" /></button></div> : null}
+            {currentFolder ? <div className="mailbox-heading-actions"><span className={currentFolder.unread ? "mailbox-unread-count" : ""}>{currentFolder.unread ? `${currentFolder.unread} unread` : "All read"}</span><span>{currentFolder.total.toLocaleString()} total</span><button className="icon-button" aria-label="Refresh mailbox" disabled={messagesQuery.isFetching || foldersQuery.isFetching} onClick={() => void refreshMailbox()}><Icon name="refresh" /></button></div> : null}
           </div>
           <form className="search-box" role="search" onSubmit={search}>
             <Icon name="search" />
@@ -491,7 +491,7 @@ function App() {
 
         <main className="reader">
           {mailNotice ? <div className="mail-toast" role="status">{mailNotice}<button aria-label="Dismiss message" onClick={() => setMailNotice(null)}><Icon name="x" /></button></div> : null}
-          {!selectedMessage ? <EmptyState icon="mail" title="Choose a message" body="Select an email to read it here." /> : messageQuery.isLoading ? <ReaderSkeleton /> : messageQuery.isError ? <ErrorState message={messageQuery.error.message} retry={() => void messageQuery.refetch()} /> : messageQuery.data ? <MessageReader
+          {!selectedMessage ? <EmptyState icon="mail" title="No message selected" body="Choose an email from the list to read it here." /> : messageQuery.isLoading ? <ReaderSkeleton /> : messageQuery.isError ? <ErrorState message={messageQuery.error.message} retry={() => void messageQuery.refetch()} /> : messageQuery.data ? <MessageReader
             message={messageQuery.data}
             folders={foldersQuery.data ?? []}
             busy={directActionMutation.isPending}
@@ -582,23 +582,27 @@ function MessageReader({ message, folders, busy, error, onCompose, onAction, onC
   }, [destination, message.ref.mailbox, folders]);
   return <article className="message-reader">
     <button className="mobile-reader-back" onClick={onClose}><Icon name="chevron" /> Back to messages</button>
-    <div className="reader-head">
-      <div className="reader-labels">{message.read ? <span className="soft-pill">Read</span> : <span className="soft-pill unread">Unread</span>}{message.flagged ? <span className="soft-pill flagged">Flagged</span> : null}</div>
+    <div className="reader-toolbar">
       <div className="conversation-actions"><button className="secondary-button" onClick={() => onCompose("reply")}><Icon name="reply" /> Reply</button><button className="secondary-button" onClick={() => onCompose("reply_all")}><Icon name="reply" /> Reply all</button><button className="secondary-button" onClick={() => onCompose("forward")}><Icon name="forward" /> Forward</button></div>
-      <div className="reader-actions" aria-label="Message actions">
+      <div className="reader-quick-actions" aria-label="Message actions">
         <button className="secondary-button" disabled={busy} onClick={() => onAction({ type: message.read ? "mark_unread" : "mark_read" })}>{message.read ? "Mark unread" : "Mark read"}</button>
         <button className="secondary-button" disabled={busy || !archiveFolder} onClick={() => archiveFolder && onAction({ type: "move", destination: archiveFolder.path })}><Icon name="archive" /> Archive</button>
-        <button className="secondary-button backend-pending" disabled title="Flag changes need mail-provider support"><Icon name="star" /> {message.flagged ? "Unflag" : "Flag"}</button>
-        <div className="move-control"><select aria-label="Move destination" disabled={busy || moveFolders.length === 0} value={destination} onChange={(event) => setDestination(event.target.value)}>{moveFolders.map((folder) => <option key={folder.path} value={folder.path}>{folder.name}</option>)}</select><button className="secondary-button" disabled={busy || !destination} onClick={() => onAction({ type: "move", destination })}>Move</button></div>
         <button className="danger-button" disabled={busy || messageIsInTrash || folders.every((folder) => folder.specialUse !== "trash")} onClick={() => onAction({ type: "trash" })}><Icon name="trash" /> {messageIsInTrash ? "Already in Trash" : "Delete"}</button>
       </div>
-      {error ? <div className="inline-alert error reader-action-error">{error}</div> : null}
+    </div>
+    <div className="reader-head">
+      <div className="reader-labels">{message.read ? <span className="soft-pill">Read</span> : <span className="soft-pill unread">Unread</span>}{message.flagged ? <span className="soft-pill flagged">Flagged</span> : null}</div>
       <h2>{message.subject || "(No subject)"}</h2>
       <div className="reader-sender">
         <span className={`sender-avatar large tone-${message.ref.uid % 5}`}>{initials(sender(message))}</span>
         <div><strong>{sender(message)}</strong><span>to {addresses(message)}</span>{message.cc?.length ? <span>cc {message.cc.map((address) => address.name || address.address).join(", ")}</span> : null}{deliveredTo.length ? <span className="delivered-to">delivered to {deliveredTo.join(", ")}</span> : null}</div>
         <time>{formatDate(message.receivedAt, true)}</time>
       </div>
+      <div className="reader-organize">
+        <div className="move-control"><select aria-label="Move destination" disabled={busy || moveFolders.length === 0} value={destination} onChange={(event) => setDestination(event.target.value)}>{moveFolders.map((folder) => <option key={folder.path} value={folder.path}>{folder.name}</option>)}</select><button className="secondary-button" disabled={busy || !destination} onClick={() => onAction({ type: "move", destination })}>Move</button></div>
+        <button className="secondary-button backend-pending" disabled title="Flag changes need mail-provider support"><Icon name="star" /> {message.flagged ? "Unflag" : "Flag"}</button>
+      </div>
+      {error ? <div className="inline-alert error reader-action-error">{error}</div> : null}
     </div>
     <div className="reader-body">
       {safe ? <>{safe.blockedImages ? <div className="security-note">Remote images blocked to protect your privacy.</div> : null}<div className="email-html" dangerouslySetInnerHTML={{ __html: safe.html }} /></> : <div className="email-text">{message.text}</div>}

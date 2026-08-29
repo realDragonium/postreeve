@@ -227,6 +227,27 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await expect(page.locator(".status-pill", { hasText: "undone" })).toBeVisible();
 });
 
+test("opens and closes the reading pane on a narrow screen", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, [message]);
+    if (request.method() === "POST" && url.pathname === "/api/messages/read") return json(route, [message]);
+    return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
+  });
+
+  await page.goto("/");
+  await page.getByText(message.subject, { exact: true }).click();
+  await expect(page.getByRole("heading", { name: message.subject })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Back to messages" })).toBeVisible();
+  await page.getByRole("button", { name: "Back to messages" }).click();
+  await expect(page.getByRole("heading", { name: message.subject })).toBeHidden();
+  await expect(page.getByText(message.subject, { exact: true })).toBeVisible();
+});
+
 test("shows and selects a newly connected account without a reload", async ({ page }) => {
   const personal: Account = {
     id: "account-personal",
