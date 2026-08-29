@@ -1,6 +1,7 @@
 import {
   ImapFlow,
   type CopyResponseObject,
+  type ESearchResult,
   type FetchOptions,
   type FetchQueryObject,
   type FetchMessageObject,
@@ -44,7 +45,10 @@ export interface ImapClient {
     path: string | string[],
     query: { uidValidity?: boolean },
   ): Promise<StatusObject>;
-  search(query: SearchObject, options?: { uid?: boolean }): Promise<number[] | false>;
+  search(
+    query: SearchObject,
+    options: { uid?: boolean; returnOptions: Array<"MIN" | "MAX" | "COUNT" | "ALL" | { partial: string }> },
+  ): Promise<ESearchResult | number[] | false>;
   fetch(
     range: number[],
     query: FetchQueryObject,
@@ -119,10 +123,8 @@ export class ImapMailProvider implements MailProvider {
     assertLimit(limit);
     return this.#withClient(async (client) => {
       const opened = await client.mailboxOpen(mailbox, { readOnly: true });
-      const uids = await client.search({ all: true }, { uid: true });
-      if (!uids || uids.length === 0) return [];
-
-      const selected = newestUids(uids, limit);
+      const selected = await searchUids(client, { all: true }, limit);
+      if (selected.length === 0) return [];
       return this.#fetchSummaries(client, opened, selected);
     });
   }
@@ -175,10 +177,9 @@ export class ImapMailProvider implements MailProvider {
             ],
           }
         : { all: true };
-      const uids = await client.search(criteria, { uid: true });
-      if (!uids || uids.length === 0) return [];
-
-      return this.#fetchSummaries(client, opened, newestUids(uids, limit));
+      const selected = await searchUids(client, criteria, limit);
+      if (selected.length === 0) return [];
+      return this.#fetchSummaries(client, opened, selected);
     });
   }
 
@@ -454,6 +455,41 @@ function specialUseFor(mailbox: Pick<ListResponse, "path" | "specialUse">): Fold
 
 function newestUids(uids: number[], limit: number): number[] {
   return [...uids].sort((left, right) => right - left).slice(0, limit);
+}
+
+async function searchUids(client: ImapClient, query: SearchObject, limit: number): Promise<number[]> {
+  const result = await client.search(query, { uid: true, returnOptions: ["ALL"] });
+  if (!result) return [];
+  if (Array.isArray(result)) return newestUids(result, limit);
+  return newestUidsFromSequenceSet(result.all, limit);
+}
+
+function newestUidsFromSequenceSet(sequenceSet: string | undefined, limit: number): number[] {
+  if (!sequenceSet?.trim()) return [];
+
+  const candidates = new Set<number>();
+  for (const rawPart of sequenceSet.split(",")) {
+    const match = /^(\d+)(?::(\d+))?$/.exec(rawPart.trim());
+    if (!match) throw new Error("IMAP server returned an invalid UID search result");
+
+    const first = Number(match[1]);
+    const second = Number(match[2] ?? match[1]);
+    if (!isUid(first) || !isUid(second)) {
+      throw new Error("IMAP server returned an invalid UID search result");
+    }
+
+    const high = Math.max(first, second);
+    const low = Math.min(first, second);
+    for (let uid = high, added = 0; uid >= low && added < limit; uid -= 1, added += 1) {
+      candidates.add(uid);
+    }
+  }
+
+  return newestUids([...candidates], limit);
+}
+
+function isUid(value: number): boolean {
+  return Number.isInteger(value) && value >= 1 && value <= 0xffff_ffff;
 }
 
 function groupByMailbox(references: MessageRef[]): Map<string, MessageRef[]> {

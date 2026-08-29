@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type {
   CopyResponseObject,
+  ESearchResult,
   FetchMessageObject,
   FetchOptions,
   FetchQueryObject,
@@ -35,6 +36,8 @@ interface FakeState {
   readonly mailboxes: Map<string, StoredMailbox>;
   readonly options: ImapFlowOptions[];
   readonly searches: SearchObject[];
+  readonly searchOptions: Array<{ uid?: boolean; returnOptions: Array<"MIN" | "MAX" | "COUNT" | "ALL" | { partial: string }> }>;
+  eSearchAll?: string;
   lists: number;
 }
 
@@ -115,6 +118,23 @@ describe("Bun IMAP compatibility", () => {
         ],
       },
     ]);
+    expect(state.searchOptions).toEqual([{ uid: true, returnOptions: ["ALL"] }]);
+  });
+
+  test("uses ESEARCH RETURN ALL and parses compact UID ranges", async () => {
+    const state = fakeState();
+    const inbox = state.mailboxes.get("INBOX");
+    if (!inbox) throw new Error("Expected test inbox");
+    inbox.messages.clear();
+    for (const uid of [8, 9, 101, 102]) {
+      inbox.messages.set(uid, fakeMessage(uid, BigInt(uid), `Message ${uid}`, `Body ${uid}`, new Set()));
+    }
+    state.eSearchAll = "8:9,101:102";
+
+    const messages = await new ImapMailProvider(config, fakeFactory(state)).listMessages(config.accountId, "INBOX", 3);
+
+    expect(messages.map((message) => message.ref.uid)).toEqual([102, 101, 9]);
+    expect(state.searchOptions).toEqual([{ uid: true, returnOptions: ["ALL"] }]);
   });
 
   test("keeps visible recipients separate from conservative delivery attribution", async () => {
@@ -252,21 +272,26 @@ class FakeImapClient implements ImapClient {
     return { path: mailbox.path, uidValidity: mailbox.uidValidity };
   }
 
-  async search(query: SearchObject, _options?: { uid?: boolean }): Promise<number[] | false> {
+  async search(
+    query: SearchObject,
+    options: { uid?: boolean; returnOptions: Array<"MIN" | "MAX" | "COUNT" | "ALL" | { partial: string }> },
+  ): Promise<ESearchResult | number[] | false> {
     this.#state.searches.push(query);
+    this.#state.searchOptions.push(options);
     const mailbox = this.#requireSelected();
     const messages = [...mailbox.messages.values()];
-    if (query.all) return messages.map((message) => message.uid);
+    if (query.all) return { all: this.#state.eSearchAll ?? messages.map((message) => message.uid).join(",") };
     const term = query.or?.flatMap((criterion) => [criterion.subject, criterion.from, criterion.to, criterion.text])
       .find((value) => value !== undefined)
       ?.toLowerCase();
     if (!term) return [];
-    return messages
+    const matching = messages
       .filter((message) => {
         const source = message.source?.toString().toLowerCase() ?? "";
         return source.includes(term);
       })
       .map((message) => message.uid);
+    return { all: matching.join(",") };
   }
 
   async *fetch(
@@ -384,6 +409,7 @@ function fakeState(): FakeState {
   return {
     options: [],
     searches: [],
+    searchOptions: [],
     lists: 0,
     mailboxes: new Map([
       [
