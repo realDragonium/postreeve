@@ -8,6 +8,8 @@ lerna-debug.log*
 
 # database
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
 
 # package-json
 package-json.lock
@@ -90,6 +92,8 @@ typings/
 # Nuxt.js build / generate output
 .nuxt
 dist
+playwright-report/
+test-results/
 
 # Gatsby files
 .cache/

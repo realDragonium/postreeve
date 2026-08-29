@@ -1,0 +1,46 @@
+{
+  "name": "postreeve",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "setup:local": "bun scripts/setup-local.ts",
+    "dev": "bun run --hot src/server/index.ts",
+    "dev:web": "vite",
+    "build": "vite build",
+    "start": "bun src/server/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test --path-ignore-patterns='tests/e2e/**'",
+    "test:e2e": "playwright test",
+    "verify": "bun run typecheck && bun run test && bun run build",
+    "db:generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "@hono/zod-validator": "latest",
+    "@tailwindcss/vite": "latest",
+    "@tanstack/react-query": "latest",
+    "dompurify": "latest",
+    "drizzle-orm": "latest",
+    "hono": "latest",
+    "imapflow": "latest",
+    "mailparser": "latest",
+    "nodemailer": "^9.0.6",
+    "react": "latest",
+    "react-dom": "latest",
+    "tailwindcss": "latest",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "latest",
+    "@types/bun": "latest",
+    "@types/dompurify": "latest",
+    "@types/mailparser": "latest",
+    "@types/nodemailer": "^8.0.1",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "drizzle-kit": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  }
+}
