@@ -34,7 +34,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | --- | --- | --- | --- |
 | List folders | Complete | Complete | `list_folders` |
 | Show total and unread folder counts | Complete | Complete | Returned by `list_folders`. |
-| Open Inbox, Sent, Drafts, Spam, Trash, and custom folders | Complete | Complete | Pass the folder path to `list_messages`. |
+| Open Inbox, Sent, Drafts, Spam, Trash, and custom folders | Complete | Complete | `list_messages` opens the same account and folder in the UI. |
 | Manually refresh the mailbox | Complete | Equivalent | Each WebMCP list, read, or search call requests current provider data. |
 | Detect changed folder counts in the open UI | Complete | Equivalent | The UI polls folder metadata; an agent can call `list_folders` again. |
 | Load more messages | Complete, up to 100 | Complete, up to 100 | `list_messages.limit` |
@@ -47,11 +47,11 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 
 | Feature | Web UI | WebMCP | WebMCP tool or reason |
 | --- | --- | --- | --- |
-| List message summaries | Complete | Complete | `list_messages` |
+| List message summaries | Complete | Complete | `list_messages` also shows the same mailbox view in the UI. |
 | Read full message bodies | Complete | Complete | `read_messages` |
-| Search within a folder | Complete | Complete | `search_messages` |
-| Filter all, unread, or flagged messages | Complete | Equivalent | Message results include `read` and `flagged`, so a caller can filter them. |
-| Sort by newest, oldest, sender, or subject | Complete | Equivalent | Returned message metadata can be sorted by the caller. |
+| Search within a folder | Complete | Complete | `search_messages` writes the query into the UI and shows the matching messages. |
+| Filter all, unread, or flagged messages | Complete | Complete | `list_messages.filter` and `search_messages.filter` update the visible UI filter. |
+| Sort by newest, oldest, sender, or subject | Complete | Complete | `list_messages.sort` and `search_messages.sort` update the visible UI sort order. |
 | Show sender, recipients, Cc, subject, date, and preview | Complete | Complete | Returned by message list and read tools. |
 | Show catch-all delivery addresses | Complete | Complete | Returned as `deliveredTo`. |
 | Render sanitized HTML mail | Complete | Equivalent | WebMCP receives message content rather than rendering it. |
@@ -140,5 +140,7 @@ The following tools are discoverable only while the Postreeve page is open:
 7. `apply_message_actions`
 8. `list_activity`
 9. `undo_batch`
+
+Calling `list_messages` or `search_messages` updates the open page to the same account, folder, query, filter, sort order, and message results returned to the AI.
 
 The former proposal tools are absent because there is no matching completed user-facing proposal workflow in the current UI.

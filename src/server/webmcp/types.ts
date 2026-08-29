@@ -14,13 +14,31 @@ import type {
 export interface WebMcpServices {
   listAccounts(signal: AbortSignal): Promise<readonly Account[]>;
   listFolders(accountId: string, signal: AbortSignal): Promise<readonly Folder[]>;
-  listMessages(input: ListMessagesInput, signal: AbortSignal): Promise<readonly MessageSummary[]>;
+  listMessages(input: WebMcpListMessagesInput, signal: AbortSignal): Promise<readonly MessageSummary[]>;
   readMessages(messages: readonly MessageRef[], signal: AbortSignal): Promise<readonly MessageDetail[]>;
-  searchMessages(input: ListMessagesInput & { query: string }, signal: AbortSignal): Promise<readonly MessageSummary[]>;
+  searchMessages(input: WebMcpSearchMessagesInput, signal: AbortSignal): Promise<readonly MessageSummary[]>;
   sendMessage(input: SendMessageInput, signal: AbortSignal): Promise<SendReceipt>;
   applyMessageActions(input: DirectActionInput, signal: AbortSignal): Promise<OperationBatch>;
   listActivity(accountId: string, signal: AbortSignal): Promise<readonly OperationBatch[]>;
   undoBatch(batchId: string, signal: AbortSignal): Promise<OperationBatch>;
+  showMailboxView(view: WebMcpMailboxView): void;
+}
+
+export type WebMcpMessageFilter = "all" | "unread" | "flagged";
+export type WebMcpMessageSort = "newest" | "oldest" | "sender" | "subject";
+
+export interface WebMcpListMessagesInput extends ListMessagesInput {
+  readonly filter: WebMcpMessageFilter;
+  readonly sort: WebMcpMessageSort;
+}
+
+export interface WebMcpSearchMessagesInput extends WebMcpListMessagesInput {
+  readonly query: string;
+}
+
+export interface WebMcpMailboxView extends WebMcpListMessagesInput {
+  readonly query: string;
+  readonly messages: readonly MessageSummary[];
 }
 
 export interface WebMcpToolAnnotations {

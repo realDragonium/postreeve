@@ -1,7 +1,8 @@
-import { expect, test, type Route } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 import {
   createAccountInputSchema,
   directActionInputSchema,
+  messageSummarySchema,
   sendMessageInputSchema,
   type Account,
   type Folder,
@@ -50,11 +51,41 @@ async function json(route: Route, value: unknown, status = 200): Promise<void> {
   await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
 }
 
+async function installWebMcpHarness(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    interface BrowserTool {
+      readonly name: string;
+      execute(input: unknown, options: { signal: AbortSignal }): Promise<unknown>;
+    }
+    const tools = new Map<string, BrowserTool>();
+    const modelContext = {
+      async registerTool(tool: BrowserTool, options?: { signal?: AbortSignal }): Promise<void> {
+        tools.set(tool.name, tool);
+        options?.signal?.addEventListener("abort", () => {
+          if (tools.get(tool.name) === tool) tools.delete(tool.name);
+        }, { once: true });
+      },
+    };
+    Object.defineProperty(document, "modelContext", { value: modelContext });
+    Reflect.set(window, "postreeveWebMcpHarness", {
+      names: () => [...tools.keys()],
+      execute: (name: string, input: unknown) => {
+        const tool = tools.get(name);
+        if (!tool) throw new Error(`Missing tool: ${name}`);
+        return tool.execute(input, { signal: new AbortController().signal });
+      },
+    });
+  });
+}
+
 test("sends and manages mail, then inspects and undoes activity", async ({ page }) => {
   let sentMessage: SendMessageInput | null = null;
   let folderRequests = 0;
   let messageRequests = 0;
   let batch: OperationBatch | null = null;
+  let lastMessageQuery = "";
+
+  await installWebMcpHarness(page);
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -68,6 +99,7 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
     }
     if (method === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) {
       messageRequests += 1;
+      lastMessageQuery = url.searchParams.get("query") ?? "";
       return json(route, [message]);
     }
     if (method === "POST" && url.pathname === "/api/messages/read") return json(route, [message]);
@@ -114,6 +146,32 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await expect(page.getByLabel("Filter messages")).toHaveValue("all");
   await expect(page.getByLabel("Sort messages")).toHaveValue("newest");
   await expect(page.getByRole("button", { name: "Refresh mailbox" })).toBeVisible();
+  await expect.poll(() => page.evaluate(() => {
+    const harness: unknown = Reflect.get(window, "postreeveWebMcpHarness");
+    if (typeof harness !== "object" || harness === null) return [];
+    const names: unknown = Reflect.get(harness, "names");
+    return typeof names === "function" ? names() : [];
+  })).toContain("search_messages");
+  const searchResult = await page.evaluate(async () => {
+    const harness: unknown = Reflect.get(window, "postreeveWebMcpHarness");
+    if (typeof harness !== "object" || harness === null) throw new Error("Missing WebMCP harness");
+    const execute: unknown = Reflect.get(harness, "execute");
+    if (typeof execute !== "function") throw new Error("Missing WebMCP executor");
+    return execute("search_messages", {
+      accountId: "account-work",
+      mailbox: "INBOX",
+      query: "quarterly planning",
+      filter: "unread",
+      sort: "oldest",
+    });
+  });
+  expect(searchResult).toEqual([messageSummarySchema.parse(message)]);
+  expect(lastMessageQuery).toBe("quarterly planning");
+  await expect(page.getByLabel("Search messages")).toHaveValue("quarterly planning");
+  await expect(page.getByLabel("Filter messages")).toHaveValue("unread");
+  await expect(page.getByLabel("Sort messages")).toHaveValue("oldest");
+  await expect(page.getByText("Results for “quarterly planning”")).toBeVisible();
+  await expect(page.getByRole("status")).toHaveText("WebMCP updated the visible mailbox view.");
   await page.getByRole("button", { name: "Identities", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Identities" })).toBeVisible();
   await page.getByRole("button", { name: "Close identities panel" }).click();

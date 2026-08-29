@@ -15,7 +15,7 @@ import {
 } from "../shared/contracts";
 import { api } from "./api";
 import { registerPostreeveWebMcp } from "../server/webmcp/register";
-import { webMcpServices } from "./webmcp";
+import { subscribeToWebMcpMailboxViews, webMcpServices } from "./webmcp";
 import {
   loadLocalDrafts,
   loadLocalIdentities,
@@ -188,6 +188,24 @@ function App() {
   useEffect(() => {
     let active = true;
     let dispose = (): void => undefined;
+    const unsubscribe = subscribeToWebMcpMailboxViews((view) => {
+      queryClient.setQueryData(
+        ["messages", view.accountId, view.mailbox, view.query, view.limit],
+        [...view.messages],
+      );
+      setAccountId(view.accountId);
+      setMailbox(view.mailbox);
+      setQueryDraft(view.query);
+      setQuery(view.query);
+      setMessageFilter(view.filter);
+      setMessageSort(view.sort);
+      setMessageLimit(view.limit);
+      setSelectedUid(null);
+      setSelectedMessages(new Set());
+      setPanel(null);
+      setMobileNav(false);
+      setMailNotice("WebMCP updated the visible mailbox view.");
+    });
     void registerPostreeveWebMcp(webMcpServices).then((registration) => {
       if (!registration) return;
       if (active) dispose = () => registration.dispose();
@@ -196,8 +214,9 @@ function App() {
     return () => {
       active = false;
       dispose();
+      unsubscribe();
     };
-  }, []);
+  }, [queryClient]);
 
   const accountsQuery = useQuery({ queryKey: ["accounts"], queryFn: ({ signal }) => api.accounts(signal) });
   useEffect(() => {

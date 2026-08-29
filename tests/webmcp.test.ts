@@ -4,7 +4,6 @@ import type {
   Account,
   DirectActionInput,
   Folder,
-  ListMessagesInput,
   MessageDetail,
   MessageRef,
   MessageSummary,
@@ -17,9 +16,12 @@ import {
   registerPostreeveWebMcp,
   resolveWebMcpModelContext,
   type WebMcpExecuteOptions,
+  type WebMcpListMessagesInput,
+  type WebMcpMailboxView,
   type WebMcpModelContext,
   type WebMcpRegisterOptions,
   type WebMcpServices,
+  type WebMcpSearchMessagesInput,
   type WebMcpTool,
 } from "../src/server/webmcp/index.ts";
 
@@ -63,6 +65,24 @@ const messageDetail: MessageDetail = {
   ...message,
   text: "Untrusted email body",
   html: null,
+};
+
+const olderUnreadMessage: MessageSummary = {
+  ...message,
+  ref: { ...message.ref, uid: 6 },
+  messageId: "message-older@example.test",
+  subject: "Older matching subject",
+  receivedAt: "2026-08-28T12:00:00.000Z",
+  flagged: true,
+};
+
+const readMessage: MessageSummary = {
+  ...message,
+  ref: { ...message.ref, uid: 8 },
+  messageId: "message-read@example.test",
+  subject: "Read matching subject",
+  receivedAt: "2026-08-27T12:00:00.000Z",
+  read: true,
 };
 
 const sendInput: SendMessageInput = {
@@ -113,6 +133,7 @@ class FakeServices implements WebMcpServices {
   readonly sendCalls: SendMessageInput[] = [];
   readonly directActionCalls: DirectActionInput[] = [];
   readonly activityCalls: string[] = [];
+  readonly mailboxViews: WebMcpMailboxView[] = [];
   lastSignal: AbortSignal | null = null;
 
   async listAccounts(signal: AbortSignal): Promise<readonly Account[]> {
@@ -125,7 +146,7 @@ class FakeServices implements WebMcpServices {
     return [folder];
   }
 
-  async listMessages(_input: ListMessagesInput, signal: AbortSignal): Promise<readonly MessageSummary[]> {
+  async listMessages(_input: WebMcpListMessagesInput, signal: AbortSignal): Promise<readonly MessageSummary[]> {
     this.lastSignal = signal;
     return [message];
   }
@@ -136,11 +157,11 @@ class FakeServices implements WebMcpServices {
   }
 
   async searchMessages(
-    _input: ListMessagesInput & { query: string },
+    _input: WebMcpSearchMessagesInput,
     signal: AbortSignal,
   ): Promise<readonly MessageSummary[]> {
     this.lastSignal = signal;
-    return [message];
+    return [message, olderUnreadMessage, readMessage];
   }
 
   async sendMessage(input: SendMessageInput, signal: AbortSignal): Promise<SendReceipt> {
@@ -164,6 +185,10 @@ class FakeServices implements WebMcpServices {
   async undoBatch(_batchId: string, signal: AbortSignal): Promise<OperationBatch> {
     this.lastSignal = signal;
     return { ...batch, status: "undone" };
+  }
+
+  showMailboxView(view: WebMcpMailboxView): void {
+    this.mailboxViews.push(view);
   }
 }
 
@@ -258,10 +283,36 @@ describe("Postreeve WebMCP", () => {
     ).toEqual([messageDetail]);
     expect(
       await modelContext.tool("search_messages").execute(
-        { accountId: account.id, mailbox: "INBOX", query: "subject" },
+        {
+          accountId: account.id,
+          mailbox: "INBOX",
+          query: "subject",
+          filter: "unread",
+          sort: "oldest",
+        },
         executeOptions(),
       ),
-    ).toEqual([message]);
+    ).toEqual([olderUnreadMessage, message]);
+    expect(services.mailboxViews).toEqual([
+      {
+        accountId: account.id,
+        mailbox: "INBOX",
+        limit: 50,
+        filter: "all",
+        sort: "newest",
+        query: "",
+        messages: [message],
+      },
+      {
+        accountId: account.id,
+        mailbox: "INBOX",
+        limit: 50,
+        filter: "unread",
+        sort: "oldest",
+        query: "subject",
+        messages: [message, olderUnreadMessage, readMessage],
+      },
+    ]);
     expect(
       await modelContext.tool("send_message").execute(sendToolInput, executeOptions()),
     ).toEqual(receipt);
