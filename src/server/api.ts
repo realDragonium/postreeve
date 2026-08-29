@@ -5,11 +5,14 @@ import {
   accountIdSchema,
   batchIdSchema,
   createAccountInputSchema,
+  createFolderInputSchema,
   createProposalInputSchema,
+  deleteFolderInputSchema,
   directActionInputSchema,
   listMessagesInputSchema,
   messageRefSchema,
   proposalIdSchema,
+  renameFolderInputSchema,
   sendMessageInputSchema,
   updateProposalInputSchema,
   updateAccountInputSchema,
@@ -84,6 +87,33 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth) 
     })
     .get("/accounts/:accountId/folders", zValidator("param", accountParamsSchema), async (context) =>
       context.json(await service.listFolders(context.req.valid("param").accountId)))
+    .post(
+      "/accounts/:accountId/folders",
+      zValidator("param", accountParamsSchema),
+      zValidator("json", createFolderInputSchema.omit({ accountId: true })),
+      async (context) => context.json(await service.createFolder({
+        accountId: context.req.valid("param").accountId,
+        ...context.req.valid("json"),
+      }), 201),
+    )
+    .put(
+      "/accounts/:accountId/folders",
+      zValidator("param", accountParamsSchema),
+      zValidator("json", renameFolderInputSchema.omit({ accountId: true })),
+      async (context) => context.json(await service.renameFolder({
+        accountId: context.req.valid("param").accountId,
+        ...context.req.valid("json"),
+      })),
+    )
+    .delete(
+      "/accounts/:accountId/folders",
+      zValidator("param", accountParamsSchema),
+      zValidator("json", deleteFolderInputSchema.omit({ accountId: true })),
+      async (context) => context.json(await service.deleteFolder({
+        accountId: context.req.valid("param").accountId,
+        ...context.req.valid("json"),
+      })),
+    )
     .get(
       "/accounts/:accountId/messages",
       zValidator("param", accountParamsSchema),

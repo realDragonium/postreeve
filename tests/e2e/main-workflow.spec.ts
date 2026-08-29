@@ -1,8 +1,11 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 import {
+  createFolderInputSchema,
   createAccountInputSchema,
+  deleteFolderInputSchema,
   directActionInputSchema,
   messageSummarySchema,
+  renameFolderInputSchema,
   sendMessageInputSchema,
   type Account,
   type Folder,
@@ -84,6 +87,7 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   let messageRequests = 0;
   let batch: OperationBatch | null = null;
   let lastMessageQuery = "";
+  let liveFolders = structuredClone(folders);
 
   await installWebMcpHarness(page);
 
@@ -95,7 +99,24 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
     if (method === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
     if (method === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) {
       folderRequests += 1;
-      return json(route, folders);
+      return json(route, liveFolders);
+    }
+    if (method === "POST" && url.pathname === `/api/accounts/${account.id}/folders`) {
+      const input = createFolderInputSchema.parse({ accountId: account.id, ...request.postDataJSON() });
+      liveFolders = [...liveFolders, { path: input.name, name: input.name, specialUse: null, unread: 0, total: 0 }];
+      return json(route, liveFolders, 201);
+    }
+    if (method === "PUT" && url.pathname === `/api/accounts/${account.id}/folders`) {
+      const input = renameFolderInputSchema.parse({ accountId: account.id, ...request.postDataJSON() });
+      liveFolders = liveFolders.map((folder) => folder.path === input.path
+        ? { ...folder, path: input.name, name: input.name }
+        : folder);
+      return json(route, liveFolders);
+    }
+    if (method === "DELETE" && url.pathname === `/api/accounts/${account.id}/folders`) {
+      const input = deleteFolderInputSchema.parse({ accountId: account.id, ...request.postDataJSON() });
+      liveFolders = liveFolders.filter(({ path }) => path !== input.path);
+      return json(route, liveFolders);
     }
     if (method === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) {
       messageRequests += 1;
@@ -172,11 +193,29 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await expect(page.getByLabel("Sort messages")).toHaveValue("oldest");
   await expect(page.getByText("Results for “quarterly planning”")).toBeVisible();
   await expect(page.getByRole("status")).toHaveText("WebMCP updated the visible mailbox view.");
+  await page.evaluate(async () => {
+    const harness: unknown = Reflect.get(window, "postreeveWebMcpHarness");
+    if (typeof harness !== "object" || harness === null) throw new Error("Missing WebMCP harness");
+    const execute: unknown = Reflect.get(harness, "execute");
+    if (typeof execute !== "function") throw new Error("Missing WebMCP executor");
+    await execute("create_folder", { accountId: "account-work", name: "Agent folder" });
+  });
+  await expect(page.getByRole("button", { name: /Agent folder/ })).toBeVisible();
   await page.getByRole("button", { name: "Identities", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Identities" })).toBeVisible();
   await page.getByRole("button", { name: "Close identities panel" }).click();
   await page.getByRole("button", { name: "Manage folders" }).click();
   await expect(page.getByRole("heading", { name: "Manage folders" })).toBeVisible();
+  await page.getByLabel("New folder name").fill("Receipts");
+  await page.getByRole("button", { name: "Create folder" }).click();
+  await expect(page.getByRole("article", { name: "Receipts" })).toBeVisible();
+  await page.getByRole("article", { name: "Receipts" }).getByRole("button", { name: "Rename" }).click();
+  await page.getByLabel("Rename Receipts").fill("Keep");
+  await page.getByRole("button", { name: "Save name" }).click();
+  await expect(page.getByRole("article", { name: "Keep" })).toBeVisible();
+  await page.getByRole("article", { name: "Keep" }).getByRole("button", { name: "Delete" }).click();
+  await page.getByRole("button", { name: "Delete Keep" }).click();
+  await expect(page.getByRole("article", { name: "Keep" })).toHaveCount(0);
   await page.getByRole("button", { name: "Close folder panel" }).click();
   const initialFolderRequests = folderRequests;
   await page.clock.fastForward(15_000);

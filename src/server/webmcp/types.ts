@@ -1,5 +1,7 @@
 import type {
   Account,
+  CreateFolderInput,
+  DeleteFolderInput,
   DirectActionInput,
   Folder,
   ListMessagesInput,
@@ -7,6 +9,7 @@ import type {
   MessageRef,
   MessageSummary,
   OperationBatch,
+  RenameFolderInput,
   SendMessageInput,
   SendReceipt,
 } from "../../shared/contracts.ts";
@@ -14,6 +17,9 @@ import type {
 export interface WebMcpServices {
   listAccounts(signal: AbortSignal): Promise<readonly Account[]>;
   listFolders(accountId: string, signal: AbortSignal): Promise<readonly Folder[]>;
+  createFolder(input: CreateFolderInput, signal: AbortSignal): Promise<readonly Folder[]>;
+  renameFolder(input: RenameFolderInput, signal: AbortSignal): Promise<readonly Folder[]>;
+  deleteFolder(input: DeleteFolderInput, signal: AbortSignal): Promise<readonly Folder[]>;
   listMessages(input: WebMcpListMessagesInput, signal: AbortSignal): Promise<readonly MessageSummary[]>;
   readMessages(messages: readonly MessageRef[], signal: AbortSignal): Promise<readonly MessageDetail[]>;
   searchMessages(input: WebMcpSearchMessagesInput, signal: AbortSignal): Promise<readonly MessageSummary[]>;

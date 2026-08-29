@@ -45,6 +45,23 @@ describe("Postreeve core workflow", () => {
     store.close();
   });
 
+  test("creates, renames, and deletes custom folders while protecting system folders", async () => {
+    const { store, service, account } = await createTestHarness();
+
+    const created = await service.createFolder({ accountId: account.id, name: "Projects" });
+    expect(created.some(({ path, specialUse }) => path === "Projects" && specialUse === null)).toBe(true);
+
+    const renamed = await service.renameFolder({ accountId: account.id, path: "Projects", name: "Clients" });
+    expect(renamed.some(({ path }) => path === "Projects")).toBe(false);
+    expect(renamed.some(({ path }) => path === "Clients")).toBe(true);
+
+    await expect(service.renameFolder({ accountId: account.id, path: "INBOX", name: "Incoming" }))
+      .rejects.toThrow("System and special-use folders cannot be changed");
+    const deleted = await service.deleteFolder({ accountId: account.id, path: "Clients" });
+    expect(deleted.some(({ path }) => path === "Clients")).toBe(false);
+    store.close();
+  });
+
   test("keeps proposal edits separate from human approval", async () => {
     const { store, service, account, messages } = await createTestHarness();
     const proposal = await service.createProposal({

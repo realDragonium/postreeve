@@ -3,12 +3,15 @@ import { z } from "zod";
 import {
   accountSchema,
   batchIdSchema,
+  createFolderInputSchema,
+  deleteFolderInputSchema,
   folderSchema,
   listMessagesInputSchema,
   messageDetailSchema,
   messageRefSchema,
   messageSummarySchema,
   operationBatchSchema,
+  renameFolderInputSchema,
   sendMessageInputSchema,
   sendReceiptSchema,
 } from "../../shared/contracts.ts";
@@ -22,6 +25,9 @@ import type {
 
 const noInputSchema = z.object({}).strict();
 const listFoldersInputSchema = z.object({ accountId: z.string().min(1) }).strict();
+const createFolderToolInputSchema = createFolderInputSchema.strict();
+const renameFolderToolInputSchema = renameFolderInputSchema.strict();
+const deleteFolderToolInputSchema = deleteFolderInputSchema.strict();
 const messageFilterSchema = z.enum(["all", "unread", "flagged"]).default("all");
 const messageSortSchema = z.enum(["newest", "oldest", "sender", "subject"]).default("newest");
 const strictListMessagesInputSchema = listMessagesInputSchema
@@ -66,6 +72,9 @@ const undoBatchInputSchema = z.object({ batchId: batchIdSchema }).strict();
 export const webMcpInputSchemas = {
   list_accounts: noInputSchema,
   list_folders: listFoldersInputSchema,
+  create_folder: createFolderToolInputSchema,
+  rename_folder: renameFolderToolInputSchema,
+  delete_folder: deleteFolderToolInputSchema,
   list_messages: strictListMessagesInputSchema,
   read_messages: readMessagesInputSchema,
   search_messages: searchMessagesInputSchema,
@@ -142,6 +151,39 @@ export function createPostreeveWebMcpTools(services: WebMcpServices): readonly W
       execute: async (input, { signal }) => {
         const { accountId } = listFoldersInputSchema.parse(input);
         return z.array(folderSchema).parse(await services.listFolders(accountId, signal));
+      },
+    },
+    {
+      name: "create_folder",
+      title: "Create mail folder",
+      description: "Create a custom folder or Gmail label and update the visible Postreeve folder list.",
+      inputSchema: inputJsonSchema(createFolderToolInputSchema),
+      annotations: mutatingAnnotations,
+      execute: async (input, { signal }) => {
+        const parsed = createFolderToolInputSchema.parse(input);
+        return z.array(folderSchema).parse(await services.createFolder(parsed, signal));
+      },
+    },
+    {
+      name: "rename_folder",
+      title: "Rename mail folder",
+      description: "Rename a custom folder or Gmail label and update the visible Postreeve folder list. System and special-use folders cannot be renamed.",
+      inputSchema: inputJsonSchema(renameFolderToolInputSchema),
+      annotations: mutatingAnnotations,
+      execute: async (input, { signal }) => {
+        const parsed = renameFolderToolInputSchema.parse(input);
+        return z.array(folderSchema).parse(await services.renameFolder(parsed, signal));
+      },
+    },
+    {
+      name: "delete_folder",
+      title: "Delete mail folder",
+      description: "Delete a custom folder or Gmail label only after the user explicitly approves the exact account and folder. IMAP folders must be empty. Deleting a Gmail label does not delete its messages. System and special-use folders cannot be deleted.",
+      inputSchema: inputJsonSchema(deleteFolderToolInputSchema),
+      annotations: mutatingAnnotations,
+      execute: async (input, { signal }) => {
+        const parsed = deleteFolderToolInputSchema.parse(input);
+        return z.array(folderSchema).parse(await services.deleteFolder(parsed, signal));
       },
     },
     {

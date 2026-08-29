@@ -135,6 +135,54 @@ describe("Gmail compatibility", () => {
     expect(oauth.complete(`http://127.0.0.1:3000/api/oauth/google/callback?code=replay&state=${state}`))
       .rejects.toThrow("missing or expired");
   });
+
+  test("creates, renames, and deletes user labels while protecting Gmail system labels", async () => {
+    const requests: Array<{ path: string; method: string; body: string }> = [];
+    let userLabel = { id: "Label_1", name: "Projects", type: "user" as const };
+    const request: HttpFetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      const method = init?.method ?? "GET";
+      const body = typeof init?.body === "string" ? init.body : "";
+      if (url.href === "https://oauth2.googleapis.com/token") {
+        return json({ access_token: "short-lived-access-token", expires_in: 3600 });
+      }
+      requests.push({ path: url.pathname, method, body });
+      if (url.pathname.endsWith("/labels") && method === "POST") {
+        const inputBody = JSON.parse(body) as { name: string };
+        userLabel = { id: "Label_2", name: inputBody.name, type: "user" };
+        return json(userLabel);
+      }
+      if (url.pathname.endsWith(`/labels/${userLabel.id}`) && method === "GET") return json(userLabel);
+      if (url.pathname.endsWith(`/labels/${userLabel.id}`) && method === "PATCH") {
+        const inputBody = JSON.parse(body) as { name: string };
+        userLabel = { ...userLabel, name: inputBody.name };
+        return json(userLabel);
+      }
+      if (url.pathname.endsWith(`/labels/${userLabel.id}`) && method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      if (url.pathname.endsWith("/labels/INBOX")) {
+        return json({ id: "INBOX", name: "INBOX", type: "system" });
+      }
+      return new Response(null, { status: 404 });
+    };
+    const client = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "stored-refresh-token" },
+      clientId: "desktop-client-id",
+      fetch: request,
+    });
+
+    await client.createFolder(account.id, "Receipts");
+    await client.renameFolder(account.id, "Label_2", "Keep");
+    await expect(client.deleteFolder(account.id, "INBOX"))
+      .rejects.toThrow("System Gmail labels cannot be changed");
+    await client.deleteFolder(account.id, "Label_2");
+
+    expect(requests.filter(({ method }) => method === "POST")[0]?.body).toContain('"name":"Receipts"');
+    expect(requests.some(({ method, body }) => method === "PATCH" && body.includes('"name":"Keep"'))).toBe(true);
+    expect(requests.some(({ method }) => method === "DELETE")).toBe(true);
+  });
 });
 
 function json(value: unknown): Response {

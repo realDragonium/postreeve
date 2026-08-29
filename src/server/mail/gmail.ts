@@ -103,6 +103,33 @@ export class GmailMailClient implements MailProvider, MailSender {
     ].sort(folderOrder);
   }
 
+  async createFolder(accountId: string, name: string): Promise<void> {
+    this.#assertAccount(accountId);
+    await this.#request("/labels", labelSchema, {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        labelListVisibility: "labelShow",
+        messageListVisibility: "show",
+      }),
+    });
+  }
+
+  async renameFolder(accountId: string, path: string, name: string): Promise<void> {
+    this.#assertAccount(accountId);
+    await this.#userLabel(path);
+    await this.#request(`/labels/${encodeURIComponent(path)}`, labelSchema, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    });
+  }
+
+  async deleteFolder(accountId: string, path: string): Promise<void> {
+    this.#assertAccount(accountId);
+    await this.#userLabel(path);
+    await this.#request(`/labels/${encodeURIComponent(path)}`, z.null(), { method: "DELETE" });
+  }
+
   async listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]> {
     this.#assertAccount(accountId);
     return this.#list(mailbox, "", limit);
@@ -250,6 +277,13 @@ export class GmailMailClient implements MailProvider, MailSender {
 
   async #getMinimal(id: string) {
     return this.#request(`/messages/${encodeURIComponent(id)}?format=minimal`, gmailMessageSchema);
+  }
+
+  async #userLabel(path: string) {
+    if (path === GMAIL_ARCHIVE) throw new Error("System and synthetic folders cannot be changed");
+    const label = await this.#request(`/labels/${encodeURIComponent(path)}`, labelSchema);
+    if (label.type !== "user") throw new Error("System Gmail labels cannot be changed");
+    return label;
   }
 
   async #modify(id: string, addLabelIds: string[], removeLabelIds: string[]) {

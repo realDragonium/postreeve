@@ -25,6 +25,33 @@ describe("Hono RPC API", () => {
     store.close();
   });
 
+  test("manages custom folders through typed routes", async () => {
+    const { store, service } = await createTestHarness();
+    const app = createApi(service);
+    const client = hc<AppType>("http://postreeve.local", { fetch: app.request });
+    const account = accountSchema.array().parse(await (await client.api.accounts.$get()).json())[0]!;
+
+    const createdResponse = await client.api.accounts[":accountId"].folders.$post({
+      param: { accountId: account.id },
+      json: { name: "Projects" },
+    });
+    expect(createdResponse.status).toBe(201);
+    expect(folderSchema.array().parse(await createdResponse.json()).some(({ path }) => path === "Projects")).toBe(true);
+
+    const renamedResponse = await client.api.accounts[":accountId"].folders.$put({
+      param: { accountId: account.id },
+      json: { path: "Projects", name: "Clients" },
+    });
+    expect(folderSchema.array().parse(await renamedResponse.json()).some(({ path }) => path === "Clients")).toBe(true);
+
+    const deletedResponse = await client.api.accounts[":accountId"].folders.$delete({
+      param: { accountId: account.id },
+      json: { path: "Clients" },
+    });
+    expect(folderSchema.array().parse(await deletedResponse.json()).some(({ path }) => path === "Clients")).toBe(false);
+    store.close();
+  });
+
   test("keeps approval on its explicit human-facing endpoint", async () => {
     const { store, service } = await createTestHarness();
     const app = createApi(service);

@@ -2,7 +2,9 @@ import type {
   Account,
   AccountSettings,
   CreateAccountInput,
+  CreateFolderInput,
   CreateProposalInput,
+  DeleteFolderInput,
   DirectActionInput,
   Folder,
   ListMessagesInput,
@@ -12,14 +14,18 @@ import type {
   OperationBatch,
   OperationResult,
   Proposal,
+  RenameFolderInput,
   SendMessageInput,
   SendReceipt,
   UpdateProposalInput,
   UpdateAccountInput,
 } from "../../shared/contracts";
 import {
+  createFolderInputSchema,
   createProposalInputSchema,
+  deleteFolderInputSchema,
   directActionInputSchema,
+  renameFolderInputSchema,
   sendMessageInputSchema,
   updateProposalInputSchema,
 } from "../../shared/contracts";
@@ -198,6 +204,30 @@ export class PostreeveService {
   async listFolders(accountId: string): Promise<Folder[]> {
     await this.#requireAccount(accountId);
     return this.#providers.forAccount(accountId).listFolders(accountId);
+  }
+
+  async createFolder(rawInput: CreateFolderInput): Promise<Folder[]> {
+    const input = createFolderInputSchema.parse(rawInput);
+    await this.#requireAccount(input.accountId);
+    const provider = this.#providers.forAccount(input.accountId);
+    await provider.createFolder(input.accountId, input.name);
+    return provider.listFolders(input.accountId);
+  }
+
+  async renameFolder(rawInput: RenameFolderInput): Promise<Folder[]> {
+    const input = renameFolderInputSchema.parse(rawInput);
+    await this.#requireAccount(input.accountId);
+    const provider = this.#providers.forAccount(input.accountId);
+    await provider.renameFolder(input.accountId, input.path, input.name);
+    return provider.listFolders(input.accountId);
+  }
+
+  async deleteFolder(rawInput: DeleteFolderInput): Promise<Folder[]> {
+    const input = deleteFolderInputSchema.parse(rawInput);
+    await this.#requireAccount(input.accountId);
+    const provider = this.#providers.forAccount(input.accountId);
+    await provider.deleteFolder(input.accountId, input.path);
+    return provider.listFolders(input.accountId);
   }
 
   async listMessages(input: ListMessagesInput): Promise<MessageSummary[]> {

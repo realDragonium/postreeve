@@ -27,6 +27,25 @@ export const folderSchema = z.object({
   total: z.number().int().nonnegative(),
 });
 
+const folderNameSchema = z.string().trim().min(1).max(200);
+const folderPathSchema = z.string().min(1).max(1_000);
+
+export const createFolderInputSchema = z.object({
+  accountId: accountIdSchema,
+  name: folderNameSchema,
+});
+
+export const renameFolderInputSchema = z.object({
+  accountId: accountIdSchema,
+  path: folderPathSchema,
+  name: folderNameSchema,
+});
+
+export const deleteFolderInputSchema = z.object({
+  accountId: accountIdSchema,
+  path: folderPathSchema,
+});
+
 export const messageRefSchema = z.object({
   accountId: accountIdSchema,
   mailbox: z.string().min(1),
@@ -204,6 +223,9 @@ export const updateProposalInputSchema = z.object({
 
 export type Account = z.infer<typeof accountSchema>;
 export type Folder = z.infer<typeof folderSchema>;
+export type CreateFolderInput = z.infer<typeof createFolderInputSchema>;
+export type RenameFolderInput = z.infer<typeof renameFolderInputSchema>;
+export type DeleteFolderInput = z.infer<typeof deleteFolderInputSchema>;
 export type MessageRef = z.infer<typeof messageRefSchema>;
 export type MessageSummary = z.infer<typeof messageSummarySchema>;
 export type MessageDetail = z.infer<typeof messageDetailSchema>;

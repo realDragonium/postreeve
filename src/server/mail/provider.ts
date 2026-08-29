@@ -16,6 +16,9 @@ export interface AppliedMailAction {
 export interface MailProvider {
   verifyConnection(): Promise<void>;
   listFolders(accountId: string): Promise<Folder[]>;
+  createFolder(accountId: string, name: string): Promise<void>;
+  renameFolder(accountId: string, path: string, name: string): Promise<void>;
+  deleteFolder(accountId: string, path: string): Promise<void>;
   listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]>;
   readMessages(accountId: string, references: MessageRef[]): Promise<MessageDetail[]>;
   searchMessages(accountId: string, mailbox: string, query: string, limit: number): Promise<MessageSummary[]>;

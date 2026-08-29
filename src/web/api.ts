@@ -13,7 +13,9 @@ import {
   type Account,
   type AccountSettings,
   type CreateAccountInput,
+  type CreateFolderInput,
   type CreateProposalInput,
+  type DeleteFolderInput,
   type DirectActionInput,
   type Folder,
   type MessageDetail,
@@ -21,6 +23,7 @@ import {
   type MessageSummary,
   type OperationBatch,
   type Proposal,
+  type RenameFolderInput,
   type SendMessageInput,
   type SendReceipt,
   type UpdateProposalInput,
@@ -99,6 +102,24 @@ export const api = {
     }),
   folders: (accountId: string, signal?: AbortSignal): Promise<Folder[]> =>
     request(`/accounts/${encodeURIComponent(accountId)}/folders`, folderSchema.array(), withSignal(signal)),
+  createFolder: (input: CreateFolderInput, signal?: AbortSignal): Promise<Folder[]> =>
+    request(`/accounts/${encodeURIComponent(input.accountId)}/folders`, folderSchema.array(), {
+      method: "POST",
+      ...jsonBody({ name: input.name }),
+      ...withSignal(signal),
+    }),
+  renameFolder: (input: RenameFolderInput, signal?: AbortSignal): Promise<Folder[]> =>
+    request(`/accounts/${encodeURIComponent(input.accountId)}/folders`, folderSchema.array(), {
+      method: "PUT",
+      ...jsonBody({ path: input.path, name: input.name }),
+      ...withSignal(signal),
+    }),
+  deleteFolder: (input: DeleteFolderInput, signal?: AbortSignal): Promise<Folder[]> =>
+    request(`/accounts/${encodeURIComponent(input.accountId)}/folders`, folderSchema.array(), {
+      method: "DELETE",
+      ...jsonBody({ path: input.path }),
+      ...withSignal(signal),
+    }),
   messages: (accountId: string, mailbox: string, query: string, limit = 50, signal?: AbortSignal): Promise<MessageSummary[]> => {
     const params = new URLSearchParams({ mailbox });
     if (query.trim()) params.set("query", query.trim());

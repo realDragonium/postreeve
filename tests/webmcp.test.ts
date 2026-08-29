@@ -2,12 +2,15 @@ import { describe, expect, test } from "bun:test";
 
 import type {
   Account,
+  CreateFolderInput,
+  DeleteFolderInput,
   DirectActionInput,
   Folder,
   MessageDetail,
   MessageRef,
   MessageSummary,
   OperationBatch,
+  RenameFolderInput,
   SendMessageInput,
   SendReceipt,
 } from "../src/shared/contracts.ts";
@@ -130,6 +133,9 @@ const batch: OperationBatch = {
 };
 
 class FakeServices implements WebMcpServices {
+  readonly createFolderCalls: CreateFolderInput[] = [];
+  readonly renameFolderCalls: RenameFolderInput[] = [];
+  readonly deleteFolderCalls: DeleteFolderInput[] = [];
   readonly sendCalls: SendMessageInput[] = [];
   readonly directActionCalls: DirectActionInput[] = [];
   readonly activityCalls: string[] = [];
@@ -143,6 +149,24 @@ class FakeServices implements WebMcpServices {
 
   async listFolders(_accountId: string, signal: AbortSignal): Promise<readonly Folder[]> {
     this.lastSignal = signal;
+    return [folder];
+  }
+
+  async createFolder(input: CreateFolderInput, signal: AbortSignal): Promise<readonly Folder[]> {
+    this.lastSignal = signal;
+    this.createFolderCalls.push(input);
+    return [folder];
+  }
+
+  async renameFolder(input: RenameFolderInput, signal: AbortSignal): Promise<readonly Folder[]> {
+    this.lastSignal = signal;
+    this.renameFolderCalls.push(input);
+    return [folder];
+  }
+
+  async deleteFolder(input: DeleteFolderInput, signal: AbortSignal): Promise<readonly Folder[]> {
+    this.lastSignal = signal;
+    this.deleteFolderCalls.push(input);
     return [folder];
   }
 
@@ -224,6 +248,9 @@ describe("Postreeve WebMCP", () => {
     const expectedNames = [
       "list_accounts",
       "list_folders",
+      "create_folder",
+      "rename_folder",
+      "delete_folder",
       "list_messages",
       "read_messages",
       "search_messages",
@@ -272,6 +299,27 @@ describe("Postreeve WebMCP", () => {
     expect(
       await modelContext.tool("list_folders").execute({ accountId: account.id }, executeOptions()),
     ).toEqual([folder]);
+    expect(
+      await modelContext.tool("create_folder").execute(
+        { accountId: account.id, name: "Projects" },
+        executeOptions(),
+      ),
+    ).toEqual([folder]);
+    expect(
+      await modelContext.tool("rename_folder").execute(
+        { accountId: account.id, path: "Projects", name: "Clients" },
+        executeOptions(),
+      ),
+    ).toEqual([folder]);
+    expect(
+      await modelContext.tool("delete_folder").execute(
+        { accountId: account.id, path: "Clients" },
+        executeOptions(),
+      ),
+    ).toEqual([folder]);
+    expect(services.createFolderCalls).toEqual([{ accountId: account.id, name: "Projects" }]);
+    expect(services.renameFolderCalls).toEqual([{ accountId: account.id, path: "Projects", name: "Clients" }]);
+    expect(services.deleteFolderCalls).toEqual([{ accountId: account.id, path: "Clients" }]);
     expect(
       await modelContext.tool("list_messages").execute(
         { accountId: account.id, mailbox: "INBOX" },

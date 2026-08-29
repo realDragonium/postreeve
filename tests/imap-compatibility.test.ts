@@ -23,8 +23,8 @@ import {
 import type { MessageRef } from "../src/shared/contracts";
 
 interface StoredMailbox {
-  readonly path: string;
-  readonly name: string;
+  path: string;
+  name: string;
   readonly uidValidity: bigint;
   readonly specialUse?: string;
   readonly flags?: Set<string>;
@@ -106,6 +106,27 @@ describe("Bun IMAP compatibility", () => {
       { path: "Bin", name: "Bin", specialUse: "trash", unread: 0, total: 0 },
     ]);
     expect(provider.listFolders("account-b")).rejects.toThrow("cannot access account account-b");
+  });
+
+  test("manages custom folders without changing special-use mailboxes", async () => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+
+    await provider.createFolder(config.accountId, "Projects/Active");
+    await provider.renameFolder(config.accountId, "Projects/Active", "Current");
+    expect(state.mailboxes.has("Projects/Active")).toBe(false);
+    expect(state.mailboxes.has("Projects/Current")).toBe(true);
+    await expect(provider.renameFolder(config.accountId, "INBOX", "Incoming"))
+      .rejects.toThrow("System and special-use folders cannot be changed");
+
+    const custom = state.mailboxes.get("Projects/Current");
+    if (!custom) throw new Error("Expected custom mailbox");
+    custom.messages.set(1, fakeMessage(1, 1n, "Kept mail", "Keep me", new Set()));
+    await expect(provider.deleteFolder(config.accountId, "Projects/Current"))
+      .rejects.toThrow("Move every message out");
+    custom.messages.clear();
+    await provider.deleteFolder(config.accountId, "Projects/Current");
+    expect(state.mailboxes.has("Projects/Current")).toBe(false);
   });
 
   test("uses server-side search and returns the newest matching UIDs", async () => {
@@ -267,6 +288,37 @@ class FakeImapClient implements ImapClient {
         uidValidity: mailbox.uidValidity,
       },
     }));
+  }
+
+  async mailboxCreate(path: string | string[]): Promise<unknown> {
+    const normalized = Array.isArray(path) ? path.join("/") : path;
+    if (this.#state.mailboxes.has(normalized)) throw new Error(`Mailbox ${normalized} already exists`);
+    this.#state.mailboxes.set(normalized, {
+      path: normalized,
+      name: normalized.split("/").at(-1) ?? normalized,
+      uidValidity: BigInt(1_000 + this.#state.mailboxes.size),
+      nextUid: 1,
+      messages: new Map(),
+    });
+    return {};
+  }
+
+  async mailboxRename(path: string | string[], newPath: string | string[]): Promise<unknown> {
+    const mailbox = this.#mailbox(path);
+    const normalized = Array.isArray(newPath) ? newPath.join("/") : newPath;
+    if (this.#state.mailboxes.has(normalized)) throw new Error(`Mailbox ${normalized} already exists`);
+    this.#state.mailboxes.delete(mailbox.path);
+    mailbox.path = normalized;
+    mailbox.name = normalized.split("/").at(-1) ?? normalized;
+    this.#state.mailboxes.set(normalized, mailbox);
+    return {};
+  }
+
+  async mailboxDelete(path: string | string[]): Promise<unknown> {
+    const mailbox = this.#mailbox(path);
+    this.#state.mailboxes.delete(mailbox.path);
+    if (this.#selected === mailbox) this.#selected = undefined;
+    return {};
   }
 
   async mailboxOpen(path: string | string[], _options?: MailboxOpenOptions): Promise<MailboxObject> {

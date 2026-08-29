@@ -259,11 +259,25 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .draft-open strong, .draft-open span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .draft-open strong { font-family: Georgia, serif; font-size: 13px; }.draft-open span { color: #56635e; font-size: 10px; }.draft-open small { color: #8a938f; font-size: 9px; text-transform: capitalize; }
 .folder-management-list, .identity-list { display: grid; gap: 7px; }
-.folder-management-list > div, .identity-list > div { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 9px; padding: 10px; border: 1px solid var(--soft-line); border-radius: 8px; }
-.folder-management-list > div > .icon { color: var(--green); }
-.folder-management-list span, .identity-list span:not(.avatar) { min-width: 0; display: grid; gap: 3px; }
+.folder-management-list > article, .identity-list > div { border: 1px solid var(--soft-line); border-radius: 9px; background: white; }
+.folder-management-list > article.editing { border-color: #c8ddd2; background: #fbfdfb; }
+.folder-management-summary { display: grid; grid-template-columns: 28px minmax(0, 1fr) auto; align-items: center; gap: 9px; padding: 10px; }
+.identity-list > div { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 9px; padding: 10px; }
+.folder-management-summary > .icon { color: var(--green); }
+.folder-management-summary > span, .identity-list span:not(.avatar) { min-width: 0; display: grid; gap: 3px; }
 .folder-management-list strong, .identity-list strong { font-size: 11px; }.folder-management-list small, .identity-list small { color: var(--muted); font-size: 9px; }
-.folder-management-list button { min-height: 27px; border: 1px solid var(--line); border-radius: 6px; background: white; font-size: 9px; }
+.folder-row-actions { display: flex; gap: 5px; }
+.folder-row-actions button { min-height: 27px; padding: 0 7px; border: 1px solid var(--line); border-radius: 6px; color: #53605b; background: white; font-size: 9px; font-weight: 700; }
+.folder-row-actions .folder-delete-button { color: #91443d; }
+.folder-kind { padding: 4px 7px; border-radius: 999px; color: #78827d; background: #f0f2f0; font-size: 8px; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
+.folder-inline-form, .folder-delete-confirm { padding: 11px; border-top: 1px solid var(--soft-line); }
+.folder-inline-form .field { margin-bottom: 9px; }
+.folder-inline-form > div, .folder-delete-confirm > div { display: flex; justify-content: flex-end; gap: 7px; }
+.folder-inline-form .secondary-button, .folder-inline-form .primary-button, .folder-delete-confirm .secondary-button, .folder-delete-confirm .danger-button { min-height: 32px; font-size: 10px; }
+.folder-delete-confirm { color: #65423e; background: #fffafa; }
+.folder-delete-confirm p { margin: 4px 0 10px; color: #806964; font-size: 9px; line-height: 1.45; }
+.folder-create-form { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
+.folder-create-form .primary-button { width: 100%; }
 .planned-folder, .identity-form { margin-top: 20px; padding-top: 18px; border-top: 1px solid var(--line); }
 .folder-plan { display: grid; gap: 6px; margin: 18px 0; }
 .folder-plan > strong { font-size: 10px; }.folder-plan > span { display: grid; grid-template-columns: 20px 1fr 28px; align-items: center; padding: 7px; border-radius: 7px; color: #4f6059; background: #f4f7f5; font-size: 10px; }

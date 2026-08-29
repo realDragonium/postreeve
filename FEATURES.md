@@ -38,10 +38,10 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Manually refresh the mailbox | Complete | Equivalent | Each WebMCP list, read, or search call requests current provider data. |
 | Detect changed folder counts in the open UI | Complete | Equivalent | The UI polls folder metadata; an agent can call `list_folders` again. |
 | Load more messages | Complete, up to 100 | Complete, up to 100 | `list_messages.limit` |
-| Create provider folders | Partial | Not available | The UI can only plan a folder name locally. |
-| Rename provider folders | Partial | Not available | The rename control is disabled pending provider support. |
-| Delete provider folders | Not available | Not available | No provider implementation exists. |
-| Configure special-folder mappings | Partial | Not available | The current UI is a preview and does not save changes. |
+| Create provider folders or Gmail labels | Complete | Complete | `create_folder` updates the provider and the open UI. |
+| Rename custom provider folders or Gmail labels | Complete | Complete | `rename_folder` preserves an IMAP folder's parent path and updates the open UI. |
+| Delete custom provider folders or Gmail labels | Complete | Complete | `delete_folder`; IMAP folders must be empty, while deleting a Gmail label leaves messages in their other labels. System folders are protected. |
+| Configure special-folder mappings | Not available | Not available | Postreeve currently relies on provider special-use metadata. |
 
 ## Reading, searching, and presentation
 
@@ -133,14 +133,17 @@ The following tools are discoverable only while the Postreeve page is open:
 
 1. `list_accounts`
 2. `list_folders`
-3. `list_messages`
-4. `read_messages`
-5. `search_messages`
-6. `send_message`
-7. `apply_message_actions`
-8. `list_activity`
-9. `undo_batch`
+3. `create_folder`
+4. `rename_folder`
+5. `delete_folder`
+6. `list_messages`
+7. `read_messages`
+8. `search_messages`
+9. `send_message`
+10. `apply_message_actions`
+11. `list_activity`
+12. `undo_batch`
 
-Calling `list_messages` or `search_messages` updates the open page to the same account, folder, query, filter, sort order, and message results returned to the AI.
+Calling `list_messages` or `search_messages` updates the open page to the same account, folder, query, filter, sort order, and message results returned to the AI. Calling a folder-management tool updates the open page's folder list and keeps the selected mailbox valid.
 
 The former proposal tools are absent because there is no matching completed user-facing proposal workflow in the current UI.

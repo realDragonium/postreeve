@@ -40,6 +40,9 @@ export interface ImapClient {
   logout(): Promise<void>;
   close(): void;
   list(options?: ListOptions): Promise<ListResponse[]>;
+  mailboxCreate(path: string | string[]): Promise<unknown>;
+  mailboxRename(path: string | string[], newPath: string | string[]): Promise<unknown>;
+  mailboxDelete(path: string | string[]): Promise<unknown>;
   mailboxOpen(path: string | string[], options?: MailboxOpenOptions): Promise<MailboxObject>;
   status(
     path: string | string[],
@@ -115,6 +118,33 @@ export class ImapMailProvider implements MailProvider {
           unread: mailbox.status?.unseen ?? 0,
           total: mailbox.status?.messages ?? 0,
         }));
+    });
+  }
+
+  async createFolder(accountId: string, name: string): Promise<void> {
+    this.#assertAccount(accountId);
+    await this.#withClient(async (client) => {
+      await client.mailboxCreate(name);
+    });
+  }
+
+  async renameFolder(accountId: string, path: string, name: string): Promise<void> {
+    this.#assertAccount(accountId);
+    await this.#withClient(async (client) => {
+      const mailbox = await manageableMailbox(client, path);
+      const newPath = renamedMailboxPath(mailbox, name);
+      if (newPath !== path) await client.mailboxRename(path, newPath);
+    });
+  }
+
+  async deleteFolder(accountId: string, path: string): Promise<void> {
+    this.#assertAccount(accountId);
+    await this.#withClient(async (client) => {
+      const mailbox = await manageableMailbox(client, path, true);
+      if ((mailbox.status?.messages ?? 0) > 0) {
+        throw new Error("Move every message out of this IMAP folder before deleting it");
+      }
+      await client.mailboxDelete(path);
     });
   }
 
@@ -452,6 +482,24 @@ function specialUseFor(mailbox: Pick<ListResponse, "path" | "specialUse">): Fold
     default:
       return null;
   }
+}
+
+async function manageableMailbox(
+  client: ImapClient,
+  path: string,
+  includeStatus = false,
+): Promise<ListResponse> {
+  const mailboxes = await client.list(includeStatus ? { statusQuery: { messages: true } } : undefined);
+  const mailbox = mailboxes.find((candidate) => candidate.path === path);
+  if (!mailbox || hasFlag(mailbox.flags, "\\Noselect")) throw new Error(`Folder ${path} does not exist`);
+  if (specialUseFor(mailbox) !== null) throw new Error("System and special-use folders cannot be changed");
+  return mailbox;
+}
+
+function renamedMailboxPath(mailbox: ListResponse, name: string): string {
+  if (!mailbox.delimiter) return name;
+  const separator = mailbox.path.lastIndexOf(mailbox.delimiter);
+  return separator < 0 ? name : `${mailbox.path.slice(0, separator + mailbox.delimiter.length)}${name}`;
 }
 
 function newestUids(uids: number[], limit: number): number[] {

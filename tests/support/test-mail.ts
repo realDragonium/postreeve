@@ -83,6 +83,12 @@ export async function createEmptyTestHarness(options: {
 class TestMailProvider implements MailProvider {
   readonly #accountId: string;
   readonly #messages: TestMessage[];
+  readonly #folders = new Map<string, { name: string; specialUse: Folder["specialUse"] }>([
+    ["INBOX", { name: "Inbox", specialUse: "inbox" }],
+    ["Archive", { name: "Archive", specialUse: "archive" }],
+    ["Sent", { name: "Sent", specialUse: "sent" }],
+    ["Trash", { name: "Trash", specialUse: "trash" }],
+  ]);
   readonly #verificationFailure: Error | undefined;
 
   constructor(accountId: string, verificationFailure?: Error) {
@@ -97,12 +103,38 @@ class TestMailProvider implements MailProvider {
 
   async listFolders(accountId: string): Promise<Folder[]> {
     this.#assertAccount(accountId);
-    return [
-      this.#folder("INBOX", "Inbox", "inbox"),
-      this.#folder("Archive", "Archive", "archive"),
-      this.#folder("Sent", "Sent", "sent"),
-      this.#folder("Trash", "Trash", "trash"),
-    ];
+    return [...this.#folders].map(([path, folder]) => this.#folder(path, folder.name, folder.specialUse));
+  }
+
+  async createFolder(accountId: string, name: string): Promise<void> {
+    this.#assertAccount(accountId);
+    if (this.#folders.has(name)) throw new Error(`Folder ${name} already exists`);
+    this.#folders.set(name, { name, specialUse: null });
+  }
+
+  async renameFolder(accountId: string, path: string, name: string): Promise<void> {
+    this.#assertAccount(accountId);
+    const folder = this.#folders.get(path);
+    if (!folder) throw new Error(`Folder ${path} does not exist`);
+    if (folder.specialUse !== null) throw new Error("System and special-use folders cannot be changed");
+    if (path !== name && this.#folders.has(name)) throw new Error(`Folder ${name} already exists`);
+    this.#folders.delete(path);
+    this.#folders.set(name, { name, specialUse: null });
+    for (const message of this.#messages.filter((candidate) => candidate.mailbox === path)) {
+      message.mailbox = name;
+      message.ref.mailbox = name;
+    }
+  }
+
+  async deleteFolder(accountId: string, path: string): Promise<void> {
+    this.#assertAccount(accountId);
+    const folder = this.#folders.get(path);
+    if (!folder) throw new Error(`Folder ${path} does not exist`);
+    if (folder.specialUse !== null) throw new Error("System and special-use folders cannot be changed");
+    if (this.#messages.some((message) => message.mailbox === path)) {
+      throw new Error("Move every message out of this IMAP folder before deleting it");
+    }
+    this.#folders.delete(path);
   }
 
   async listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]> {

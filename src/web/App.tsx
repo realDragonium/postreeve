@@ -15,7 +15,7 @@ import {
 } from "../shared/contracts";
 import { api } from "./api";
 import { registerPostreeveWebMcp } from "../server/webmcp/register";
-import { subscribeToWebMcpMailboxViews, webMcpServices } from "./webmcp";
+import { subscribeToWebMcpFolderLists, subscribeToWebMcpMailboxViews, webMcpServices } from "./webmcp";
 import {
   loadLocalDrafts,
   loadLocalIdentities,
@@ -206,6 +206,16 @@ function App() {
       setMobileNav(false);
       setMailNotice("WebMCP updated the visible mailbox view.");
     });
+    const unsubscribeFolders = subscribeToWebMcpFolderLists((nextAccountId, folders) => {
+      queryClient.setQueryData(["folders", nextAccountId], [...folders]);
+      setAccountId(nextAccountId);
+      setMailbox((current) => folders.some(({ path }) => path === current)
+        ? current
+        : (folders.find(({ specialUse }) => specialUse === "inbox") ?? folders[0])?.path ?? "");
+      setSelectedUid(null);
+      setSelectedMessages(new Set());
+      setMailNotice("WebMCP updated the folder list.");
+    });
     void registerPostreeveWebMcp(webMcpServices).then((registration) => {
       if (!registration) return;
       if (active) dispose = () => registration.dispose();
@@ -215,6 +225,7 @@ function App() {
       active = false;
       dispose();
       unsubscribe();
+      unsubscribeFolders();
     };
   }, [queryClient]);
 
@@ -529,7 +540,18 @@ function App() {
           onOpen={(draft) => { setPanel(null); setComposeIntent({ mode: "draft", draft }); }}
           onRemove={removeDraft}
         /> : null}
-        {panel === "folders" ? <FolderPanel folders={foldersQuery.data ?? []} onClose={() => setPanel(null)} /> : null}
+        {panel === "folders" && currentAccount ? <FolderPanel
+          account={currentAccount}
+          folders={foldersQuery.data ?? []}
+          onChange={(folders, previousPath, nextPath) => {
+            queryClient.setQueryData(["folders", currentAccount.id], folders);
+            if (previousPath && mailbox === previousPath) setMailbox(nextPath ?? "");
+            setSelectedUid(null);
+            setSelectedMessages(new Set());
+            void queryClient.invalidateQueries({ queryKey: ["messages", currentAccount.id] });
+          }}
+          onClose={() => setPanel(null)}
+        /> : null}
         {panel === "identities" && currentAccount ? <IdentityPanel
           account={currentAccount}
           identities={accountIdentities}
@@ -657,18 +679,83 @@ function DraftPanel({ drafts, onClose, onCreate, onOpen, onRemove }: {
   </>;
 }
 
-function FolderPanel({ folders, onClose }: { folders: Folder[]; onClose: () => void }) {
-  const [plannedName, setPlannedName] = useState("");
-  const [plans, setPlans] = useState<string[]>([]);
+function FolderPanel({ account, folders, onChange, onClose }: {
+  account: Account;
+  folders: Folder[];
+  onChange: (folders: Folder[], previousPath?: string, nextPath?: string) => void;
+  onClose: () => void;
+}) {
+  const [newName, setNewName] = useState("");
+  const [editingPath, setEditingPath] = useState<string | null>(null);
+  const [renameName, setRenameName] = useState("");
+  const [deletingPath, setDeletingPath] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function createFolder(event: FormEvent): Promise<void> {
+    event.preventDefault();
+    const name = newName.trim();
+    if (!name || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      onChange(await api.createFolder({ accountId: account.id, name }));
+      setNewName("");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Folder creation failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function renameFolder(event: FormEvent, path: string): Promise<void> {
+    event.preventDefault();
+    const name = renameName.trim();
+    if (!name || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await api.renameFolder({ accountId: account.id, path, name });
+      const renamed = next.find((folder) => folder.name === name);
+      onChange(next, path, renamed?.path);
+      setEditingPath(null);
+      setRenameName("");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Folder rename failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteFolder(path: string): Promise<void> {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      onChange(await api.deleteFolder({ accountId: account.id, path }), path);
+      setDeletingPath(null);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Folder deletion failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return <>
     <div className="panel-head"><div><span className="eyebrow"><Icon name="folder" /> Mailbox structure</span><h2>Manage folders</h2></div><button className="icon-button" aria-label="Close folder panel" onClick={onClose}><Icon name="x" /></button></div>
     <div className="panel-scroll">
-      <div className="capability-note"><strong>Frontend ready, backend pending</strong><p>Folder creation, renaming, and deletion need IMAP mailbox-management methods. Planning here never changes the server.</p></div>
-      <div className="folder-management-list">{folders.map((folder) => <div key={folder.path}><Icon name={folderIcon(folder)} /><span><strong>{folder.name}</strong><small>{folder.total} messages · {folder.specialUse ?? "custom"}</small></span><button disabled title="Rename needs backend support">Rename</button></div>)}</div>
-      <form className="planned-folder" onSubmit={(event) => { event.preventDefault(); const name = plannedName.trim(); if (!name) return; setPlans((current) => [...current, name]); setPlannedName(""); }}><label className="field"><span>Plan a new folder</span><input aria-label="New folder name" value={plannedName} onChange={(event) => setPlannedName(event.target.value)} placeholder="Receipts, Projects, Keep…" /></label><button className="secondary-button" disabled={!plannedName.trim()}>Add to plan</button></form>
-      {plans.length ? <div className="folder-plan"><strong>Planned folders</strong>{plans.map((name, index) => <span key={`${name}:${index}`}><Icon name="folder" />{name}<button aria-label={`Remove planned folder ${name}`} onClick={() => setPlans((current) => current.filter((_, candidate) => candidate !== index))}><Icon name="x" /></button></span>)}</div> : null}
-      <fieldset className="special-folder-map"><legend>Special folder mapping</legend>{(["sent", "drafts", "archive", "junk", "trash"] as const).map((kind) => <label key={kind}><span>{kind}</span><select aria-label={`${kind} folder`} defaultValue={folders.find((folder) => folder.specialUse === kind)?.path ?? ""}><option value="">Not selected</option>{folders.map((folder) => <option value={folder.path} key={folder.path}>{folder.name}</option>)}</select></label>)}</fieldset>
-      <p className="pending-copy">Selections are a UI preview and are not saved to the provider yet.</p>
+      <div className="capability-note"><strong>Changes apply to {account.kind === "gmail" ? "Gmail" : "the IMAP server"}</strong><p>{account.kind === "gmail" ? "Deleting a custom label removes the label but keeps its messages in Gmail." : "IMAP folders must be empty before they can be deleted. System and special-use folders stay protected."}</p></div>
+      {error ? <div className="inline-alert error">{error}</div> : null}
+      <div className="folder-management-list">{folders.map((folder) => {
+        const custom = folder.specialUse === null;
+        const canDelete = custom && (account.kind === "gmail" || folder.total === 0);
+        return <article key={folder.path} aria-label={folder.name} className={editingPath === folder.path || deletingPath === folder.path ? "editing" : ""}>
+          <div className="folder-management-summary"><Icon name={folderIcon(folder)} /><span><strong>{folder.name}</strong><small>{folder.total.toLocaleString()} messages · {custom ? "custom" : folder.specialUse}</small></span>{custom ? <div className="folder-row-actions"><button disabled={busy} onClick={() => { setEditingPath(folder.path); setRenameName(folder.name); setDeletingPath(null); setError(null); }}>Rename</button><button className="folder-delete-button" disabled={busy || !canDelete} title={!canDelete ? "Move every message out before deleting this IMAP folder" : undefined} onClick={() => { setDeletingPath(folder.path); setEditingPath(null); setError(null); }}>Delete</button></div> : <span className="folder-kind">Protected</span>}</div>
+          {editingPath === folder.path ? <form className="folder-inline-form" onSubmit={(event) => void renameFolder(event, folder.path)}><label className="field"><span>New folder name</span><input autoFocus aria-label={`Rename ${folder.name}`} value={renameName} onChange={(event) => setRenameName(event.target.value)} /></label><div><button type="button" className="secondary-button" disabled={busy} onClick={() => setEditingPath(null)}>Cancel</button><button className="primary-button" disabled={busy || !renameName.trim() || renameName.trim() === folder.name}>{busy ? "Renaming…" : "Save name"}</button></div></form> : null}
+          {deletingPath === folder.path ? <div className="folder-delete-confirm"><strong>Delete “{folder.name}”?</strong><p>{account.kind === "gmail" ? "Messages keep their other Gmail labels and remain in All Mail." : "Only an empty IMAP folder can be deleted."}</p><div><button className="secondary-button" disabled={busy} onClick={() => setDeletingPath(null)}>Cancel</button><button className="danger-button" disabled={busy} onClick={() => void deleteFolder(folder.path)}>{busy ? "Deleting…" : `Delete ${folder.name}`}</button></div></div> : null}
+        </article>;
+      })}</div>
+      <form className="folder-create-form" onSubmit={(event) => void createFolder(event)}><label className="field"><span>New custom folder</span><input aria-label="New folder name" value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="Receipts, Projects, Keep…" /></label><button className="primary-button" disabled={busy || !newName.trim()}>{busy ? "Creating…" : "Create folder"}</button></form>
     </div>
   </>;
 }
