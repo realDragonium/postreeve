@@ -3,13 +3,10 @@ import {
   createAccountInputSchema,
   directActionInputSchema,
   sendMessageInputSchema,
-  updateProposalInputSchema,
   type Account,
   type Folder,
   type MessageDetail,
   type OperationBatch,
-  type Proposal,
-  type ProposalItem,
   type SendMessageInput,
 } from "../../src/shared/contracts";
 
@@ -26,18 +23,18 @@ const folders: Folder[] = [
   { path: "Trash", name: "Trash", specialUse: "trash", unread: 0, total: 0 },
 ];
 
-const proposalItem: ProposalItem = {
-  id: "item-1",
-  message: { accountId: account.id, mailbox: "INBOX", uidValidity: "22", uid: 41, modseq: "8" },
-  subject: "Quarterly planning notes",
-  action: { type: "leave" },
-  reason: "This looks useful for the next planning session.",
+const messageRef: MessageDetail["ref"] = {
+  accountId: account.id,
+  mailbox: "INBOX",
+  uidValidity: "22",
+  uid: 41,
+  modseq: "8",
 };
 
 const message: MessageDetail = {
-  ref: proposalItem.message,
+  ref: messageRef,
   messageId: "message@example.com",
-  subject: proposalItem.subject,
+  subject: "Quarterly planning notes",
   from: [{ name: "Sam Rivera", address: "sam@example.com" }],
   to: [{ name: "Alex", address: account.email }],
   deliveredTo: ["planning-alias@example.com"],
@@ -53,21 +50,10 @@ async function json(route: Route, value: unknown, status = 200): Promise<void> {
   await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
 }
 
-test("sends and manages mail, then reviews, applies, and undoes an AI proposal", async ({ page }) => {
+test("sends and manages mail, then inspects and undoes activity", async ({ page }) => {
   let sentMessage: SendMessageInput | null = null;
   let folderRequests = 0;
   let messageRequests = 0;
-  let proposal: Proposal = {
-    id: "proposal-1",
-    accountId: account.id,
-    title: "Clean up the planning thread",
-    status: "draft",
-    items: [proposalItem],
-    createdAt: "2026-08-29T09:00:00.000Z",
-    updatedAt: "2026-08-29T09:00:00.000Z",
-    approvedAt: null,
-    batchId: null,
-  };
   let batch: OperationBatch | null = null;
 
   await page.route("**/api/**", async (route) => {
@@ -98,7 +84,7 @@ test("sends and manages mail, then reviews, applies, and undoes an AI proposal",
     }
     if (method === "POST" && url.pathname === "/api/messages/actions") {
       const input = directActionInputSchema.parse(request.postDataJSON());
-      return json(route, {
+      batch = {
         id: "direct-batch-1",
         proposalId: "direct-action-1",
         accountId: account.id,
@@ -106,47 +92,17 @@ test("sends and manages mail, then reviews, applies, and undoes an AI proposal",
         operations: input.items.map((item, index) => ({ itemId: `direct-${index}`, message: item.message, action: item.action, status: "applied", error: null })),
         createdAt: "2026-08-29T09:02:00.000Z",
         updatedAt: "2026-08-29T09:02:00.000Z",
-      });
-    }
-    if (method === "GET" && url.pathname === "/api/proposals") return json(route, [proposal]);
-    if (method === "GET" && url.pathname === "/api/batches") return json(route, batch ? [batch] : []);
-
-    if (method === "PUT" && url.pathname === `/api/proposals/${proposal.id}`) {
-      const input = updateProposalInputSchema.parse(request.postDataJSON());
-      proposal = {
-        ...proposal,
-        ...(input.title === undefined ? {} : { title: input.title }),
-        ...(input.items === undefined ? {} : { items: input.items }),
-        ...(input.status === undefined ? {} : { status: input.status }),
-        updatedAt: "2026-08-29T09:05:00.000Z",
       };
-      return json(route, proposal);
-    }
-    if (method === "POST" && url.pathname === `/api/proposals/${proposal.id}/approve`) {
-      proposal = { ...proposal, status: "approved", approvedAt: "2026-08-29T09:06:00.000Z" };
-      return json(route, proposal);
-    }
-    if (method === "POST" && url.pathname === `/api/proposals/${proposal.id}/apply`) {
-      batch = {
-        id: "batch-1",
-        proposalId: proposal.id,
-        accountId: account.id,
-        status: "applied",
-        operations: [{ itemId: proposalItem.id, message: proposalItem.message, action: { type: "move", destination: "Archive" }, status: "applied", error: null }],
-        createdAt: "2026-08-29T09:07:00.000Z",
-        updatedAt: "2026-08-29T09:07:00.000Z",
-      };
-      proposal = { ...proposal, status: "applied", batchId: batch.id };
       return json(route, batch);
     }
-    if (method === "POST" && url.pathname === "/api/batches/batch-1/undo" && batch) {
+    if (method === "GET" && url.pathname === "/api/batches") return json(route, batch ? [batch] : []);
+    if (method === "POST" && url.pathname === "/api/batches/direct-batch-1/undo" && batch) {
       batch = {
         ...batch,
         status: "undone",
         updatedAt: "2026-08-29T09:08:00.000Z",
         operations: batch.operations.map((operation) => ({ ...operation, status: "undone" })),
       };
-      proposal = { ...proposal, status: "undone" };
       return json(route, batch);
     }
     return json(route, { error: `Unhandled test route: ${method} ${url.pathname}` }, 404);
@@ -155,12 +111,21 @@ test("sends and manages mail, then reviews, applies, and undoes an AI proposal",
   await page.clock.install();
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
+  await expect(page.getByLabel("Filter messages")).toHaveValue("all");
+  await expect(page.getByLabel("Sort messages")).toHaveValue("newest");
+  await expect(page.getByRole("button", { name: "Refresh mailbox" })).toBeVisible();
+  await page.getByRole("button", { name: "Identities", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Identities" })).toBeVisible();
+  await page.getByRole("button", { name: "Close identities panel" }).click();
+  await page.getByRole("button", { name: "Manage folders" }).click();
+  await expect(page.getByRole("heading", { name: "Manage folders" })).toBeVisible();
+  await page.getByRole("button", { name: "Close folder panel" }).click();
   const initialFolderRequests = folderRequests;
   await page.clock.fastForward(15_000);
   await expect.poll(() => folderRequests).toBeGreaterThan(initialFolderRequests);
 
   await page.getByRole("button", { name: "Compose" }).click();
-  await expect(page.locator(".compose-modal").getByText("alex@example.com", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("From identity")).toHaveValue("alex@example.com");
   await page.getByLabel("To", { exact: true }).fill("jordan@example.com, taylor@example.com");
   await page.getByLabel("Cc", { exact: true }).fill("team@example.com");
   await page.getByLabel("Subject", { exact: true }).fill("Planning follow-up");
@@ -171,32 +136,33 @@ test("sends and manages mail, then reviews, applies, and undoes an AI proposal",
   await expect.poll(() => messageRequests).toBeGreaterThan(1);
   await page.getByRole("button", { name: "Done" }).click();
 
+  await page.getByRole("button", { name: "Compose" }).click();
+  await page.getByLabel("Subject", { exact: true }).fill("Locally saved idea");
+  await page.getByLabel("Message", { exact: true }).fill("Keep this as a draft for now.");
+  await page.getByRole("button", { name: "Save draft" }).click();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: /Local drafts/ }).click();
+  await expect(page.getByText("Locally saved idea", { exact: true })).toBeVisible();
+  await page.getByText("Locally saved idea", { exact: true }).click();
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("Keep this as a draft for now.");
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+
   await page.getByText("Quarterly planning notes", { exact: true }).click();
   await expect(page.getByRole("heading", { name: "Quarterly planning notes" })).toBeVisible();
   await expect(page.getByText("delivered to planning-alias@example.com", { exact: true })).toBeVisible();
   await expect(page.getByText("Remote images blocked to protect your privacy.")).toBeVisible();
   await expect(page.locator(".email-html img")).not.toHaveAttribute("src");
   await expect(page.locator(".email-html script")).toHaveCount(0);
+  await page.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect(page.getByLabel("To", { exact: true })).toHaveValue("sam@example.com");
+  await expect(page.getByLabel("Subject", { exact: true })).toHaveValue("Re: Quarterly planning notes");
+  await expect(page.getByText("Frontend ready, backend pending.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
 
   await page.getByLabel("Move destination").selectOption("Archive");
   await page.getByRole("button", { name: "Move", exact: true }).click();
   await expect(page.getByRole("status")).toHaveText("Moved to Archive.");
-  await page.getByText("Quarterly planning notes", { exact: true }).click();
-
-  await page.getByRole("button", { name: "Review proposals" }).click();
-  await expect(page.getByRole("heading", { name: "Review before anything changes" })).toBeVisible();
-  await page.getByLabel("Action for Quarterly planning notes").selectOption("move");
-  await page.getByLabel("Destination for Quarterly planning notes").selectOption("Archive");
-  await page.getByLabel("Reason for Quarterly planning notes").fill("Archive after the planning decisions are captured.");
-  await page.getByRole("button", { name: "Save changes" }).click();
-  await expect(page.locator(".status-pill", { hasText: "review" })).toBeVisible();
-
-  await page.getByRole("button", { name: "Approve proposal" }).click();
-  await expect(page.getByRole("button", { name: "Apply approved actions" })).toBeVisible();
-  await page.getByRole("button", { name: "Apply approved actions" }).click();
-  await expect(page.getByText("This proposal is complete.")).toBeVisible();
-
-  await page.getByRole("button", { name: "Close proposal panel" }).click();
   await page.getByRole("button", { name: "Activity" }).click();
   await expect(page.getByText("Move to folder", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Undo supported actions" }).click();
@@ -232,7 +198,6 @@ test("shows and selects a newly connected account without a reload", async ({ pa
       return json(route, [{ path: "INBOX", name: "Inbox", specialUse: "inbox", unread: 0, total: 0 }]);
     }
     if (method === "GET" && url.pathname.endsWith("/messages")) return json(route, []);
-    if (method === "GET" && url.pathname === "/api/proposals") return json(route, []);
     return json(route, { error: `Unhandled test route: ${method} ${url.pathname}` }, 404);
   });
 

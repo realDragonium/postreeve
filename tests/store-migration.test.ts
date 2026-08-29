@@ -39,6 +39,14 @@ describe("Store migrations", () => {
     const accounts = await store.listAccounts();
 
     expect(accounts.map(({ id }) => id)).toEqual(["real"]);
+    await store.insertAccount({
+      id: "google",
+      name: "Gmail",
+      email: "person@gmail.test",
+      kind: "gmail",
+      encryptedCredentials: "encrypted-google-token",
+    });
+    expect((await store.listAccounts()).map(({ kind }) => kind)).toEqual(["imap", "gmail"]);
     store.close();
   });
 });

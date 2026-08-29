@@ -15,7 +15,7 @@ import { Store } from "../../src/server/db/store";
 import { MailProviderRegistry, type AppliedMailAction, type MailProvider } from "../../src/server/mail/provider";
 import { MailSenderRegistry, type MailSender } from "../../src/server/mail/sender";
 import { CredentialVault } from "../../src/server/security/credentials";
-import type { AccountCredentials } from "../../src/server/security/credentials";
+import type { ImapAccountCredentials } from "../../src/server/security/credentials";
 
 interface TestMessage extends MessageDetail {
   mailbox: string;
@@ -56,7 +56,7 @@ export async function createEmptyTestHarness(options: {
 } = {}) {
   const store = new Store(":memory:");
   const sent: SendMessageInput[] = [];
-  const connections: AccountCredentials[] = [];
+  const connections: ImapAccountCredentials[] = [];
   const providers = new Map<string, TestMailProvider>();
   const service = new PostreeveService(
     store,

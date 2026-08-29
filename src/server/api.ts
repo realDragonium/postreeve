@@ -15,6 +15,7 @@ import {
   updateAccountInputSchema,
 } from "../shared/contracts";
 import type { PostreeveService } from "./core/postreeve";
+import type { GoogleOAuth } from "./google/oauth";
 
 const accountParamsSchema = z.object({ accountId: accountIdSchema });
 const proposalParamsSchema = z.object({ proposalId: proposalIdSchema });
@@ -27,10 +28,26 @@ const messageQuerySchema = z.object({
 const accountQuerySchema = z.object({ accountId: accountIdSchema });
 const readMessagesSchema = z.object({ references: z.array(messageRefSchema).min(1).max(100) });
 
-export function createApi(service: PostreeveService) {
+export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth) {
   return new Hono()
     .basePath("/api")
     .get("/health", (context) => context.json({ ok: true as const }))
+    .get("/oauth/google/status", (context) => context.json({ configured: Boolean(googleOAuth) }))
+    .get("/oauth/google/start", (context) => {
+      if (!googleOAuth) throw new Error("Google account connection is not configured on this Postreeve server");
+      return context.redirect(googleOAuth.start());
+    })
+    .get("/oauth/google/callback", async (context) => {
+      if (!googleOAuth) throw new Error("Google account connection is not configured on this Postreeve server");
+      try {
+        const authorized = await googleOAuth.complete(context.req.url);
+        const account = await service.connectGmailAccount(authorized.email, authorized.refreshToken);
+        return context.redirect(`/?google=connected&accountId=${encodeURIComponent(account.id)}`);
+      } catch (error) {
+        console.error(`Google account connection failed: ${safeOAuthError(error)}`);
+        return context.redirect("/?google=error");
+      }
+    })
     .get("/accounts", async (context) => context.json(await service.listAccounts()))
     .post("/accounts/test", zValidator("json", createAccountInputSchema), async (context) => {
       await service.testNewAccountConnection(context.req.valid("json"));
@@ -110,3 +127,9 @@ export function createApi(service: PostreeveService) {
 }
 
 export type AppType = ReturnType<typeof createApi>;
+
+function safeOAuthError(error: unknown): string {
+  if (!(error instanceof Error)) return "Unknown authorization failure";
+  const message = error.message.replace(/[\r\n]/g, " ").slice(0, 300);
+  return message || "Unknown authorization failure";
+}

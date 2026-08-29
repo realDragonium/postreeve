@@ -1,4 +1,5 @@
 import type { ZodType } from "zod";
+import { z } from "zod";
 import {
   accountSchema,
   accountSettingsSchema,
@@ -66,6 +67,8 @@ function withSignal(signal?: AbortSignal): RequestInit {
 }
 
 export const api = {
+  googleOAuthStatus: (signal?: AbortSignal): Promise<{ configured: boolean }> =>
+    request("/oauth/google/status", z.object({ configured: z.boolean() }), withSignal(signal)),
   accounts: (signal?: AbortSignal): Promise<Account[]> => request("/accounts", accountSchema.array(), withSignal(signal)),
   createAccount: (input: CreateAccountInput): Promise<Account> =>
     request("/accounts", accountSchema, { method: "POST", ...jsonBody(input) }),

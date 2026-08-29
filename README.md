@@ -1,8 +1,8 @@
 # Postreeve
 
-Postreeve is a self-hosted email client for humans and agents. It connects to standard IMAP and SMTP accounts while keeping credentials and control on your machine.
+Postreeve is a self-hosted email client for humans and agents. It connects to Gmail through Google OAuth and to standard providers through IMAP and SMTP while keeping credentials and control on your machine.
 
-Humans can read, search, compose, send, mark, move, and safely trash mail across multiple accounts. Agents inspect mail through WebMCP and prepare structured triage proposals. Humans review every action and explicitly approve it before Postreeve changes any mail. Applied work remains visible and supported actions can be undone.
+Humans can read, search, compose, send, mark, move, and safely trash mail across multiple accounts. External agents can inspect mail and apply explicit mailbox actions through page-scoped WebMCP tools. Applied work remains visible in Activity and supported actions can be undone.
 
 ## Local setup
 
@@ -29,7 +29,16 @@ Postreeve binds to `127.0.0.1` by default because the web interface does not hav
 
 ## Connect an email account
 
-Select **Add account** and enter the IMAP and SMTP settings supplied by your email provider. Postreeve authenticates to both services before saving the encrypted credentials. The SMTP check uses the provider's non-sending verification mechanism. Prefer an app-specific password when the provider supports one. OAuth is not implemented yet.
+For Gmail, create a Google OAuth desktop client with the Gmail API enabled and the `gmail.modify` scope, then add its public client ID to the ignored `.env`:
+
+```bash
+POSTREEVE_GOOGLE_CLIENT_ID=your-desktop-client-id
+POSTREEVE_GOOGLE_CLIENT_SECRET=your-desktop-client-secret
+```
+
+Restart Postreeve, select **Add account**, and choose **Continue with Google**. Google redirects back to the loopback-only Postreeve server. Postreeve stores the refresh token in the encrypted credential vault; your Google password never enters the app. Google OAuth apps in Testing mode issue refresh tokens that expire after seven days, so local testing may require periodic reauthorization.
+
+For other providers, select **Add account** and enter the IMAP and SMTP settings supplied by your email provider. Postreeve authenticates to both services before saving the encrypted credentials. The SMTP check uses the provider's non-sending verification mechanism. Prefer an app-specific password when the provider supports one.
 
 Use **Manage** next to the selected account to test its connection, change settings, reconnect with new passwords, or remove the account and its local workflow history. Stored passwords are never returned to the browser; blank password fields preserve the current values.
 
@@ -47,11 +56,11 @@ Passwords are encrypted with AES-256-GCM before they are stored in the local SQL
 
 Keep Postreeve open in the built-in browser in the ChatGPT desktop app. Select **Site tools** in the address bar, then **Available site tools**, to inspect the tools exposed by the page.
 
-Start with a read-and-propose request:
+Start with a scoped request:
 
-> List my accounts and folders. Inspect unread messages in my inbox and create a triage proposal. Do not apply anything.
+> List my accounts and folders. Inspect unread messages in my inbox, explain what you recommend, and wait for my next instruction before applying actions.
 
-Review the proposal in Postreeve and approve it yourself. Codex can then apply the approved proposal and undo supported operations. WebMCP cannot approve proposals or send email; those remain human-only UI actions.
+WebMCP can move messages, move them to Trash, and change their read state through an audited, undoable execution path. Inspect results and undo supported operations in **Activity**. WebMCP cannot permanently delete mail or send email; those remain unavailable or human-only UI actions.
 
 Use GPT-5.6 Sol or GPT-5.6 Terra for site tools. GPT-5.6 Luna currently has WebMCP disabled.
 

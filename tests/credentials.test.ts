@@ -7,6 +7,7 @@ describe("CredentialVault", () => {
     const key = randomBytes(32).toString("base64");
     const vault = new CredentialVault(key);
     const credentials = {
+      kind: "imap" as const,
       imap: {
         host: "imap.example.com",
         port: 993,
@@ -32,6 +33,7 @@ describe("CredentialVault", () => {
   test("requires an external master key for IMAP credentials", () => {
     const vault = new CredentialVault("");
     expect(() => vault.encrypt({
+      kind: "imap",
       imap: { host: "imap.example.com", port: 993, secure: true, username: "u", password: "p" },
       smtp: null,
     }))

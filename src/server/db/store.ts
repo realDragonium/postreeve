@@ -10,9 +10,7 @@ import type {
 } from "../../shared/contracts";
 import { accounts, batches, proposals, type StoredOperation } from "./schema";
 
-export interface StoredAccount extends Account {
-  encryptedCredentials: string | null;
-}
+export type StoredAccount = Account & { encryptedCredentials: string | null };
 
 export interface StoredBatch extends OperationBatch {
   storedOperations: StoredOperation[];
@@ -56,7 +54,14 @@ export class Store {
   }
 
   async insertAccount(account: StoredAccount): Promise<void> {
-    await this.#db.insert(accounts).values({ ...account, createdAt: new Date().toISOString() });
+    await this.#db.insert(accounts).values({
+      id: account.id,
+      name: account.name,
+      email: account.email,
+      kind: account.kind,
+      encryptedCredentials: account.encryptedCredentials,
+      createdAt: new Date().toISOString(),
+    });
   }
 
   async updateAccount(account: StoredAccount): Promise<void> {
@@ -157,7 +162,7 @@ export class Store {
         id TEXT PRIMARY KEY NOT NULL,
         name TEXT NOT NULL,
         email TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind = 'imap'),
+        kind TEXT NOT NULL CHECK (kind IN ('imap', 'gmail')),
         encrypted_credentials TEXT,
         created_at TEXT NOT NULL
       );
@@ -188,6 +193,36 @@ export class Store {
       CREATE INDEX IF NOT EXISTS proposals_account_id_idx ON proposals(account_id);
       CREATE INDEX IF NOT EXISTS batches_account_id_idx ON operation_batches(account_id);
     `);
+    const accountsTable = this.#sqlite.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
+      .get() as { sql: string } | null;
+    if (accountsTable && !accountsTable.sql.includes("'gmail'")) {
+      this.#sqlite.exec("PRAGMA foreign_keys = OFF");
+      try {
+        this.#sqlite.exec(`
+          BEGIN;
+          CREATE TABLE accounts_with_gmail (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            email TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('imap', 'gmail')),
+            encrypted_credentials TEXT,
+            created_at TEXT NOT NULL
+          );
+          INSERT INTO accounts_with_gmail
+            SELECT id, name, email, kind, encrypted_credentials, created_at
+            FROM accounts
+            WHERE kind IN ('imap', 'gmail');
+          DROP TABLE accounts;
+          ALTER TABLE accounts_with_gmail RENAME TO accounts;
+          COMMIT;
+        `);
+      } catch (error) {
+        if (this.#sqlite.inTransaction) this.#sqlite.exec("ROLLBACK");
+        throw error;
+      } finally {
+        this.#sqlite.exec("PRAGMA foreign_keys = ON");
+      }
+    }
     this.#sqlite.exec(`
       DELETE FROM operation_batches
       WHERE account_id IN (SELECT id FROM accounts WHERE kind = 'fixture');

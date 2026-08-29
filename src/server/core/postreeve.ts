@@ -27,10 +27,20 @@ import type { Store, StoredAccount, StoredBatch } from "../db/store";
 import type { StoredOperation } from "../db/schema";
 import { MailProviderRegistry, type MailProvider } from "../mail/provider";
 import { MailSenderRegistry, type MailSender } from "../mail/sender";
-import { CredentialVault, type AccountCredentials, type ImapCredentials } from "../security/credentials";
+import {
+  CredentialVault,
+  type AccountCredentials,
+  type GmailAccountCredentials,
+  type ImapAccountCredentials,
+  type ImapCredentials,
+} from "../security/credentials";
 
 export type ImapProviderFactory = (accountId: string, credentials: ImapCredentials) => MailProvider;
-export type MailSenderFactory = (account: Account, credentials: AccountCredentials) => MailSender;
+export type MailSenderFactory = (account: Account & { kind: "imap" }, credentials: ImapAccountCredentials) => MailSender;
+export type GmailClientFactory = (
+  account: Account & { kind: "gmail" },
+  credentials: GmailAccountCredentials,
+) => { provider: MailProvider; sender: MailSender };
 
 export class PostreeveService {
   readonly #store: Store;
@@ -39,6 +49,7 @@ export class PostreeveService {
   readonly #vault: CredentialVault;
   readonly #imapProviderFactory: ImapProviderFactory;
   readonly #mailSenderFactory: MailSenderFactory;
+  readonly #gmailClientFactory: GmailClientFactory;
 
   constructor(
     store: Store,
@@ -47,6 +58,9 @@ export class PostreeveService {
     vault: CredentialVault,
     imapProviderFactory: ImapProviderFactory,
     mailSenderFactory: MailSenderFactory,
+    gmailClientFactory: GmailClientFactory = () => {
+      throw new Error("Google account support is not configured");
+    },
   ) {
     this.#store = store;
     this.#providers = providers;
@@ -54,6 +68,7 @@ export class PostreeveService {
     this.#vault = vault;
     this.#imapProviderFactory = imapProviderFactory;
     this.#mailSenderFactory = mailSenderFactory;
+    this.#gmailClientFactory = gmailClientFactory;
   }
 
   async initialize(): Promise<void> {
@@ -67,8 +82,9 @@ export class PostreeveService {
 
   async createAccount(input: CreateAccountInput): Promise<Account> {
     const id = crypto.randomUUID();
-    const publicAccount: Account = { id, name: input.name, email: input.email, kind: "imap" };
-    const credentials: AccountCredentials = {
+    const publicAccount: Account & { kind: "imap" } = { id, name: input.name, email: input.email, kind: "imap" };
+    const credentials: ImapAccountCredentials = {
+      kind: "imap",
       imap: {
         host: input.host,
         port: input.port,
@@ -95,8 +111,9 @@ export class PostreeveService {
   }
 
   async testNewAccountConnection(input: CreateAccountInput): Promise<void> {
-    const account: Account = { id: crypto.randomUUID(), name: input.name, email: input.email, kind: "imap" };
+    const account: Account & { kind: "imap" } = { id: crypto.randomUUID(), name: input.name, email: input.email, kind: "imap" };
     await this.#verifiedClients(account, {
+      kind: "imap",
       imap: {
         host: input.host,
         port: input.port,
@@ -117,9 +134,13 @@ export class PostreeveService {
   async getAccountSettings(id: string): Promise<AccountSettings> {
     const account = await this.#requireAccount(id);
     const credentials = this.#credentialsFor(account);
+    if (credentials.kind !== "imap") throw new Error("Google account access is managed through Google authorization");
     if (!credentials.smtp) throw new Error("This account has no outgoing-mail settings; reconnect it before editing");
     return {
-      ...toPublicAccount(account),
+      id: account.id,
+      name: account.name,
+      email: account.email,
+      kind: "imap",
       host: credentials.imap.host,
       port: credentials.imap.port,
       secure: credentials.imap.secure,
@@ -153,6 +174,25 @@ export class PostreeveService {
     if (!await this.#store.deleteAccount(id)) throw new Error("Account not found");
     this.#providers.remove(id);
     this.#senders.remove(id);
+  }
+
+  async connectGmailAccount(email: string, refreshToken: string): Promise<Account> {
+    const credentials: GmailAccountCredentials = { kind: "gmail", refreshToken };
+    const existing = (await this.#store.listAccounts())
+      .find((account) => account.kind === "gmail" && account.email.toLocaleLowerCase() === email.toLocaleLowerCase());
+    const publicAccount: Account & { kind: "gmail" } = existing
+      ? { id: existing.id, name: existing.name, email, kind: "gmail" }
+      : { id: crypto.randomUUID(), name: "Gmail", email, kind: "gmail" };
+    const clients = this.#gmailClientFactory(publicAccount, credentials);
+    await clients.provider.verifyConnection();
+    const stored: StoredAccount = {
+      ...publicAccount,
+      encryptedCredentials: this.#vault.encrypt(credentials),
+    };
+    if (existing) await this.#store.updateAccount(stored);
+    else await this.#store.insertAccount(stored);
+    this.#registerClients(publicAccount.id, clients);
+    return publicAccount;
   }
 
   async listFolders(accountId: string): Promise<Folder[]> {
@@ -198,13 +238,13 @@ export class PostreeveService {
     }
     const proposal = await this.createProposal({
       accountId: input.accountId,
-      title: `Manual mailbox action${input.items.length === 1 ? "" : "s"}`,
+      title: `Direct mailbox action${input.items.length === 1 ? "" : "s"}`,
       items: input.items.map((item) => ({
         id: crypto.randomUUID(),
         message: item.message,
         subject: item.subject,
         action: item.action,
-        reason: "Requested directly through the human interface.",
+        reason: "Requested directly through Postreeve.",
       })),
     });
     await this.approveProposalFromHumanInterface(proposal.id);
@@ -379,19 +419,23 @@ export class PostreeveService {
   }
 
   #credentialsFor(account: StoredAccount): AccountCredentials {
-    if (!account.encryptedCredentials) throw new Error(`IMAP account ${account.id} has no credentials`);
+    if (!account.encryptedCredentials) throw new Error(`Mail account ${account.id} has no credentials`);
     return this.#vault.decrypt(account.encryptedCredentials);
   }
 
   #updatedConnection(account: StoredAccount, input: UpdateAccountInput): {
-    publicAccount: Account;
-    credentials: AccountCredentials;
+    publicAccount: Account & { kind: "imap" };
+    credentials: ImapAccountCredentials;
   } {
     const current = this.#credentialsFor(account);
+    if (account.kind !== "imap" || current.kind !== "imap") {
+      throw new Error("Google account access is managed through Google authorization");
+    }
     if (!current.smtp) throw new Error("This account has no outgoing-mail settings; add SMTP credentials to reconnect it");
     return {
       publicAccount: { id: account.id, name: input.name, email: input.email, kind: "imap" },
       credentials: {
+        kind: "imap",
         imap: {
           host: input.host,
           port: input.port,
@@ -411,6 +455,11 @@ export class PostreeveService {
   }
 
   #clientsFor(account: Account, credentials: AccountCredentials): { provider: MailProvider; sender: MailSender } {
+    if (account.kind === "gmail") {
+      if (credentials.kind !== "gmail") throw new Error("Stored Google credentials do not match the account type");
+      return this.#gmailClientFactory(account, credentials);
+    }
+    if (credentials.kind !== "imap") throw new Error("Stored IMAP credentials do not match the account type");
     return {
       provider: this.#imapProviderFactory(account.id, credentials.imap),
       sender: this.#mailSenderFactory(account, credentials),
@@ -418,8 +467,8 @@ export class PostreeveService {
   }
 
   async #verifiedClients(
-    account: Account,
-    credentials: AccountCredentials,
+    account: Account & { kind: "imap" },
+    credentials: ImapAccountCredentials,
   ): Promise<{ provider: MailProvider; sender: MailSender }> {
     const clients = this.#clientsFor(account, credentials);
     try {

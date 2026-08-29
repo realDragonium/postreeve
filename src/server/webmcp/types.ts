@@ -1,6 +1,7 @@
 import type {
   Account,
   CreateProposalInput,
+  DirectActionInput,
   Folder,
   ListMessagesInput,
   MessageDetail,
@@ -17,6 +18,7 @@ export interface WebMcpServices {
   listMessages(input: ListMessagesInput, signal: AbortSignal): Promise<readonly MessageSummary[]>;
   readMessages(messages: readonly MessageRef[], signal: AbortSignal): Promise<readonly MessageDetail[]>;
   searchMessages(input: ListMessagesInput & { query: string }, signal: AbortSignal): Promise<readonly MessageSummary[]>;
+  applyMessageActions(input: DirectActionInput, signal: AbortSignal): Promise<OperationBatch>;
   createProposal(input: CreateProposalInput, signal: AbortSignal): Promise<Proposal>;
   updateProposal(
     proposalId: string,

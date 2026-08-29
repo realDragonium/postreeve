@@ -4,6 +4,7 @@ import {
   accountSchema,
   batchIdSchema,
   createProposalInputSchema,
+  directActionInputSchema,
   folderSchema,
   listMessagesInputSchema,
   messageDetailSchema,
@@ -25,6 +26,7 @@ const readMessagesInputSchema = z
 const searchMessagesInputSchema = listMessagesInputSchema
   .extend({ query: z.string().min(1).max(200) })
   .strict();
+const applyMessageActionsInputSchema = directActionInputSchema.strict();
 const strictCreateProposalInputSchema = createProposalInputSchema.strict();
 const updateProposalToolInputSchema = updateProposalInputSchema
   .extend({ proposalId: proposalIdSchema })
@@ -38,6 +40,7 @@ export const webMcpInputSchemas = {
   list_messages: strictListMessagesInputSchema,
   read_messages: readMessagesInputSchema,
   search_messages: searchMessagesInputSchema,
+  apply_message_actions: applyMessageActionsInputSchema,
   create_triage_proposal: strictCreateProposalInputSchema,
   update_triage_proposal: updateProposalToolInputSchema,
   apply_approved_proposal: applyProposalInputSchema,
@@ -113,6 +116,18 @@ export function createPostreeveWebMcpTools(services: WebMcpServices): readonly W
       execute: async (input, { signal }) => {
         const parsed = searchMessagesInputSchema.parse(input);
         return z.array(messageSummarySchema).parse(await services.searchMessages(parsed, signal));
+      },
+    },
+    {
+      name: "apply_message_actions",
+      title: "Apply mailbox actions",
+      description:
+        "Immediately apply explicit move, trash, or read-state actions to messages in one account. Messages are revalidated before each action, every result is audited, and supported operations can be undone. Trash moves mail to the Trash folder; permanent deletion is never performed.",
+      inputSchema: inputJsonSchema(applyMessageActionsInputSchema),
+      annotations: mutatingAnnotations,
+      execute: async (input, { signal }) => {
+        const parsed = applyMessageActionsInputSchema.parse(input);
+        return operationBatchSchema.parse(await services.applyMessageActions(parsed, signal));
       },
     },
     {

@@ -19,12 +19,25 @@ export const smtpCredentialsSchema = z.object({
   password: z.string().min(1),
 });
 
-export const accountCredentialsSchema = z.object({
+export const imapAccountCredentialsSchema = z.object({
+  kind: z.literal("imap"),
   imap: imapCredentialsSchema,
   smtp: smtpCredentialsSchema.nullable(),
 });
 
+export const gmailAccountCredentialsSchema = z.object({
+  kind: z.literal("gmail"),
+  refreshToken: z.string().min(1),
+});
+
+export const accountCredentialsSchema = z.discriminatedUnion("kind", [
+  imapAccountCredentialsSchema,
+  gmailAccountCredentialsSchema,
+]);
+
 export type SmtpCredentials = z.infer<typeof smtpCredentialsSchema>;
+export type ImapAccountCredentials = z.infer<typeof imapAccountCredentialsSchema>;
+export type GmailAccountCredentials = z.infer<typeof gmailAccountCredentialsSchema>;
 export type AccountCredentials = z.infer<typeof accountCredentialsSchema>;
 
 const envelopeSchema = z.object({
@@ -75,11 +88,16 @@ export class CredentialVault {
     const parsed: unknown = JSON.parse(plaintext.toString("utf8"));
     const current = accountCredentialsSchema.safeParse(parsed);
     if (current.success) return current.data;
-    return { imap: imapCredentialsSchema.parse(parsed), smtp: null };
+    const legacyAccount = z.object({
+      imap: imapCredentialsSchema,
+      smtp: smtpCredentialsSchema.nullable(),
+    }).safeParse(parsed);
+    if (legacyAccount.success) return { kind: "imap", ...legacyAccount.data };
+    return { kind: "imap", imap: imapCredentialsSchema.parse(parsed), smtp: null };
   }
 
   #requiredKey(): Buffer {
-    if (!this.#key) throw new Error("Set POSTREEVE_MASTER_KEY before adding or using IMAP accounts");
+    if (!this.#key) throw new Error("Set POSTREEVE_MASTER_KEY before adding or using mail accounts");
     return this.#key;
   }
 }

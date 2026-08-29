@@ -10,16 +10,32 @@ import {
   type MessageSummary,
   type OperationBatch,
   type OutboundAddress,
-  type Proposal,
-  type ProposalItem,
   type TriageAction,
   type SendReceipt,
 } from "../shared/contracts";
 import { api } from "./api";
 import { registerPostreeveWebMcp } from "../server/webmcp/register";
 import { webMcpServices } from "./webmcp";
+import {
+  loadLocalDrafts,
+  loadLocalIdentities,
+  storeLocalDrafts,
+  storeLocalIdentities,
+  type ComposeMode,
+  type LocalAttachment,
+  type LocalDraft,
+  type LocalIdentity,
+  type MessageFilter,
+  type MessageSort,
+} from "./mail-ui-state";
 
-type Panel = "proposal" | "history" | null;
+type Panel = "history" | "drafts" | "folders" | "identities" | null;
+
+interface ComposeIntent {
+  readonly mode: ComposeMode;
+  readonly draft?: LocalDraft;
+  readonly message?: MessageDetail;
+}
 
 const folderPollIntervalMs = 15_000;
 
@@ -31,26 +47,24 @@ const actionLabels: Record<TriageAction["type"], string> = {
   mark_unread: "Mark as unread",
 };
 
-const finalProposalStatuses = new Set<Proposal["status"]>([
-  "applied",
-  "partially_applied",
-  "failed",
-  "undone",
-  "partially_undone",
-]);
-
-function Icon({ name }: { name: "archive" | "chevron" | "history" | "inbox" | "mail" | "menu" | "plus" | "search" | "send" | "sparkles" | "trash" | "x" }) {
+function Icon({ name }: { name: "archive" | "chevron" | "folder" | "forward" | "history" | "inbox" | "mail" | "menu" | "paperclip" | "plus" | "refresh" | "reply" | "search" | "send" | "sparkles" | "star" | "trash" | "x" }) {
   const paths: Record<typeof name, ReactNode> = {
     archive: <><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10h14V9M10 13h4"/></>,
     chevron: <path d="m9 18 6-6-6-6" />,
+    folder: <><path d="M3 6h7l2 2h9v10H3z"/><path d="M3 8h18"/></>,
+    forward: <><path d="m15 8 5 4-5 4"/><path d="M4 18v-2a4 4 0 0 1 4-4h12"/></>,
     history: <><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></>,
     inbox: <><path d="M4 4h16v14H4z"/><path d="m4 13 4-4h8l4 4M8 13h8"/></>,
     mail: <><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></>,
     menu: <path d="M4 7h16M4 12h16M4 17h16" />,
+    paperclip: <path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3 3 0 0 1 4 4l-8.5 8.5a1 1 0 0 1-1.5-1.5L15 7" />,
     plus: <path d="M12 5v14M5 12h14" />,
+    refresh: <><path d="M20 7v5h-5"/><path d="M4 17v-5h5"/><path d="M6.1 8a7 7 0 0 1 11.4-2L20 8M4 16l2.5 2A7 7 0 0 0 18 16"/></>,
+    reply: <><path d="m9 8-5 4 5 4"/><path d="M20 18v-2a4 4 0 0 0-4-4H4"/></>,
     search: <><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></>,
     send: <><path d="m22 2-7 20-4-9-9-4z"/><path d="M22 2 11 13"/></>,
     sparkles: <><path d="m12 3 1.2 3.8L17 8l-3.8 1.2L12 13l-1.2-3.8L7 8l3.8-1.2z"/><path d="m6 14 .8 2.2L9 17l-2.2.8L6 20l-.8-2.2L3 17l2.2-.8zM18 14l.6 1.4L20 16l-1.4.6L18 18l-.6-1.4L16 16l1.4-.6z"/></>,
+    star: <path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9z" />,
     trash: <><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></>,
     x: <path d="m6 6 12 12M18 6 6 18" />,
   };
@@ -87,24 +101,33 @@ function additionalDeliveryAddresses(message: MessageSummary): string[] {
   return (message.deliveredTo ?? []).filter((address) => !visible.has(address.toLowerCase()));
 }
 
+function messageKey(message: MessageSummary): string {
+  return `${message.ref.mailbox}:${message.ref.uidValidity}:${message.ref.uid}`;
+}
+
+function addressList(addresses: readonly { address: string }[]): string {
+  return addresses.map(({ address }) => address).join(", ");
+}
+
+function replySubject(subject: string): string {
+  return /^re:/i.test(subject) ? subject : `Re: ${subject}`;
+}
+
+function forwardSubject(subject: string): string {
+  return /^fwd:/i.test(subject) ? subject : `Fwd: ${subject}`;
+}
+
+function quotedMessage(message: MessageDetail): string {
+  const author = message.from[0]?.name || message.from[0]?.address || "Sender";
+  const quoted = message.text.split("\n").map((line) => `> ${line}`).join("\n");
+  return `\n\nOn ${formatDate(message.receivedAt, true)}, ${author} wrote:\n${quoted}`;
+}
+
 function folderIcon(folder: Folder): "archive" | "inbox" | "mail" | "trash" {
   if (folder.specialUse === "inbox") return "inbox";
   if (folder.specialUse === "trash") return "trash";
   if (folder.specialUse === "archive") return "archive";
   return "mail";
-}
-
-function parseActionType(value: string): TriageAction["type"] | null {
-  switch (value) {
-    case "leave":
-    case "move":
-    case "trash":
-    case "mark_read":
-    case "mark_unread":
-      return value;
-    default:
-      return null;
-  }
 }
 
 function sanitizeEmailHtml(html: string): { html: string; blockedImages: number } {
@@ -135,7 +158,7 @@ function EmptyState({ icon, title, body }: { icon: "history" | "inbox" | "mail" 
   return <div className="empty-state"><span className="empty-icon"><Icon name={icon} /></span><strong>{title}</strong><p>{body}</p></div>;
 }
 
-function StatusPill({ status }: { status: Proposal["status"] | OperationBatch["status"] }) {
+function StatusPill({ status }: { status: OperationBatch["status"] }) {
   return <span className={`status-pill status-${status}`}>{status.replaceAll("_", " ")}</span>;
 }
 
@@ -149,10 +172,18 @@ function App() {
   const [panel, setPanel] = useState<Panel>(null);
   const [mobileNav, setMobileNav] = useState(false);
   const [accountSetup, setAccountSetup] = useState<"new" | string | null>(null);
-  const [composeOpen, setComposeOpen] = useState(false);
+  const [composeIntent, setComposeIntent] = useState<ComposeIntent | null>(null);
   const [mailNotice, setMailNotice] = useState<string | null>(null);
-  const [selectedProposalId, setSelectedProposalId] = useState("");
+  const [messageFilter, setMessageFilter] = useState<MessageFilter>("all");
+  const [messageSort, setMessageSort] = useState<MessageSort>("newest");
+  const [messageLimit, setMessageLimit] = useState(50);
+  const [selectedMessages, setSelectedMessages] = useState<Set<string>>(() => new Set());
+  const [drafts, setDrafts] = useState<LocalDraft[]>(loadLocalDrafts);
+  const [identities, setIdentities] = useState<LocalIdentity[]>(loadLocalIdentities);
   const observedFolderCounts = useRef(new Map<string, string>());
+
+  useEffect(() => storeLocalDrafts(drafts), [drafts]);
+  useEffect(() => storeLocalIdentities(identities), [identities]);
 
   useEffect(() => {
     let active = true;
@@ -170,6 +201,21 @@ function App() {
 
   const accountsQuery = useQuery({ queryKey: ["accounts"], queryFn: ({ signal }) => api.accounts(signal) });
   useEffect(() => {
+    const url = new URL(window.location.href);
+    const result = url.searchParams.get("google");
+    if (!result) return;
+    if (result === "connected") {
+      const connectedAccountId = url.searchParams.get("accountId");
+      if (connectedAccountId) setAccountId(connectedAccountId);
+      setMailNotice("Google account connected.");
+    } else {
+      setMailNotice("Google account connection did not complete. Try again.");
+    }
+    url.searchParams.delete("google");
+    url.searchParams.delete("accountId");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }, []);
+  useEffect(() => {
     if (!accountId && accountsQuery.data?.[0]) setAccountId(accountsQuery.data[0].id);
   }, [accountId, accountsQuery.data]);
 
@@ -186,33 +232,29 @@ function App() {
   }, [foldersQuery.data, mailbox]);
 
   const messagesQuery = useQuery({
-    queryKey: ["messages", accountId, mailbox, query],
-    queryFn: () => api.messages(accountId, mailbox, query),
+    queryKey: ["messages", accountId, mailbox, query, messageLimit],
+    queryFn: () => api.messages(accountId, mailbox, query, messageLimit),
     enabled: Boolean(accountId && mailbox),
   });
+  const visibleMessages = useMemo(() => {
+    const filtered = (messagesQuery.data ?? []).filter((message) => {
+      if (messageFilter === "unread") return !message.read;
+      if (messageFilter === "flagged") return message.flagged;
+      return true;
+    });
+    return [...filtered].sort((left, right) => {
+      if (messageSort === "oldest") return left.receivedAt.localeCompare(right.receivedAt);
+      if (messageSort === "sender") return sender(left).localeCompare(sender(right));
+      if (messageSort === "subject") return left.subject.localeCompare(right.subject);
+      return right.receivedAt.localeCompare(left.receivedAt);
+    });
+  }, [messageFilter, messageSort, messagesQuery.data]);
   const selectedMessage = messagesQuery.data?.find((message) => message.ref.uid === selectedUid) ?? null;
   const messageQuery = useQuery({
     queryKey: ["message", accountId, mailbox, selectedUid],
     queryFn: async () => (await api.readMessages(selectedMessage ? [selectedMessage.ref] : []))[0] ?? null,
     enabled: Boolean(selectedMessage),
   });
-
-  const proposalsQuery = useQuery({
-    queryKey: ["proposals", accountId],
-    queryFn: () => api.proposals(accountId),
-    enabled: Boolean(accountId),
-  });
-  useEffect(() => {
-    const proposals = proposalsQuery.data;
-    if (!proposals?.length) {
-      setSelectedProposalId("");
-      return;
-    }
-    if (!proposals.some((proposal) => proposal.id === selectedProposalId)) {
-      setSelectedProposalId((proposals.find((proposal) => !finalProposalStatuses.has(proposal.status)) ?? proposals[0])?.id ?? "");
-    }
-  }, [proposalsQuery.data, selectedProposalId]);
-  const selectedProposal = proposalsQuery.data?.find((proposal) => proposal.id === selectedProposalId) ?? null;
 
   const batchesQuery = useQuery({
     queryKey: ["batches", accountId],
@@ -223,6 +265,8 @@ function App() {
   const currentFolder = foldersQuery.data?.find((folder) => folder.path === mailbox);
   const currentAccount = accountsQuery.data?.find((account) => account.id === accountId);
   const hasAccounts = Boolean(accountsQuery.data?.length);
+  const accountDrafts = drafts.filter((draft) => draft.accountId === accountId);
+  const accountIdentities = identities.filter((identity) => identity.accountId === accountId);
   useEffect(() => {
     if (!currentFolder) return;
     const key = `${accountId}\n${currentFolder.path}`;
@@ -240,13 +284,16 @@ function App() {
     setSelectedUid(null);
     setQuery("");
     setQueryDraft("");
-    setSelectedProposalId("");
-    setComposeOpen(false);
+    setComposeIntent(null);
+    setSelectedMessages(new Set());
+    setMessageLimit(50);
   }
 
   function selectFolder(path: string): void {
     setMailbox(path);
     setSelectedUid(null);
+    setSelectedMessages(new Set());
+    setMessageLimit(50);
     setMobileNav(false);
   }
 
@@ -254,11 +301,42 @@ function App() {
     event.preventDefault();
     setQuery(queryDraft.trim());
     setSelectedUid(null);
+    setSelectedMessages(new Set());
+    setMessageLimit(50);
+  }
+
+  async function refreshMailbox(): Promise<void> {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ["messages", accountId] }),
+      queryClient.invalidateQueries({ queryKey: ["folders", accountId] }),
+      queryClient.invalidateQueries({ queryKey: ["message", accountId] }),
+    ]);
+    setMailNotice("Mailbox refreshed.");
+  }
+
+  function toggleMessageSelection(message: MessageSummary): void {
+    const key = messageKey(message);
+    setSelectedMessages((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function saveDraft(draft: LocalDraft): void {
+    setDrafts((current) => {
+      const exists = current.some(({ id }) => id === draft.id);
+      return exists ? current.map((candidate) => candidate.id === draft.id ? draft : candidate) : [draft, ...current];
+    });
+  }
+
+  function removeDraft(id: string): void {
+    setDrafts((current) => current.filter((draft) => draft.id !== id));
   }
 
   async function refreshWorkflow(): Promise<void> {
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["proposals", accountId] }),
       queryClient.invalidateQueries({ queryKey: ["batches", accountId] }),
       queryClient.invalidateQueries({ queryKey: ["messages", accountId] }),
       queryClient.invalidateQueries({ queryKey: ["folders", accountId] }),
@@ -290,6 +368,22 @@ function App() {
     },
   });
 
+  const bulkActionMutation = useMutation({
+    mutationFn: (action: TriageAction) => {
+      const messages = (messagesQuery.data ?? []).filter((message) => selectedMessages.has(messageKey(message)));
+      return api.applyDirectActions({
+        accountId,
+        items: messages.map((message) => ({ message: message.ref, subject: message.subject, action })),
+      });
+    },
+    onSuccess: async (_batch, action) => {
+      setSelectedMessages(new Set());
+      setSelectedUid(null);
+      setMailNotice(`${actionLabels[action.type]} applied to selected messages.`);
+      await refreshWorkflow();
+    },
+  });
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -298,12 +392,8 @@ function App() {
           <a className="brand" href="/" aria-label="Postreeve home"><span className="brand-mark"><Icon name="mail" /></span><span>Postreeve</span></a>
         </div>
         <div className="topbar-actions">
-          <button className="primary-button compose-button" disabled={!currentAccount} onClick={() => setComposeOpen(true)}><Icon name="plus" /><span>Compose</span></button>
+          <button className="primary-button compose-button" disabled={!currentAccount} onClick={() => setComposeIntent({ mode: "new" })}><Icon name="plus" /><span>Compose</span></button>
           <button className={`secondary-button ${panel === "history" ? "active" : ""}`} disabled={!currentAccount} onClick={() => setPanel(panel === "history" ? null : "history")}><Icon name="history" /><span>Activity</span></button>
-          <button className={`proposal-button ${panel === "proposal" ? "active" : ""}`} disabled={!currentAccount} onClick={() => setPanel(panel === "proposal" ? null : "proposal")}>
-            <Icon name="sparkles" /><span>Review proposals</span>
-            {proposalsQuery.data?.filter((proposal) => proposal.status === "draft" || proposal.status === "review").length ? <span className="count-dot">{proposalsQuery.data.filter((proposal) => proposal.status === "draft" || proposal.status === "review").length}</span> : null}
-          </button>
         </div>
       </header>
 
@@ -319,8 +409,8 @@ function App() {
               </select>
             </div>
           ) : <div className="account-picker-wrap disconnected-account"><span className="avatar"><Icon name="mail" /></span><span>No account connected</span></div>}
-          <div className="account-links"><button className="add-account" onClick={() => setAccountSetup("new")}><Icon name="plus" /> Add account</button>{currentAccount ? <button className="manage-account" onClick={() => setAccountSetup(currentAccount.id)}>Manage</button> : null}</div>
-          <div className="section-label">Folders</div>
+          <div className="account-links"><button className="add-account" onClick={() => setAccountSetup("new")}><Icon name="plus" /> Add account</button>{currentAccount ? <><button className="manage-account" onClick={() => setPanel("identities")}>Identities</button><button className="manage-account" onClick={() => setAccountSetup(currentAccount.id)}>Manage</button></> : null}</div>
+          <div className="section-label section-label-action"><span>Folders</span>{currentAccount ? <button aria-label="Manage folders" onClick={() => setPanel("folders")}><Icon name="folder" /></button> : null}</div>
           <nav className="folders" aria-label="Mail folders">
             {foldersQuery.isLoading ? Array.from({ length: 5 }, (_, index) => <div className="folder-skeleton skeleton" key={index} />) : null}
             {foldersQuery.isError ? <ErrorState message={foldersQuery.error.message} retry={() => void foldersQuery.refetch()} /> : null}
@@ -329,8 +419,9 @@ function App() {
                 <Icon name={folderIcon(folder)} /><span>{folder.name}</span>{folder.unread > 0 ? <b>{folder.unread}</b> : null}
               </button>
             ))}
+            {currentAccount ? <button className={`folder-row ${panel === "drafts" ? "active" : ""}`} onClick={() => setPanel("drafts")}><Icon name="mail" /><span>Local drafts</span>{accountDrafts.length > 0 ? <b>{accountDrafts.length}</b> : null}</button> : null}
           </nav>
-          <div className="sidebar-note"><Icon name="sparkles" /><p><strong>Agent-ready inbox</strong><br />Agents can inspect mail and prepare actions. Only you can approve them.</p></div>
+          <div className="sidebar-note"><Icon name="sparkles" /><p><strong>Agent-ready inbox</strong><br />Agents can inspect mail and apply audited actions through WebMCP. Every change stays visible and undoable.</p></div>
         </aside>
         {mobileNav ? <button className="backdrop nav-backdrop" aria-label="Close navigation" onClick={() => setMobileNav(false)} /> : null}
 
@@ -343,7 +434,7 @@ function App() {
         <section className="message-column">
           <div className="mailbox-heading">
             <div><p>{currentAccount?.email ?? "Mailbox"}</p><h1>{currentFolder?.name ?? "Messages"}</h1></div>
-            {currentFolder ? <span>{currentFolder.total} messages</span> : null}
+            {currentFolder ? <div className="mailbox-heading-actions"><span>{currentFolder.total} messages</span><button className="icon-button" aria-label="Refresh mailbox" disabled={messagesQuery.isFetching || foldersQuery.isFetching} onClick={() => void refreshMailbox()}><Icon name="refresh" /></button></div> : null}
           </div>
           <form className="search-box" role="search" onSubmit={search}>
             <Icon name="search" />
@@ -351,21 +442,31 @@ function App() {
             {queryDraft ? <button type="button" aria-label="Clear search" onClick={() => { setQueryDraft(""); setQuery(""); }}><Icon name="x" /></button> : null}
           </form>
           {query ? <div className="search-context">Results for “{query}” <button onClick={() => { setQuery(""); setQueryDraft(""); }}>Clear</button></div> : null}
+          <div className="mailbox-controls">
+            <label className="select-all"><input type="checkbox" aria-label="Select all visible messages" checked={visibleMessages.length > 0 && visibleMessages.every((message) => selectedMessages.has(messageKey(message)))} onChange={(event) => setSelectedMessages(event.target.checked ? new Set(visibleMessages.map(messageKey)) : new Set())} /><span>{selectedMessages.size ? `${selectedMessages.size} selected` : "Select"}</span></label>
+            <select aria-label="Filter messages" value={messageFilter} onChange={(event) => setMessageFilter(event.target.value as MessageFilter)}><option value="all">All mail</option><option value="unread">Unread</option><option value="flagged">Flagged</option></select>
+            <select aria-label="Sort messages" value={messageSort} onChange={(event) => setMessageSort(event.target.value as MessageSort)}><option value="newest">Newest</option><option value="oldest">Oldest</option><option value="sender">Sender</option><option value="subject">Subject</option></select>
+          </div>
+          {selectedMessages.size ? <BulkActionBar folders={foldersQuery.data ?? []} busy={bulkActionMutation.isPending} error={bulkActionMutation.error?.message ?? null} onAction={(action) => bulkActionMutation.mutate(action)} onCancel={() => setSelectedMessages(new Set())} /> : null}
           <div className="message-list" aria-label="Messages">
             {messagesQuery.isLoading ? Array.from({ length: 6 }, (_, index) => <div className="message-skeleton" key={index}><span className="skeleton" /><div><i className="skeleton" /><i className="skeleton short" /><i className="skeleton" /></div></div>) : null}
             {messagesQuery.isError ? <ErrorState message={messagesQuery.error.message} retry={() => void messagesQuery.refetch()} /> : null}
-            {!messagesQuery.isLoading && !messagesQuery.isError && messagesQuery.data?.length === 0 ? <EmptyState icon="inbox" title={query ? "No matching mail" : "This folder is clear"} body={query ? "Try a broader search." : "New messages will appear here."} /> : null}
-            {messagesQuery.data?.map((message) => (
-              <button className={`message-row ${selectedUid === message.ref.uid ? "selected" : ""} ${message.read ? "read" : "unread"}`} key={`${message.ref.uidValidity}:${message.ref.uid}`} onClick={() => setSelectedUid(message.ref.uid)}>
-                <span className={`sender-avatar tone-${message.ref.uid % 5}`}>{initials(sender(message))}</span>
-                <span className="message-copy">
-                  <span className="message-meta"><strong>{sender(message)}</strong><time>{formatDate(message.receivedAt)}</time></span>
-                  <span className="message-subject">{message.subject || "(No subject)"}</span>
-                  <span className="message-preview">{message.preview}</span>
-                </span>
-                {!message.read ? <span className="unread-dot" aria-label="Unread" /> : null}
-              </button>
+            {!messagesQuery.isLoading && !messagesQuery.isError && visibleMessages.length === 0 ? <EmptyState icon="inbox" title={query ? "No matching mail" : messageFilter === "all" ? "This folder is clear" : `No ${messageFilter} mail`} body={query ? "Try a broader search." : messageFilter === "all" ? "New messages will appear here." : "Change the filter to see other messages."} /> : null}
+            {visibleMessages.map((message) => (
+              <div className={`message-row-wrap ${selectedUid === message.ref.uid ? "selected" : ""} ${message.read ? "read" : "unread"}`} key={`${message.ref.uidValidity}:${message.ref.uid}`}>
+                <label className="message-select"><input type="checkbox" aria-label={`Select ${message.subject || "message"}`} checked={selectedMessages.has(messageKey(message))} onChange={() => toggleMessageSelection(message)} /></label>
+                <button className="message-row" onClick={() => setSelectedUid(message.ref.uid)}>
+                  <span className={`sender-avatar tone-${message.ref.uid % 5}`}>{initials(sender(message))}</span>
+                  <span className="message-copy">
+                    <span className="message-meta"><strong>{sender(message)}</strong><time>{formatDate(message.receivedAt)}</time></span>
+                    <span className="message-subject">{message.subject || "(No subject)"}</span>
+                    <span className="message-preview">{message.preview}</span>
+                  </span>
+                  {!message.read ? <span className="unread-dot" aria-label="Unread" /> : null}
+                </button>
+              </div>
             ))}
+            {messagesQuery.data && messagesQuery.data.length >= messageLimit && messageLimit < 100 ? <button className="load-more" disabled={messagesQuery.isFetching} onClick={() => setMessageLimit((current) => Math.min(100, current + 50))}>{messagesQuery.isFetching ? "Loading…" : "Load 50 more"}</button> : null}
           </div>
         </section>
 
@@ -376,6 +477,10 @@ function App() {
             folders={foldersQuery.data ?? []}
             busy={directActionMutation.isPending}
             error={directActionMutation.error?.message ?? null}
+            onCompose={(mode) => {
+              const detail = messageQuery.data;
+              if (detail) setComposeIntent({ mode, message: detail });
+            }}
             onAction={(action) => {
               const detail = messageQuery.data;
               if (!detail) return;
@@ -390,18 +495,6 @@ function App() {
 
       {panel ? <button className="backdrop panel-backdrop" aria-label="Close panel" onClick={() => setPanel(null)} /> : null}
       <aside className={`workflow-panel ${panel ? "open" : ""}`} aria-hidden={!panel}>
-        {panel === "proposal" ? <ProposalPanel
-          accountId={accountId}
-          folders={foldersQuery.data ?? []}
-          proposal={selectedProposal}
-          proposals={proposalsQuery.data ?? []}
-          loading={proposalsQuery.isLoading}
-          error={proposalsQuery.error?.message ?? null}
-          onSelect={setSelectedProposalId}
-          onClose={() => setPanel(null)}
-          onRetry={() => void proposalsQuery.refetch()}
-          onRefresh={refreshWorkflow}
-        /> : null}
         {panel === "history" ? <HistoryPanel
           batches={batchesQuery.data ?? []}
           loading={batchesQuery.isLoading}
@@ -410,9 +503,23 @@ function App() {
           onRetry={() => void batchesQuery.refetch()}
           onRefresh={refreshWorkflow}
         /> : null}
+        {panel === "drafts" && currentAccount ? <DraftPanel
+          drafts={accountDrafts}
+          onClose={() => setPanel(null)}
+          onCreate={() => { setPanel(null); setComposeIntent({ mode: "new" }); }}
+          onOpen={(draft) => { setPanel(null); setComposeIntent({ mode: "draft", draft }); }}
+          onRemove={removeDraft}
+        /> : null}
+        {panel === "folders" ? <FolderPanel folders={foldersQuery.data ?? []} onClose={() => setPanel(null)} /> : null}
+        {panel === "identities" && currentAccount ? <IdentityPanel
+          account={currentAccount}
+          identities={accountIdentities}
+          onChange={(next) => setIdentities((current) => [...current.filter((identity) => identity.accountId !== currentAccount.id), ...next])}
+          onClose={() => setPanel(null)}
+        /> : null}
       </aside>
       {accountSetup ? <AccountSetup
-        accountId={accountSetup === "new" ? null : accountSetup}
+        account={accountSetup === "new" ? null : accountsQuery.data?.find(({ id }) => id === accountSetup) ?? null}
         onClose={() => setAccountSetup(null)}
         onSaved={(account) => { setAccountSetup(null); switchAccount(account.id); }}
         onRemoved={(removedId) => {
@@ -420,7 +527,14 @@ function App() {
           if (accountId === removedId) switchAccount("");
         }}
       /> : null}
-      {composeOpen && currentAccount ? <ComposeModal account={currentAccount} onClose={() => setComposeOpen(false)} /> : null}
+      {composeIntent && currentAccount ? <ComposeModal
+        account={currentAccount}
+        identities={accountIdentities}
+        intent={composeIntent}
+        onClose={() => setComposeIntent(null)}
+        onSaveDraft={saveDraft}
+        onSent={(draftId) => { if (draftId) removeDraft(draftId); }}
+      /> : null}
     </div>
   );
 }
@@ -429,11 +543,12 @@ function ReaderSkeleton() {
   return <div className="reader-skeleton"><i className="skeleton title" /><i className="skeleton line" /><i className="skeleton line short" /><hr /><i className="skeleton line" /><i className="skeleton line" /><i className="skeleton line short" /></div>;
 }
 
-function MessageReader({ message, folders, busy, error, onAction, onClose }: {
+function MessageReader({ message, folders, busy, error, onCompose, onAction, onClose }: {
   message: MessageDetail;
   folders: Folder[];
   busy: boolean;
   error: string | null;
+  onCompose: (mode: "reply" | "reply_all" | "forward") => void;
   onAction: (action: TriageAction) => void;
   onClose: () => void;
 }) {
@@ -441,6 +556,7 @@ function MessageReader({ message, folders, busy, error, onAction, onClose }: {
   const deliveredTo = additionalDeliveryAddresses(message);
   const [destination, setDestination] = useState("");
   const moveFolders = folders.filter((folder) => folder.path !== message.ref.mailbox && folder.specialUse !== "trash");
+  const archiveFolder = folders.find((folder) => folder.specialUse === "archive" && folder.path !== message.ref.mailbox);
   const messageIsInTrash = folders.some((folder) => folder.path === message.ref.mailbox && folder.specialUse === "trash");
   useEffect(() => {
     if (!moveFolders.some((folder) => folder.path === destination)) setDestination(moveFolders[0]?.path ?? "");
@@ -449,8 +565,11 @@ function MessageReader({ message, folders, busy, error, onAction, onClose }: {
     <button className="mobile-reader-back" onClick={onClose}><Icon name="chevron" /> Back to messages</button>
     <div className="reader-head">
       <div className="reader-labels">{message.read ? <span className="soft-pill">Read</span> : <span className="soft-pill unread">Unread</span>}{message.flagged ? <span className="soft-pill flagged">Flagged</span> : null}</div>
+      <div className="conversation-actions"><button className="secondary-button" onClick={() => onCompose("reply")}><Icon name="reply" /> Reply</button><button className="secondary-button" onClick={() => onCompose("reply_all")}><Icon name="reply" /> Reply all</button><button className="secondary-button" onClick={() => onCompose("forward")}><Icon name="forward" /> Forward</button></div>
       <div className="reader-actions" aria-label="Message actions">
         <button className="secondary-button" disabled={busy} onClick={() => onAction({ type: message.read ? "mark_unread" : "mark_read" })}>{message.read ? "Mark unread" : "Mark read"}</button>
+        <button className="secondary-button" disabled={busy || !archiveFolder} onClick={() => archiveFolder && onAction({ type: "move", destination: archiveFolder.path })}><Icon name="archive" /> Archive</button>
+        <button className="secondary-button backend-pending" disabled title="Flag changes need mail-provider support"><Icon name="star" /> {message.flagged ? "Unflag" : "Flag"}</button>
         <div className="move-control"><select aria-label="Move destination" disabled={busy || moveFolders.length === 0} value={destination} onChange={(event) => setDestination(event.target.value)}>{moveFolders.map((folder) => <option key={folder.path} value={folder.path}>{folder.name}</option>)}</select><button className="secondary-button" disabled={busy || !destination} onClick={() => onAction({ type: "move", destination })}>Move</button></div>
         <button className="danger-button" disabled={busy || messageIsInTrash || folders.every((folder) => folder.specialUse !== "trash")} onClick={() => onAction({ type: "trash" })}><Icon name="trash" /> {messageIsInTrash ? "Already in Trash" : "Delete"}</button>
       </div>
@@ -475,27 +594,158 @@ function parseRecipientList(value: string): OutboundAddress[] | null {
   return addresses.map((address) => ({ name: "", address }));
 }
 
-function ComposeModal({ account, onClose }: { account: { id: string; name: string; email: string }; onClose: () => void }) {
+function BulkActionBar({ folders, busy, error, onAction, onCancel }: {
+  folders: Folder[];
+  busy: boolean;
+  error: string | null;
+  onAction: (action: TriageAction) => void;
+  onCancel: () => void;
+}) {
+  const destinations = folders.filter((folder) => folder.specialUse !== "trash");
+  const [destination, setDestination] = useState(destinations[0]?.path ?? "");
+  useEffect(() => {
+    if (!destinations.some((folder) => folder.path === destination)) setDestination(destinations[0]?.path ?? "");
+  }, [destination, folders]);
+  return <div className="bulk-actions" role="toolbar" aria-label="Selected message actions">
+    <button disabled={busy} onClick={() => onAction({ type: "mark_read" })}>Mark read</button>
+    <button disabled={busy} onClick={() => onAction({ type: "mark_unread" })}>Mark unread</button>
+    <select aria-label="Bulk move destination" disabled={busy || !destination} value={destination} onChange={(event) => setDestination(event.target.value)}>{destinations.map((folder) => <option value={folder.path} key={folder.path}>{folder.name}</option>)}</select>
+    <button disabled={busy || !destination} onClick={() => onAction({ type: "move", destination })}>Move</button>
+    <button className="danger-text" disabled={busy || folders.every((folder) => folder.specialUse !== "trash")} onClick={() => onAction({ type: "trash" })}>Trash</button>
+    <button aria-label="Cancel selection" disabled={busy} onClick={onCancel}><Icon name="x" /></button>
+    {error ? <span className="bulk-error">{error}</span> : null}
+  </div>;
+}
+
+function DraftPanel({ drafts, onClose, onCreate, onOpen, onRemove }: {
+  drafts: LocalDraft[];
+  onClose: () => void;
+  onCreate: () => void;
+  onOpen: (draft: LocalDraft) => void;
+  onRemove: (id: string) => void;
+}) {
+  return <>
+    <div className="panel-head"><div><span className="eyebrow"><Icon name="mail" /> Local workflow</span><h2>Drafts</h2></div><button className="icon-button" aria-label="Close drafts panel" onClick={onClose}><Icon name="x" /></button></div>
+    <div className="panel-scroll draft-scroll">
+      <div className="capability-note"><strong>Autosaved on this laptop</strong><p>These drafts prove the complete compose UI. IMAP Drafts synchronization will replace this local store in the backend pass.</p></div>
+      {drafts.length ? <div className="draft-list">{drafts.map((draft) => <article key={draft.id}><button className="draft-open" onClick={() => onOpen(draft)}><strong>{draft.subject || "(No subject)"}</strong><span>{draft.to || "No recipient"}</span><small>{formatDate(draft.updatedAt, true)} · {draft.mode.replace("_", " ")}</small></button><button className="icon-button" aria-label={`Delete draft ${draft.subject || "without subject"}`} onClick={() => onRemove(draft.id)}><Icon name="trash" /></button></article>)}</div> : <EmptyState icon="mail" title="No local drafts" body="Start composing and Postreeve will autosave your work here." />}
+    </div>
+    <div className="panel-actions"><button className="primary-button wide" onClick={onCreate}><Icon name="plus" /> New message</button></div>
+  </>;
+}
+
+function FolderPanel({ folders, onClose }: { folders: Folder[]; onClose: () => void }) {
+  const [plannedName, setPlannedName] = useState("");
+  const [plans, setPlans] = useState<string[]>([]);
+  return <>
+    <div className="panel-head"><div><span className="eyebrow"><Icon name="folder" /> Mailbox structure</span><h2>Manage folders</h2></div><button className="icon-button" aria-label="Close folder panel" onClick={onClose}><Icon name="x" /></button></div>
+    <div className="panel-scroll">
+      <div className="capability-note"><strong>Frontend ready, backend pending</strong><p>Folder creation, renaming, and deletion need IMAP mailbox-management methods. Planning here never changes the server.</p></div>
+      <div className="folder-management-list">{folders.map((folder) => <div key={folder.path}><Icon name={folderIcon(folder)} /><span><strong>{folder.name}</strong><small>{folder.total} messages · {folder.specialUse ?? "custom"}</small></span><button disabled title="Rename needs backend support">Rename</button></div>)}</div>
+      <form className="planned-folder" onSubmit={(event) => { event.preventDefault(); const name = plannedName.trim(); if (!name) return; setPlans((current) => [...current, name]); setPlannedName(""); }}><label className="field"><span>Plan a new folder</span><input aria-label="New folder name" value={plannedName} onChange={(event) => setPlannedName(event.target.value)} placeholder="Receipts, Projects, Keep…" /></label><button className="secondary-button" disabled={!plannedName.trim()}>Add to plan</button></form>
+      {plans.length ? <div className="folder-plan"><strong>Planned folders</strong>{plans.map((name, index) => <span key={`${name}:${index}`}><Icon name="folder" />{name}<button aria-label={`Remove planned folder ${name}`} onClick={() => setPlans((current) => current.filter((_, candidate) => candidate !== index))}><Icon name="x" /></button></span>)}</div> : null}
+      <fieldset className="special-folder-map"><legend>Special folder mapping</legend>{(["sent", "drafts", "archive", "junk", "trash"] as const).map((kind) => <label key={kind}><span>{kind}</span><select aria-label={`${kind} folder`} defaultValue={folders.find((folder) => folder.specialUse === kind)?.path ?? ""}><option value="">Not selected</option>{folders.map((folder) => <option value={folder.path} key={folder.path}>{folder.name}</option>)}</select></label>)}</fieldset>
+      <p className="pending-copy">Selections are a UI preview and are not saved to the provider yet.</p>
+    </div>
+  </>;
+}
+
+function IdentityPanel({ account, identities, onChange, onClose }: {
+  account: Account;
+  identities: LocalIdentity[];
+  onChange: (identities: LocalIdentity[]) => void;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const valid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  return <>
+    <div className="panel-head"><div><span className="eyebrow"><Icon name="mail" /> Sending addresses</span><h2>Identities</h2></div><button className="icon-button" aria-label="Close identities panel" onClick={onClose}><Icon name="x" /></button></div>
+    <div className="panel-scroll">
+      <div className="capability-note"><strong>Catch-all UI is ready</strong><p>Aliases are stored locally and appear in the From selector. Sending from them stays blocked until SMTP identity validation is implemented.</p></div>
+      <div className="identity-list"><div><span className="avatar">{initials(account.name)}</span><span><strong>{account.name}</strong><small>{account.email} · primary</small></span></div>{identities.map((identity) => <div key={identity.id}><span className="avatar">{initials(identity.name)}</span><span><strong>{identity.name}</strong><small>{identity.email}</small></span><button className="icon-button" aria-label={`Remove identity ${identity.email}`} onClick={() => onChange(identities.filter(({ id }) => id !== identity.id))}><Icon name="x" /></button></div>)}</div>
+      <form className="identity-form" onSubmit={(event) => { event.preventDefault(); if (!valid || !name.trim()) return; onChange([...identities, { id: crypto.randomUUID(), accountId: account.id, name: name.trim(), email: email.trim().toLowerCase() }]); setName(""); setEmail(""); }}><label className="field"><span>Display name</span><input aria-label="Identity name" value={name} onChange={(event) => setName(event.target.value)} /></label><label className="field"><span>Email address</span><input aria-label="Identity email address" type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label><button className="secondary-button" disabled={!valid || !name.trim()}><Icon name="plus" /> Add identity</button></form>
+    </div>
+  </>;
+}
+
+function ComposeModal({ account, identities, intent, onClose, onSaveDraft, onSent }: {
+  account: { id: string; name: string; email: string };
+  identities: LocalIdentity[];
+  intent: ComposeIntent;
+  onClose: () => void;
+  onSaveDraft: (draft: LocalDraft) => void;
+  onSent: (draftId: string | null) => void;
+}) {
   const queryClient = useQueryClient();
-  const [to, setTo] = useState("");
-  const [cc, setCc] = useState("");
-  const [bcc, setBcc] = useState("");
-  const [subject, setSubject] = useState("");
-  const [body, setBody] = useState("");
+  const source = intent.message;
+  const saved = intent.draft;
+  const effectiveMode = saved?.mode ?? intent.mode;
+  const replyAllCc = source
+    ? [...source.to, ...(source.cc ?? [])]
+      .map(({ address }) => address)
+      .filter((address, index, all) => address.toLowerCase() !== account.email.toLowerCase() && all.indexOf(address) === index)
+      .join(", ")
+    : "";
+  const initialBody = source
+    ? effectiveMode === "forward"
+      ? `\n\n---------- Forwarded message ----------\nFrom: ${addressList(source.from)}\nDate: ${formatDate(source.receivedAt, true)}\nSubject: ${source.subject}\nTo: ${addressList(source.to)}\n\n${source.text}`
+      : quotedMessage(source)
+    : "";
+  const [draftId] = useState(() => saved?.id ?? crypto.randomUUID());
+  const [from, setFrom] = useState(saved?.from ?? account.email);
+  const [to, setTo] = useState(saved?.to ?? (source && effectiveMode !== "forward" ? addressList(source.from) : ""));
+  const [cc, setCc] = useState(saved?.cc ?? (effectiveMode === "reply_all" ? replyAllCc : ""));
+  const [bcc, setBcc] = useState(saved?.bcc ?? "");
+  const [subject, setSubject] = useState(saved?.subject ?? (source ? effectiveMode === "forward" ? forwardSubject(source.subject) : replySubject(source.subject) : ""));
+  const [body, setBody] = useState(saved?.body ?? initialBody);
+  const [attachments, setAttachments] = useState<LocalAttachment[]>(saved ? [...saved.attachments] : []);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<SendReceipt | null>(null);
+  const [savedAt, setSavedAt] = useState<string | null>(saved?.updatedAt ?? null);
+  const backendPending = effectiveMode === "reply" || effectiveMode === "reply_all" || effectiveMode === "forward" || from !== account.email || attachments.length > 0;
+
+  function currentDraft(): LocalDraft {
+    return {
+      id: draftId,
+      accountId: account.id,
+      mode: effectiveMode === "draft" ? "new" : effectiveMode,
+      from,
+      to,
+      cc,
+      bcc,
+      subject,
+      body,
+      attachments,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  useEffect(() => {
+    if (![to, cc, bcc, subject, body].some((value) => value.trim()) && attachments.length === 0) return;
+    const timeout = window.setTimeout(() => {
+      const draft = currentDraft();
+      onSaveDraft(draft);
+      setSavedAt(draft.updatedAt);
+    }, 700);
+    return () => window.clearTimeout(timeout);
+  }, [attachments, bcc, body, cc, from, subject, to]);
+
   const mutation = useMutation({
     mutationFn: (input: Parameters<typeof api.sendMessage>[0]) => api.sendMessage(input),
     onSuccess: async (nextReceipt) => {
       setReceipt(nextReceipt);
+      onSent(draftId);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["messages", account.id] }),
         queryClient.invalidateQueries({ queryKey: ["folders", account.id] }),
       ]);
     },
   });
+
   function submit(event: FormEvent): void {
     event.preventDefault();
+    if (backendPending) return;
     const toAddresses = parseRecipientList(to);
     const ccAddresses = parseRecipientList(cc);
     const bccAddresses = parseRecipientList(bcc);
@@ -510,117 +760,27 @@ function ComposeModal({ account, onClose }: { account: { id: string; name: strin
     setValidationError(null);
     mutation.mutate({ accountId: account.id, to: toAddresses, cc: ccAddresses, bcc: bccAddresses, subject, text: body });
   }
+
+  const modeLabel = effectiveMode === "reply_all" ? "Reply all" : effectiveMode === "reply" ? "Reply" : effectiveMode === "forward" ? "Forward" : saved ? "Edit draft" : "New message";
   return <div className="modal-layer compose-layer">
     <button className="backdrop" aria-label="Close compose" disabled={mutation.isPending} onClick={onClose} />
     <form className="account-modal compose-modal" onSubmit={submit}>
-      <div className="panel-head"><div><span className="eyebrow"><Icon name="send" /> New message</span><h2>{receipt ? "Message sent" : "Compose email"}</h2></div>{!mutation.isPending ? <button type="button" className="icon-button" aria-label="Close compose" onClick={onClose}><Icon name="x" /></button> : null}</div>
+      <div className="panel-head"><div><span className="eyebrow"><Icon name={effectiveMode === "forward" ? "forward" : effectiveMode === "reply" || effectiveMode === "reply_all" ? "reply" : "send"} /> {modeLabel}</span><h2>{receipt ? "Message sent" : subject || "Compose email"}</h2></div>{!mutation.isPending ? <button type="button" className="icon-button" aria-label="Close compose" onClick={onClose}><Icon name="x" /></button> : null}</div>
       {receipt ? <div className="compose-success"><span><Icon name="send" /></span><h3>Message sent</h3><p>Accepted for delivery to {receipt.accepted.length} recipient{receipt.accepted.length === 1 ? "" : "s"}.</p>{receipt.rejected.length ? <div className="inline-alert error">Rejected: {receipt.rejected.join(", ")}</div> : null}</div> : <div className="setup-body compose-body">
-        <div className="from-field"><span>From</span><strong>{account.name}</strong><small>{account.email}</small></div>
+        <label className="from-field"><span>From</span><strong>{account.name}</strong><select aria-label="From identity" value={from} onChange={(event) => setFrom(event.target.value)}><option value={account.email}>{account.email}</option>{identities.map((identity) => <option value={identity.email} key={identity.id}>{identity.name} · {identity.email}</option>)}</select></label>
         <label className="field"><span>To</span><input autoFocus required type="text" inputMode="email" aria-label="To" placeholder="person@example.com, team@example.com" value={to} onChange={(event) => setTo(event.target.value)} /></label>
         <div className="field-grid"><label className="field"><span>Cc <i>optional</i></span><input type="text" inputMode="email" aria-label="Cc" value={cc} onChange={(event) => setCc(event.target.value)} /></label><label className="field"><span>Bcc <i>optional</i></span><input type="text" inputMode="email" aria-label="Bcc" value={bcc} onChange={(event) => setBcc(event.target.value)} /></label></div>
         <label className="field"><span>Subject</span><input maxLength={998} aria-label="Subject" value={subject} onChange={(event) => setSubject(event.target.value)} /></label>
         <label className="field"><span>Message</span><textarea required rows={12} maxLength={2_000_000} aria-label="Message" value={body} onChange={(event) => setBody(event.target.value)} /></label>
+        <div className="attachment-field"><label className="secondary-button"><Icon name="paperclip" /> Add attachments<input type="file" multiple onChange={(event) => setAttachments((current) => [...current, ...[...(event.target.files ?? [])].map((file) => ({ name: file.name, size: file.size, type: file.type }))])} /></label><span>Files stay local in this UI pass.</span></div>
+        {attachments.length ? <div className="attachment-list">{attachments.map((attachment, index) => <div key={`${attachment.name}:${index}`}><Icon name="paperclip" /><span><strong>{attachment.name}</strong><small>{Math.max(1, Math.round(attachment.size / 1024))} KB</small></span><button type="button" aria-label={`Remove ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, candidate) => candidate !== index))}><Icon name="x" /></button></div>)}</div> : null}
+        {backendPending ? <div className="inline-alert pending"><strong>Frontend ready, backend pending.</strong> Thread headers, alternate From identities, and attachment delivery are intentionally blocked until the mail layer supports them.</div> : null}
         {validationError ? <div className="inline-alert error">{validationError}</div> : null}
         {mutation.isError ? <div className="inline-alert error">{mutation.error.message}</div> : null}
       </div>}
-      <div className="modal-actions">{receipt ? <button type="button" className="primary-button" onClick={onClose}>Done</button> : <><button type="button" className="secondary-button" disabled={mutation.isPending} onClick={onClose}>Cancel</button><button className="primary-button" disabled={mutation.isPending || !body.trim()}><Icon name="send" />{mutation.isPending ? "Sending…" : "Send message"}</button></>}</div>
+      <div className="modal-actions compose-actions">{receipt ? <button type="button" className="primary-button" onClick={onClose}>Done</button> : <><span className="draft-status">{savedAt ? `Draft saved locally ${formatDate(savedAt, true)}` : "Drafts autosave locally"}</span><button type="button" className="secondary-button" onClick={() => { const draft = currentDraft(); onSaveDraft(draft); setSavedAt(draft.updatedAt); }}>Save draft</button><button type="button" className="secondary-button" disabled={mutation.isPending} onClick={onClose}>Close</button><button className="primary-button" disabled={mutation.isPending || !body.trim() || backendPending} title={backendPending ? "Backend support is required before this message can be sent" : undefined}><Icon name="send" />{mutation.isPending ? "Sending…" : "Send message"}</button></>}</div>
     </form>
   </div>;
-}
-
-interface ProposalPanelProps {
-  accountId: string;
-  folders: Folder[];
-  proposal: Proposal | null;
-  proposals: Proposal[];
-  loading: boolean;
-  error: string | null;
-  onSelect: (id: string) => void;
-  onClose: () => void;
-  onRetry: () => void;
-  onRefresh: () => Promise<void>;
-}
-
-function ProposalPanel(props: ProposalPanelProps) {
-  const [title, setTitle] = useState("");
-  const [items, setItems] = useState<ProposalItem[]>([]);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [mutationError, setMutationError] = useState<string | null>(null);
-  useEffect(() => {
-    setTitle(props.proposal?.title ?? "");
-    setItems(props.proposal?.items ?? []);
-    setMutationError(null);
-    setNotice(null);
-  }, [props.proposal?.id]);
-
-  const saveMutation = useMutation({
-    mutationFn: async () => {
-      if (!props.proposal) throw new Error("Choose a proposal first.");
-      return api.updateProposal(props.proposal.id, { title, items, status: "review" });
-    },
-    onSuccess: async () => { setNotice("Changes saved for review."); await props.onRefresh(); },
-    onError: (error) => setMutationError(error.message),
-  });
-  const approveMutation = useMutation({
-    mutationFn: async () => {
-      if (!props.proposal) throw new Error("Choose a proposal first.");
-      await api.updateProposal(props.proposal.id, { title, items, status: "review" });
-      return api.approveProposal(props.proposal.id);
-    },
-    onSuccess: async () => { setNotice("Proposal approved. It has not been applied yet."); await props.onRefresh(); },
-    onError: (error) => setMutationError(error.message),
-  });
-  const applyMutation = useMutation({
-    mutationFn: async () => {
-      if (!props.proposal) throw new Error("Choose a proposal first.");
-      return api.applyProposal(props.proposal.id);
-    },
-    onSuccess: async () => { setNotice("Approved actions applied. See Activity for results."); await props.onRefresh(); },
-    onError: (error) => setMutationError(error.message),
-  });
-
-  const editable = props.proposal?.status === "draft" || props.proposal?.status === "review";
-  const busy = saveMutation.isPending || approveMutation.isPending || applyMutation.isPending;
-  function updateItem(id: string, change: Partial<Pick<ProposalItem, "action" | "reason">>): void {
-    setItems((current) => current.map((item) => item.id === id ? { ...item, ...change } : item));
-    setNotice(null);
-  }
-  function setAction(item: ProposalItem, type: TriageAction["type"]): void {
-    const destination = props.folders.find((folder) => folder.path !== item.message.mailbox && folder.specialUse !== "trash")?.path ?? item.message.mailbox;
-    updateItem(item.id, { action: type === "move" ? { type, destination } : { type } });
-  }
-
-  return <>
-    <div className="panel-head"><div><span className="eyebrow"><Icon name="sparkles" /> Agent proposals</span><h2>Review before anything changes</h2></div><button className="icon-button" aria-label="Close proposal panel" onClick={props.onClose}><Icon name="x" /></button></div>
-    <div className="panel-scroll">
-      {props.loading ? <ReaderSkeleton /> : props.error ? <ErrorState message={props.error} retry={props.onRetry} /> : props.proposals.length === 0 ? <EmptyState icon="sparkles" title="No proposals yet" body="Connect an agent through WebMCP to prepare a triage plan. It cannot approve actions for you." /> : props.proposal ? <>
-        {props.proposals.length > 1 ? <label className="field"><span>Proposal</span><select value={props.proposal.id} onChange={(event) => props.onSelect(event.target.value)}>{props.proposals.map((proposal) => <option key={proposal.id} value={proposal.id}>{proposal.title}</option>)}</select></label> : null}
-        <div className="proposal-overview">
-          <div className="proposal-title-row"><StatusPill status={props.proposal.status} /><span>{items.length} action{items.length === 1 ? "" : "s"}</span></div>
-          <label className="field"><span>Proposal title</span><input aria-label="Proposal title" value={title} disabled={!editable} maxLength={120} onChange={(event) => { setTitle(event.target.value); setNotice(null); }} /></label>
-        </div>
-        <div className="proposal-items">
-          {items.map((item, index) => <div className="proposal-item" key={item.id}>
-            <div className="item-index">{index + 1}</div>
-            <div className="item-content">
-              <div className="item-top"><strong>{item.subject}</strong>{editable && items.length > 1 ? <button className="remove-action" aria-label={`Remove ${item.subject}`} onClick={() => setItems((current) => current.filter((candidate) => candidate.id !== item.id))}>Remove</button> : null}</div>
-              <label className="field compact"><span>Action</span><select aria-label={`Action for ${item.subject}`} disabled={!editable} value={item.action.type} onChange={(event) => { const type = parseActionType(event.target.value); if (type) setAction(item, type); }}>{Object.entries(actionLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
-              {item.action.type === "move" ? <label className="field compact"><span>Destination</span><select aria-label={`Destination for ${item.subject}`} disabled={!editable} value={item.action.destination} onChange={(event) => updateItem(item.id, { action: { type: "move", destination: event.target.value } })}>{props.folders.filter((folder) => folder.specialUse !== "trash").map((folder) => <option key={folder.path} value={folder.path}>{folder.name}</option>)}</select></label> : null}
-              <label className="field compact"><span>Reason</span><textarea aria-label={`Reason for ${item.subject}`} disabled={!editable} maxLength={500} rows={2} value={item.reason} onChange={(event) => updateItem(item.id, { reason: event.target.value })} /></label>
-            </div>
-          </div>)}
-        </div>
-        {mutationError ? <div className="inline-alert error">{mutationError}</div> : null}
-        {notice ? <div className="inline-alert success">{notice}</div> : null}
-        {editable ? <div className="approval-card"><Icon name="sparkles" /><div><strong>Your approval is required</strong><p>Review every action. Agents cannot approve or apply this proposal.</p></div></div> : null}
-      </> : null}
-    </div>
-    {props.proposal ? <div className="panel-actions">
-      {editable ? <><button className="secondary-button wide" disabled={busy || !title.trim() || items.length === 0} onClick={() => { setMutationError(null); saveMutation.mutate(); }}>{saveMutation.isPending ? "Saving…" : "Save changes"}</button><button className="primary-button wide" disabled={busy || !title.trim() || items.length === 0} onClick={() => { setMutationError(null); approveMutation.mutate(); }}>{approveMutation.isPending ? "Approving…" : "Approve proposal"}</button></> : null}
-      {props.proposal.status === "approved" ? <><p className="apply-warning">Approved and ready. Applying will change the mailbox.</p><button className="primary-button wide" disabled={busy} onClick={() => { setMutationError(null); applyMutation.mutate(); }}>{applyMutation.isPending ? "Applying actions…" : "Apply approved actions"}</button></> : null}
-      {finalProposalStatuses.has(props.proposal.status) ? <p className="finished-note">This proposal is complete. Open Activity to inspect each result or undo supported actions.</p> : null}
-    </div> : null}
-  </>;
 }
 
 interface HistoryPanelProps {
@@ -642,7 +802,7 @@ function HistoryPanel(props: HistoryPanelProps) {
   return <>
     <div className="panel-head"><div><span className="eyebrow"><Icon name="history" /> Audit trail</span><h2>Mailbox activity</h2></div><button className="icon-button" aria-label="Close activity panel" onClick={props.onClose}><Icon name="x" /></button></div>
     <div className="panel-scroll history-scroll">
-      {props.loading ? <ReaderSkeleton /> : props.error ? <ErrorState message={props.error} retry={props.onRetry} /> : props.batches.length === 0 ? <EmptyState icon="history" title="No activity yet" body="Applied proposals and their individual results will appear here." /> : props.batches.map((batch) => <section className="batch-card" key={batch.id}>
+      {props.loading ? <ReaderSkeleton /> : props.error ? <ErrorState message={props.error} retry={props.onRetry} /> : props.batches.length === 0 ? <EmptyState icon="history" title="No activity yet" body="Mailbox actions and their individual results will appear here." /> : props.batches.map((batch) => <section className="batch-card" key={batch.id}>
         <div className="batch-head"><div><StatusPill status={batch.status} /><time>{formatDate(batch.updatedAt, true)}</time></div><span>{batch.operations.length} operation{batch.operations.length === 1 ? "" : "s"}</span></div>
         <div className="operation-list">{batch.operations.map((operation) => <div className="operation" key={operation.itemId}><span className={`result-dot ${operation.status}`} /><div><strong>{actionLabels[operation.action.type]}</strong><span>UID {operation.message.uid} · {operation.message.mailbox}</span>{operation.error ? <em>{operation.error}</em> : null}</div><small>{operation.status.replaceAll("_", " ")}</small></div>)}</div>
         {(batch.status === "applied" || batch.status === "partially_applied") ? <button className="secondary-button wide" disabled={undoMutation.isPending} onClick={() => { setUndoError(null); undoMutation.mutate(batch.id); }}>{undoMutation.isPending && undoMutation.variables === batch.id ? "Undoing…" : "Undo supported actions"}</button> : null}
@@ -652,12 +812,14 @@ function HistoryPanel(props: HistoryPanelProps) {
   </>;
 }
 
-function AccountSetup({ accountId, onClose, onSaved, onRemoved }: {
-  accountId: string | null;
+function AccountSetup({ account, onClose, onSaved, onRemoved }: {
+  account: Account | null;
   onClose: () => void;
   onSaved: (account: Account) => void;
   onRemoved: (accountId: string) => void;
 }) {
+  const accountId = account?.id ?? null;
+  const isGmail = account?.kind === "gmail";
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -681,7 +843,12 @@ function AccountSetup({ accountId, onClose, onSaved, onRemoved }: {
   const settingsQuery = useQuery({
     queryKey: ["account-settings", accountId],
     queryFn: ({ signal }) => api.accountSettings(accountId ?? "", signal),
-    enabled: Boolean(accountId),
+    enabled: Boolean(accountId && !isGmail),
+  });
+  const googleStatusQuery = useQuery({
+    queryKey: ["google-oauth-status"],
+    queryFn: ({ signal }) => api.googleOAuthStatus(signal),
+    enabled: !accountId,
   });
   useEffect(() => {
     const settings = settingsQuery.data;
@@ -752,10 +919,16 @@ function AccountSetup({ accountId, onClose, onSaved, onRemoved }: {
   return <div className="modal-layer"><button className="backdrop" aria-label="Close account setup" onClick={onClose} /><form className="account-modal" onSubmit={submit}>
     <div className="panel-head"><div><span className="eyebrow">Account settings</span><h2>{accountId ? "Manage mailbox" : "Connect a mailbox"}</h2></div><button type="button" className="icon-button" aria-label="Close account setup" onClick={onClose}><Icon name="x" /></button></div>
     <div className="setup-body">
-      <p className="setup-copy">Postreeve tests IMAP and SMTP before saving. Credentials stay encrypted on this server and passwords are never returned to the browser.</p>
+      <p className="setup-copy">Connect Google with OAuth, or connect another provider through IMAP and SMTP. Credentials stay encrypted on this server and are never returned to the browser.</p>
+      {!accountId && googleStatusQuery.data?.configured ? <div className="google-connect"><strong>Gmail</strong><p>Authorize Postreeve through Google. Your Google password never enters Postreeve.</p><a className="primary-button" href="/api/oauth/google/start">Continue with Google</a></div> : null}
+      {!accountId && googleStatusQuery.data?.configured ? <div className="setup-divider"><span>or use mail server settings</span></div> : null}
+      {isGmail ? <>
+        <div className="google-connect connected"><strong>Connected with Google</strong><p>{account.email}</p><a className="secondary-button" href="/api/oauth/google/start">Reauthorize Google account</a></div>
+        <div className="remove-account-section"><strong>Remove account</strong><p>This permanently removes its encrypted Google token and local activity history. It does not delete mail from Gmail.</p>{confirmRemoval ? <div className="remove-confirmation"><span>This cannot be undone.</span><button type="button" className="danger-button" disabled={removeMutation.isPending} onClick={() => removeMutation.mutate()}>{removeMutation.isPending ? "Removing…" : "Remove account and local history"}</button><button type="button" className="text-button" onClick={() => setConfirmRemoval(false)}>Cancel</button></div> : <button type="button" className="danger-button" onClick={() => setConfirmRemoval(true)}>Remove account…</button>}{removeMutation.isError ? <div className="inline-alert error">{removeMutation.error.message}</div> : null}</div>
+      </> : null}
       {settingsQuery.isLoading ? <ReaderSkeleton /> : null}
       {settingsQuery.isError ? <ErrorState message={settingsQuery.error.message} retry={() => void settingsQuery.refetch()} /> : null}
-      {!accountId || settingsQuery.isSuccess ? <>
+      {!isGmail && (!accountId || settingsQuery.isSuccess) ? <>
       <div className="field-grid"><label className="field"><span>Name</span><input required value={name} placeholder="Work" onChange={(event) => setName(event.target.value)} /></label><label className="field"><span>Email address</span><input required type="email" value={email} placeholder="you@example.com" onChange={(event) => setEmail(event.target.value)} /></label></div>
       <fieldset className="connection-group"><legend>Incoming mail (IMAP)</legend>
           <div className="field-grid host-grid"><label className="field"><span>IMAP host</span><input required value={host} placeholder="imap.example.com" onChange={(event) => { const value = event.target.value; setHost(value); if (!smtpHostEdited) setSmtpHost(value.replace(/^imap\./i, "smtp.")); }} /></label><label className="field"><span>Port</span><input required type="number" min="1" max="65535" value={port} onChange={(event) => setPort(event.target.value)} /></label></div>
@@ -771,10 +944,10 @@ function AccountSetup({ accountId, onClose, onSaved, onRemoved }: {
       {testMutation.isSuccess ? <div className="inline-alert success">IMAP and SMTP connections succeeded.</div> : null}
       {testMutation.isError ? <div className="inline-alert error">{testMutation.error.message}</div> : null}
       {saveMutation.isError ? <div className="inline-alert error">{saveMutation.error.message}</div> : null}
-      {accountId ? <div className="remove-account-section"><strong>Remove account</strong><p>This permanently removes its encrypted credentials and local proposal and activity history. It does not delete mail from your provider.</p>{confirmRemoval ? <div className="remove-confirmation"><span>This cannot be undone.</span><button type="button" className="danger-button" disabled={removeMutation.isPending} onClick={() => removeMutation.mutate()}>{removeMutation.isPending ? "Removing…" : "Remove account and local history"}</button><button type="button" className="text-button" onClick={() => setConfirmRemoval(false)}>Cancel</button></div> : <button type="button" className="danger-button" onClick={() => setConfirmRemoval(true)}>Remove account…</button>}{removeMutation.isError ? <div className="inline-alert error">{removeMutation.error.message}</div> : null}</div> : null}
+      {accountId ? <div className="remove-account-section"><strong>Remove account</strong><p>This permanently removes its encrypted credentials and local activity history. It does not delete mail from your provider.</p>{confirmRemoval ? <div className="remove-confirmation"><span>This cannot be undone.</span><button type="button" className="danger-button" disabled={removeMutation.isPending} onClick={() => removeMutation.mutate()}>{removeMutation.isPending ? "Removing…" : "Remove account and local history"}</button><button type="button" className="text-button" onClick={() => setConfirmRemoval(false)}>Cancel</button></div> : <button type="button" className="danger-button" onClick={() => setConfirmRemoval(true)}>Remove account…</button>}{removeMutation.isError ? <div className="inline-alert error">{removeMutation.error.message}</div> : null}</div> : null}
       </> : null}
     </div>
-    <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="button" className="secondary-button" disabled={!connectionFieldsComplete || testMutation.isPending || saveMutation.isPending || (Boolean(accountId) && !settingsQuery.isSuccess)} onClick={() => testMutation.mutate()}>{testMutation.isPending ? "Testing…" : "Test connection"}</button><button className="primary-button" disabled={!connectionFieldsComplete || saveMutation.isPending || testMutation.isPending || (Boolean(accountId) && !settingsQuery.isSuccess)}>{saveMutation.isPending ? "Connecting…" : accountId ? "Save and reconnect" : "Connect account"}</button></div>
+    <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>{isGmail ? "Done" : "Cancel"}</button>{!isGmail ? <><button type="button" className="secondary-button" disabled={!connectionFieldsComplete || testMutation.isPending || saveMutation.isPending || (Boolean(accountId) && !settingsQuery.isSuccess)} onClick={() => testMutation.mutate()}>{testMutation.isPending ? "Testing…" : "Test connection"}</button><button className="primary-button" disabled={!connectionFieldsComplete || saveMutation.isPending || testMutation.isPending || (Boolean(accountId) && !settingsQuery.isSuccess)}>{saveMutation.isPending ? "Connecting…" : accountId ? "Save and reconnect" : "Connect account"}</button></> : null}</div>
   </form></div>;
 }
 

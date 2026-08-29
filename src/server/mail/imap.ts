@@ -398,9 +398,10 @@ function isCurrentMessage(message: FetchMessageObject | false, reference: Messag
 }
 
 async function changeSeenFlag(client: ImapClient, reference: MessageRef, read: boolean): Promise<void> {
-  const options = reference.modseq === null
-    ? { uid: true as const }
-    : { uid: true as const, unchangedSince: BigInt(reference.modseq) };
+  // ImapFlow 1.7.6 places UNCHANGEDSINCE after the flag data, which strict IMAP
+  // servers reject. apply() and undo() validate the UID and MODSEQ immediately
+  // before this single-flag mutation, so the stale-message guard remains intact.
+  const options = { uid: true as const };
   const changed = read
     ? await client.messageFlagsAdd(reference.uid, [SEEN_FLAG], options)
     : await client.messageFlagsRemove(reference.uid, [SEEN_FLAG], options);

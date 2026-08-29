@@ -1,5 +1,6 @@
 import type {
   CreateProposalInput,
+  DirectActionInput,
   ListMessagesInput,
   MessageRef,
   UpdateProposalInput,
@@ -15,6 +16,7 @@ export const webMcpServices: WebMcpServices = {
   readMessages: (messages: readonly MessageRef[], signal) => api.readMessages(messages, signal),
   searchMessages: (input: ListMessagesInput & { query: string }, signal) =>
     api.messages(input.accountId, input.mailbox, input.query, input.limit, signal),
+  applyMessageActions: (input: DirectActionInput, signal) => api.applyDirectActions(input, signal),
   createProposal: (input: CreateProposalInput, signal) => api.createProposal(input, signal),
   updateProposal: (proposalId: string, input: UpdateProposalInput, signal) =>
     api.updateProposal(proposalId, input, signal),

@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import type {
   Account,
   CreateProposalInput,
+  DirectActionInput,
   Folder,
   ListMessagesInput,
   MessageDetail,
@@ -104,6 +105,7 @@ const batch: OperationBatch = {
 };
 
 class FakeServices implements WebMcpServices {
+  readonly directActionCalls: DirectActionInput[] = [];
   readonly updateCalls: Array<{ proposalId: string; input: UpdateProposalInput }> = [];
   readonly applyCalls: string[] = [];
   lastSignal: AbortSignal | null = null;
@@ -134,6 +136,12 @@ class FakeServices implements WebMcpServices {
   ): Promise<readonly MessageSummary[]> {
     this.lastSignal = signal;
     return [message];
+  }
+
+  async applyMessageActions(input: DirectActionInput, signal: AbortSignal): Promise<OperationBatch> {
+    this.lastSignal = signal;
+    this.directActionCalls.push(input);
+    return batch;
   }
 
   async createProposal(_input: CreateProposalInput, signal: AbortSignal): Promise<Proposal> {
@@ -198,6 +206,7 @@ describe("Postreeve WebMCP", () => {
       "list_messages",
       "read_messages",
       "search_messages",
+      "apply_message_actions",
       "create_triage_proposal",
       "update_triage_proposal",
       "apply_approved_proposal",
@@ -215,6 +224,10 @@ describe("Postreeve WebMCP", () => {
       untrustedContentHint: true,
     });
     expect(modelContext.tool("apply_approved_proposal").annotations?.readOnlyHint).toBe(false);
+    expect(modelContext.tool("apply_message_actions").annotations).toEqual({
+      readOnlyHint: false,
+      untrustedContentHint: true,
+    });
 
     registration?.dispose();
     expect(modelContext.tools.size).toBe(0);
@@ -250,6 +263,14 @@ describe("Postreeve WebMCP", () => {
         executeOptions(),
       ),
     ).toEqual([message]);
+    const directActionInput: DirectActionInput = {
+      accountId: account.id,
+      items: [{ message: messageRef, subject: message.subject, action: { type: "mark_read" } }],
+    };
+    expect(
+      await modelContext.tool("apply_message_actions").execute(directActionInput, executeOptions()),
+    ).toEqual(batch);
+    expect(services.directActionCalls).toEqual([directActionInput]);
     expect(
       await modelContext.tool("create_triage_proposal").execute(
         { accountId: account.id, title: proposal.title, items: proposal.items },

@@ -35,6 +35,7 @@ interface StoredMailbox {
 interface FakeState {
   readonly mailboxes: Map<string, StoredMailbox>;
   readonly options: ImapFlowOptions[];
+  readonly storeOptions: StoreOptions[];
   readonly searches: SearchObject[];
   readonly searchOptions: Array<{ uid?: boolean; returnOptions: Array<"MIN" | "MAX" | "COUNT" | "ALL" | { partial: string }> }>;
   eSearchAll?: string;
@@ -180,7 +181,7 @@ describe("Bun IMAP compatibility", () => {
     expect(state.mailboxes.get("INBOX")?.messages.get(3)?.flags?.has("\\Seen")).toBe(false);
   });
 
-  test("applies and undoes read state with UNCHANGEDSINCE", async () => {
+  test("applies and undoes read state without an incompatible conditional STORE", async () => {
     const state = fakeState();
     const provider = new ImapMailProvider(config, fakeFactory(state));
     const applied = await provider.apply(messageRef(), { type: "mark_read" });
@@ -188,9 +189,11 @@ describe("Bun IMAP compatibility", () => {
     expect(applied.previousRead).toBe(false);
     expect(applied.current.modseq).toBe("14");
     expect(state.mailboxes.get("INBOX")?.messages.get(3)?.flags?.has("\\Seen")).toBe(true);
+    expect(state.storeOptions).toEqual([{ uid: true }]);
 
     await provider.undo(applied);
     expect(state.mailboxes.get("INBOX")?.messages.get(3)?.flags?.has("\\Seen")).toBe(false);
+    expect(state.storeOptions).toEqual([{ uid: true }, { uid: true }]);
   });
 
   test("moves to the discovered Trash mailbox and safely moves back on undo", async () => {
@@ -361,6 +364,7 @@ class FakeImapClient implements ImapClient {
   }
 
   #changeFlags(range: number, flags: string[], add: boolean, options?: StoreOptions): boolean {
+    this.#state.storeOptions.push(options ?? {});
     const message = this.#requireSelected().messages.get(range);
     if (!message) return false;
     if (options?.unchangedSince !== undefined && message.modseq !== options.unchangedSince) return false;
@@ -413,6 +417,7 @@ function fakeState(): FakeState {
 
   return {
     options: [],
+    storeOptions: [],
     searches: [],
     searchOptions: [],
     lists: 0,

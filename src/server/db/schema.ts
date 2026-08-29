@@ -10,7 +10,7 @@ export const accounts = sqliteTable("accounts", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
   email: text("email").notNull(),
-  kind: text("kind", { enum: ["imap"] }).notNull(),
+  kind: text("kind", { enum: ["imap", "gmail"] }).notNull(),
   encryptedCredentials: text("encrypted_credentials"),
   createdAt: text("created_at").notNull(),
 });

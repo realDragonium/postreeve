@@ -4,12 +4,15 @@ export const accountIdSchema = z.string().min(1);
 export const proposalIdSchema = z.string().min(1);
 export const batchIdSchema = z.string().min(1);
 
-export const accountSchema = z.object({
+const accountBaseSchema = z.object({
   id: accountIdSchema,
   name: z.string().min(1),
   email: z.email(),
-  kind: z.literal("imap"),
 });
+export const accountSchema = z.discriminatedUnion("kind", [
+  accountBaseSchema.extend({ kind: z.literal("imap") }),
+  accountBaseSchema.extend({ kind: z.literal("gmail") }),
+]);
 
 export const outboundAddressSchema = z.object({
   name: z.string().max(120).default(""),
@@ -30,6 +33,7 @@ export const messageRefSchema = z.object({
   uidValidity: z.string().min(1),
   uid: z.number().int().positive(),
   modseq: z.string().min(1).nullable(),
+  providerId: z.string().min(1).optional(),
 });
 
 export const messageAddressSchema = z.object({
