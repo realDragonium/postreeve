@@ -60,7 +60,7 @@ Start with a scoped request:
 
 > List my accounts and folders. Inspect unread messages in my inbox, explain what you recommend, and wait for my next instruction before applying actions.
 
-WebMCP can move messages, move them to Trash, and change their read state through an audited, undoable execution path. Inspect results and undo supported operations in **Activity**. WebMCP cannot permanently delete mail or send email; those remain unavailable or human-only UI actions.
+WebMCP mirrors the completed mailbox workflow available in the UI: it can inspect accounts, folders, and messages; send a new message from an account's primary address; apply explicit move, Trash, and read-state actions; inspect Activity; and undo supported operations. Sending real mail requires explicit user approval. Permanent deletion remains unavailable everywhere.
 
 Use GPT-5.6 Sol or GPT-5.6 Terra for site tools. GPT-5.6 Luna currently has WebMCP disabled.
 

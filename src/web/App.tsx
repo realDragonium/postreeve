@@ -421,7 +421,7 @@ function App() {
             ))}
             {currentAccount ? <button className={`folder-row ${panel === "drafts" ? "active" : ""}`} onClick={() => setPanel("drafts")}><Icon name="mail" /><span>Local drafts</span>{accountDrafts.length > 0 ? <b>{accountDrafts.length}</b> : null}</button> : null}
           </nav>
-          <div className="sidebar-note"><Icon name="sparkles" /><p><strong>Agent-ready inbox</strong><br />Agents can inspect mail and apply audited actions through WebMCP. Every change stays visible and undoable.</p></div>
+          <div className="sidebar-note"><Icon name="sparkles" /><p><strong>Same mailbox, same capabilities</strong><br />WebMCP mirrors completed user workflows. Mailbox changes stay visible and undoable in Activity.</p></div>
         </aside>
         {mobileNav ? <button className="backdrop nav-backdrop" aria-label="Close navigation" onClick={() => setMobileNav(false)} /> : null}
 

@@ -154,8 +154,8 @@ export const api = {
       method: "POST",
       ...withSignal(signal),
     }),
-  batches: (accountId: string): Promise<OperationBatch[]> =>
-    request(`/batches?accountId=${encodeURIComponent(accountId)}`, operationBatchSchema.array()),
+  batches: (accountId: string, signal?: AbortSignal): Promise<OperationBatch[]> =>
+    request(`/batches?accountId=${encodeURIComponent(accountId)}`, operationBatchSchema.array(), withSignal(signal)),
   undoBatch: (id: string, signal?: AbortSignal): Promise<OperationBatch> =>
     request(`/batches/${encodeURIComponent(id)}/undo`, operationBatchSchema, { method: "POST", ...withSignal(signal) }),
 };

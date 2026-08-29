@@ -1,6 +1,5 @@
 import type {
   Account,
-  CreateProposalInput,
   DirectActionInput,
   Folder,
   ListMessagesInput,
@@ -8,8 +7,8 @@ import type {
   MessageRef,
   MessageSummary,
   OperationBatch,
-  Proposal,
-  UpdateProposalInput,
+  SendMessageInput,
+  SendReceipt,
 } from "../../shared/contracts.ts";
 
 export interface WebMcpServices {
@@ -18,14 +17,9 @@ export interface WebMcpServices {
   listMessages(input: ListMessagesInput, signal: AbortSignal): Promise<readonly MessageSummary[]>;
   readMessages(messages: readonly MessageRef[], signal: AbortSignal): Promise<readonly MessageDetail[]>;
   searchMessages(input: ListMessagesInput & { query: string }, signal: AbortSignal): Promise<readonly MessageSummary[]>;
+  sendMessage(input: SendMessageInput, signal: AbortSignal): Promise<SendReceipt>;
   applyMessageActions(input: DirectActionInput, signal: AbortSignal): Promise<OperationBatch>;
-  createProposal(input: CreateProposalInput, signal: AbortSignal): Promise<Proposal>;
-  updateProposal(
-    proposalId: string,
-    input: UpdateProposalInput,
-    signal: AbortSignal,
-  ): Promise<Proposal>;
-  applyProposal(proposalId: string, signal: AbortSignal): Promise<OperationBatch>;
+  listActivity(accountId: string, signal: AbortSignal): Promise<readonly OperationBatch[]>;
   undoBatch(batchId: string, signal: AbortSignal): Promise<OperationBatch>;
 }
 

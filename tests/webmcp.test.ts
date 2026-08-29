@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 
 import type {
   Account,
-  CreateProposalInput,
   DirectActionInput,
   Folder,
   ListMessagesInput,
@@ -10,8 +9,8 @@ import type {
   MessageRef,
   MessageSummary,
   OperationBatch,
-  Proposal,
-  UpdateProposalInput,
+  SendMessageInput,
+  SendReceipt,
 } from "../src/shared/contracts.ts";
 import {
   createPostreeveWebMcpTools,
@@ -66,34 +65,40 @@ const messageDetail: MessageDetail = {
   html: null,
 };
 
-const proposal: Proposal = {
-  id: "proposal-1",
+const sendInput: SendMessageInput = {
   accountId: account.id,
-  title: "Inbox triage",
-  status: "draft",
-  items: [
-    {
-      id: "item-1",
-      message: messageRef,
-      subject: message.subject,
-      action: { type: "mark_read" },
-      reason: "Handled",
-    },
-  ],
-  createdAt: "2026-08-29T12:00:00.000Z",
-  updatedAt: "2026-08-29T12:00:00.000Z",
-  approvedAt: null,
-  batchId: null,
+  to: [{ name: "", address: "recipient@example.test" }],
+  cc: [],
+  bcc: [],
+  subject: "Approved message",
+  text: "This message was approved by the user.",
+};
+const sendToolInput = {
+  accountId: account.id,
+  to: ["recipient@example.test"],
+  cc: [],
+  bcc: [],
+  subject: sendInput.subject,
+  text: sendInput.text,
+};
+
+const receipt: SendReceipt = {
+  id: "sent-1",
+  accountId: account.id,
+  messageId: "sent-message@example.test",
+  accepted: ["recipient@example.test"],
+  rejected: [],
+  submittedAt: "2026-08-29T12:00:30.000Z",
 };
 
 const batch: OperationBatch = {
   id: "batch-1",
-  proposalId: proposal.id,
+  proposalId: "direct-action-1",
   accountId: account.id,
   status: "applied",
   operations: [
     {
-      itemId: proposal.items[0]?.id ?? "item-1",
+      itemId: "item-1",
       message: messageRef,
       action: { type: "mark_read" },
       status: "applied",
@@ -105,9 +110,9 @@ const batch: OperationBatch = {
 };
 
 class FakeServices implements WebMcpServices {
+  readonly sendCalls: SendMessageInput[] = [];
   readonly directActionCalls: DirectActionInput[] = [];
-  readonly updateCalls: Array<{ proposalId: string; input: UpdateProposalInput }> = [];
-  readonly applyCalls: string[] = [];
+  readonly activityCalls: string[] = [];
   lastSignal: AbortSignal | null = null;
 
   async listAccounts(signal: AbortSignal): Promise<readonly Account[]> {
@@ -138,31 +143,22 @@ class FakeServices implements WebMcpServices {
     return [message];
   }
 
+  async sendMessage(input: SendMessageInput, signal: AbortSignal): Promise<SendReceipt> {
+    this.lastSignal = signal;
+    this.sendCalls.push(input);
+    return receipt;
+  }
+
   async applyMessageActions(input: DirectActionInput, signal: AbortSignal): Promise<OperationBatch> {
     this.lastSignal = signal;
     this.directActionCalls.push(input);
     return batch;
   }
 
-  async createProposal(_input: CreateProposalInput, signal: AbortSignal): Promise<Proposal> {
+  async listActivity(accountId: string, signal: AbortSignal): Promise<readonly OperationBatch[]> {
     this.lastSignal = signal;
-    return proposal;
-  }
-
-  async updateProposal(
-    proposalId: string,
-    input: UpdateProposalInput,
-    signal: AbortSignal,
-  ): Promise<Proposal> {
-    this.lastSignal = signal;
-    this.updateCalls.push({ proposalId, input });
-    return proposal;
-  }
-
-  async applyProposal(proposalId: string, signal: AbortSignal): Promise<OperationBatch> {
-    this.lastSignal = signal;
-    this.applyCalls.push(proposalId);
-    return batch;
+    this.activityCalls.push(accountId);
+    return [batch];
   }
 
   async undoBatch(_batchId: string, signal: AbortSignal): Promise<OperationBatch> {
@@ -206,10 +202,9 @@ describe("Postreeve WebMCP", () => {
       "list_messages",
       "read_messages",
       "search_messages",
+      "send_message",
       "apply_message_actions",
-      "create_triage_proposal",
-      "update_triage_proposal",
-      "apply_approved_proposal",
+      "list_activity",
       "undo_batch",
     ];
 
@@ -223,9 +218,13 @@ describe("Postreeve WebMCP", () => {
       readOnlyHint: true,
       untrustedContentHint: true,
     });
-    expect(modelContext.tool("apply_approved_proposal").annotations?.readOnlyHint).toBe(false);
+    expect(modelContext.tool("send_message").annotations?.readOnlyHint).toBe(false);
     expect(modelContext.tool("apply_message_actions").annotations).toEqual({
       readOnlyHint: false,
+      untrustedContentHint: true,
+    });
+    expect(modelContext.tool("list_activity").annotations).toEqual({
+      readOnlyHint: true,
       untrustedContentHint: true,
     });
 
@@ -263,6 +262,10 @@ describe("Postreeve WebMCP", () => {
         executeOptions(),
       ),
     ).toEqual([message]);
+    expect(
+      await modelContext.tool("send_message").execute(sendToolInput, executeOptions()),
+    ).toEqual(receipt);
+    expect(services.sendCalls).toEqual([sendInput]);
     const directActionInput: DirectActionInput = {
       accountId: account.id,
       items: [{ message: messageRef, subject: message.subject, action: { type: "mark_read" } }],
@@ -272,51 +275,28 @@ describe("Postreeve WebMCP", () => {
     ).toEqual(batch);
     expect(services.directActionCalls).toEqual([directActionInput]);
     expect(
-      await modelContext.tool("create_triage_proposal").execute(
-        { accountId: account.id, title: proposal.title, items: proposal.items },
-        executeOptions(),
-      ),
-    ).toEqual(proposal);
-    expect(
-      await modelContext.tool("update_triage_proposal").execute(
-        { proposalId: proposal.id, title: "Updated", status: "review" },
-        executeOptions(),
-      ),
-    ).toEqual(proposal);
-    expect(services.updateCalls).toEqual([
-      { proposalId: proposal.id, input: { title: "Updated", status: "review" } },
-    ]);
-    expect(
-      await modelContext.tool("apply_approved_proposal").execute(
-        { proposalId: proposal.id },
-        executeOptions(),
-      ),
-    ).toEqual(batch);
-    expect(services.applyCalls).toEqual([proposal.id]);
+      await modelContext.tool("list_activity").execute({ accountId: account.id }, executeOptions()),
+    ).toEqual([batch]);
+    expect(services.activityCalls).toEqual([account.id]);
     expect(
       await modelContext.tool("undo_batch").execute({ batchId: batch.id }, executeOptions()),
     ).toEqual({ ...batch, status: "undone" });
   });
 
-  test("cannot turn a WebMCP proposal update into human approval", async () => {
+  test("does not expose agent-only proposals or internal no-op actions", async () => {
     const services = new FakeServices();
-    const updateTool = createPostreeveWebMcpTools(services).find(
-      ({ name }) => name === "update_triage_proposal",
-    );
-    if (updateTool === undefined) {
-      throw new Error("Missing update_triage_proposal tool");
-    }
-
-    await expect(
-      updateTool.execute({ proposalId: proposal.id, status: "approved" }, executeOptions()),
-    ).rejects.toThrow();
-    await expect(
-      updateTool.execute(
-        { proposalId: proposal.id, approvedAt: "2026-08-29T12:02:00.000Z" },
-        executeOptions(),
-      ),
-    ).rejects.toThrow();
-    expect(services.updateCalls).toEqual([]);
+    const tools = createPostreeveWebMcpTools(services);
+    const names = tools.map(({ name }) => name);
+    expect(names).not.toContain("create_triage_proposal");
+    expect(names).not.toContain("update_triage_proposal");
+    expect(names).not.toContain("apply_approved_proposal");
+    const actions = tools.find(({ name }) => name === "apply_message_actions");
+    if (!actions) throw new Error("Missing apply_message_actions tool");
+    await expect(actions.execute({
+      accountId: account.id,
+      items: [{ message: messageRef, subject: message.subject, action: { type: "leave" } }],
+    }, executeOptions())).rejects.toThrow();
+    expect(services.directActionCalls).toEqual([]);
   });
 
   test("is inert outside a WebMCP-capable browser", async () => {
