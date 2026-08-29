@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import DOMPurify from "dompurify";
 import {
@@ -20,6 +20,8 @@ import { registerPostreeveWebMcp } from "../server/webmcp/register";
 import { webMcpServices } from "./webmcp";
 
 type Panel = "proposal" | "history" | null;
+
+const folderPollIntervalMs = 15_000;
 
 const actionLabels: Record<TriageAction["type"], string> = {
   leave: "Leave here",
@@ -150,6 +152,7 @@ function App() {
   const [composeOpen, setComposeOpen] = useState(false);
   const [mailNotice, setMailNotice] = useState<string | null>(null);
   const [selectedProposalId, setSelectedProposalId] = useState("");
+  const observedFolderCounts = useRef(new Map<string, string>());
 
   useEffect(() => {
     let active = true;
@@ -174,6 +177,7 @@ function App() {
     queryKey: ["folders", accountId],
     queryFn: () => api.folders(accountId),
     enabled: Boolean(accountId),
+    refetchInterval: folderPollIntervalMs,
   });
   useEffect(() => {
     if (!foldersQuery.data?.length) return;
@@ -219,6 +223,16 @@ function App() {
   const currentFolder = foldersQuery.data?.find((folder) => folder.path === mailbox);
   const currentAccount = accountsQuery.data?.find((account) => account.id === accountId);
   const hasAccounts = Boolean(accountsQuery.data?.length);
+  useEffect(() => {
+    if (!currentFolder) return;
+    const key = `${accountId}\n${currentFolder.path}`;
+    const counts = `${currentFolder.total}:${currentFolder.unread}`;
+    const previous = observedFolderCounts.current.get(key);
+    observedFolderCounts.current.set(key, counts);
+    if (previous !== undefined && previous !== counts) {
+      void queryClient.invalidateQueries({ queryKey: ["messages", accountId, currentFolder.path] });
+    }
+  }, [accountId, currentFolder, queryClient]);
 
   function switchAccount(next: string): void {
     setAccountId(next);
@@ -462,6 +476,7 @@ function parseRecipientList(value: string): OutboundAddress[] | null {
 }
 
 function ComposeModal({ account, onClose }: { account: { id: string; name: string; email: string }; onClose: () => void }) {
+  const queryClient = useQueryClient();
   const [to, setTo] = useState("");
   const [cc, setCc] = useState("");
   const [bcc, setBcc] = useState("");
@@ -471,7 +486,13 @@ function ComposeModal({ account, onClose }: { account: { id: string; name: strin
   const [receipt, setReceipt] = useState<SendReceipt | null>(null);
   const mutation = useMutation({
     mutationFn: (input: Parameters<typeof api.sendMessage>[0]) => api.sendMessage(input),
-    onSuccess: setReceipt,
+    onSuccess: async (nextReceipt) => {
+      setReceipt(nextReceipt);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["messages", account.id] }),
+        queryClient.invalidateQueries({ queryKey: ["folders", account.id] }),
+      ]);
+    },
   });
   function submit(event: FormEvent): void {
     event.preventDefault();

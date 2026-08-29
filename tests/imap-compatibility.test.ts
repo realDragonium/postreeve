@@ -80,6 +80,11 @@ describe("Bun IMAP compatibility", () => {
     expect(details[0]?.text.trim()).toBe("Newest plain text body");
     expect(details[0]?.html).toContain("https://tracker.example.test/pixel.png");
 
+    const plainTextReference = summaries.find((message) => message.ref.uid === 2)?.ref;
+    if (!plainTextReference) throw new Error("Expected a plain-text message reference");
+    const plainTextDetails = await provider.readMessages(config.accountId, [plainTextReference]);
+    expect(plainTextDetails[0]?.html).toBeNull();
+
     expect(state.options[0]).toMatchObject({
       host: config.host,
       port: config.port,

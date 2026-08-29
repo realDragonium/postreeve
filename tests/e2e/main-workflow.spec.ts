@@ -55,6 +55,8 @@ async function json(route: Route, value: unknown, status = 200): Promise<void> {
 
 test("sends and manages mail, then reviews, applies, and undoes an AI proposal", async ({ page }) => {
   let sentMessage: SendMessageInput | null = null;
+  let folderRequests = 0;
+  let messageRequests = 0;
   let proposal: Proposal = {
     id: "proposal-1",
     accountId: account.id,
@@ -74,8 +76,14 @@ test("sends and manages mail, then reviews, applies, and undoes an AI proposal",
     const method = request.method();
 
     if (method === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
-    if (method === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
-    if (method === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, [message]);
+    if (method === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) {
+      folderRequests += 1;
+      return json(route, folders);
+    }
+    if (method === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) {
+      messageRequests += 1;
+      return json(route, [message]);
+    }
     if (method === "POST" && url.pathname === "/api/messages/read") return json(route, [message]);
     if (method === "POST" && url.pathname === "/api/messages/send") {
       sentMessage = sendMessageInputSchema.parse(request.postDataJSON());
@@ -144,8 +152,12 @@ test("sends and manages mail, then reviews, applies, and undoes an AI proposal",
     return json(route, { error: `Unhandled test route: ${method} ${url.pathname}` }, 404);
   });
 
+  await page.clock.install();
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
+  const initialFolderRequests = folderRequests;
+  await page.clock.fastForward(15_000);
+  await expect.poll(() => folderRequests).toBeGreaterThan(initialFolderRequests);
 
   await page.getByRole("button", { name: "Compose" }).click();
   await expect(page.locator(".compose-modal").getByText("alex@example.com", { exact: true })).toBeVisible();
@@ -156,6 +168,7 @@ test("sends and manages mail, then reviews, applies, and undoes an AI proposal",
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByRole("heading", { name: "Message sent", level: 2 })).toBeVisible();
   expect(sentMessage).toMatchObject({ accountId: account.id, subject: "Planning follow-up", text: "Here are the next steps from our planning session." });
+  await expect.poll(() => messageRequests).toBeGreaterThan(1);
   await page.getByRole("button", { name: "Done" }).click();
 
   await page.getByText("Quarterly planning notes", { exact: true }).click();

@@ -559,7 +559,7 @@ function toDetail(
   return {
     ...toSummary(accountId, mailboxPath, mailbox, message, parsed),
     text: parsed.text ?? "",
-    html: parsed.html === false ? null : parsed.html,
+    html: typeof parsed.html === "string" ? parsed.html : null,
   };
 }
 
