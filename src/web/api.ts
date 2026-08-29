@@ -1,6 +1,8 @@
 import type { ZodType } from "zod";
 import {
   accountSchema,
+  accountSettingsSchema,
+  connectionTestResultSchema,
   folderSchema,
   messageDetailSchema,
   messageSummarySchema,
@@ -8,6 +10,7 @@ import {
   proposalSchema,
   sendReceiptSchema,
   type Account,
+  type AccountSettings,
   type CreateAccountInput,
   type CreateProposalInput,
   type DirectActionInput,
@@ -20,6 +23,7 @@ import {
   type SendMessageInput,
   type SendReceipt,
   type UpdateProposalInput,
+  type UpdateAccountInput,
 } from "../shared/contracts";
 
 const errorSchema = {
@@ -65,6 +69,31 @@ export const api = {
   accounts: (signal?: AbortSignal): Promise<Account[]> => request("/accounts", accountSchema.array(), withSignal(signal)),
   createAccount: (input: CreateAccountInput): Promise<Account> =>
     request("/accounts", accountSchema, { method: "POST", ...jsonBody(input) }),
+  testNewAccount: (input: CreateAccountInput, signal?: AbortSignal) =>
+    request("/accounts/test", connectionTestResultSchema, {
+      method: "POST",
+      ...jsonBody(input),
+      ...withSignal(signal),
+    }),
+  accountSettings: (accountId: string, signal?: AbortSignal): Promise<AccountSettings> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/settings`, accountSettingsSchema, withSignal(signal)),
+  testAccount: (accountId: string, input: UpdateAccountInput, signal?: AbortSignal) =>
+    request(`/accounts/${encodeURIComponent(accountId)}/test`, connectionTestResultSchema, {
+      method: "POST",
+      ...jsonBody(input),
+      ...withSignal(signal),
+    }),
+  updateAccount: (accountId: string, input: UpdateAccountInput, signal?: AbortSignal): Promise<Account> =>
+    request(`/accounts/${encodeURIComponent(accountId)}`, accountSchema, {
+      method: "PUT",
+      ...jsonBody(input),
+      ...withSignal(signal),
+    }),
+  removeAccount: (accountId: string, signal?: AbortSignal) =>
+    request(`/accounts/${encodeURIComponent(accountId)}`, connectionTestResultSchema, {
+      method: "DELETE",
+      ...withSignal(signal),
+    }),
   folders: (accountId: string, signal?: AbortSignal): Promise<Folder[]> =>
     request(`/accounts/${encodeURIComponent(accountId)}/folders`, folderSchema.array(), withSignal(signal)),
   messages: (accountId: string, mailbox: string, query: string, limit = 50, signal?: AbortSignal): Promise<MessageSummary[]> => {

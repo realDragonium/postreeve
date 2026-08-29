@@ -89,6 +89,12 @@ export class ImapMailProvider implements MailProvider {
     this.#createClient = createClient;
   }
 
+  async verifyConnection(): Promise<void> {
+    await this.#withClient(async (client) => {
+      await client.list();
+    });
+  }
+
   async listFolders(accountId: string): Promise<Folder[]> {
     this.#assertAccount(accountId);
     return this.#withClient(async (client) => {
@@ -476,17 +482,35 @@ function toSummary(
   parsed?: ParsedMail,
 ): MessageSummary {
   const receivedAt = toDate(message.internalDate) ?? message.envelope?.date ?? parsed?.date ?? new Date(0);
+  const deliveredTo = deliveryAddresses(parsed);
   return {
     ref: referenceFor(accountId, mailboxPath, mailbox, message),
     messageId: message.envelope?.messageId ?? headerString(parsed, "message-id") ?? "",
     subject: message.envelope?.subject ?? parsed?.subject ?? "(no subject)",
     from: message.envelope?.from?.map(toEnvelopeAddress) ?? parsedAddresses(parsed?.from?.value),
     to: message.envelope?.to?.map(toEnvelopeAddress) ?? parsedAddresses(flattenAddresses(parsed?.to)),
+    cc: message.envelope?.cc?.map(toEnvelopeAddress) ?? parsedAddresses(flattenAddresses(parsed?.cc)),
+    ...(deliveredTo.length === 0 ? {} : { deliveredTo }),
     receivedAt: receivedAt.toISOString(),
     preview: previewFor(parsed?.text),
     read: hasFlag(message.flags, SEEN_FLAG),
     flagged: hasFlag(message.flags, "\\Flagged"),
   };
+}
+
+const deliveryHeaderNames = new Set(["delivered-to", "x-original-to", "envelope-to"]);
+const emailAddressPattern = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+/gi;
+
+function deliveryAddresses(parsed: ParsedMail | undefined): string[] {
+  if (!parsed) return [];
+  const addresses = new Set<string>();
+  for (const header of parsed.headerLines) {
+    if (!deliveryHeaderNames.has(header.key.toLowerCase())) continue;
+    const separator = header.line.indexOf(":");
+    const value = separator === -1 ? header.line : header.line.slice(separator + 1);
+    for (const match of value.matchAll(emailAddressPattern)) addresses.add(match[0].toLowerCase());
+  }
+  return [...addresses];
 }
 
 function toDetail(

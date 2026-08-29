@@ -8,7 +8,7 @@ export const accountSchema = z.object({
   id: accountIdSchema,
   name: z.string().min(1),
   email: z.email(),
-  kind: z.enum(["fixture", "imap"]),
+  kind: z.literal("imap"),
 });
 
 export const outboundAddressSchema = z.object({
@@ -43,6 +43,8 @@ export const messageSummarySchema = z.object({
   subject: z.string(),
   from: z.array(messageAddressSchema),
   to: z.array(messageAddressSchema),
+  cc: z.array(messageAddressSchema).optional(),
+  deliveredTo: z.array(z.email()).optional(),
   receivedAt: z.iso.datetime(),
   preview: z.string(),
   read: z.boolean(),
@@ -112,24 +114,43 @@ export const operationBatchSchema = z.object({
   updatedAt: z.iso.datetime(),
 });
 
-export const createAccountInputSchema = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("fixture"), name: z.string().min(1), email: z.email() }),
-  z.object({
-    kind: z.literal("imap"),
-    name: z.string().min(1),
-    email: z.email(),
-    host: z.string().min(1),
-    port: z.number().int().min(1).max(65535),
-    secure: z.boolean(),
-    username: z.string().min(1),
-    password: z.string().min(1),
-    smtpHost: z.string().min(1),
-    smtpPort: z.number().int().min(1).max(65535),
-    smtpSecure: z.boolean(),
-    smtpUsername: z.string().min(1),
-    smtpPassword: z.string().min(1),
-  }),
-]);
+export const createAccountInputSchema = z.object({
+  kind: z.literal("imap"),
+  name: z.string().min(1),
+  email: z.email(),
+  host: z.string().min(1),
+  port: z.number().int().min(1).max(65535),
+  secure: z.boolean(),
+  username: z.string().min(1),
+  password: z.string().min(1),
+  smtpHost: z.string().min(1),
+  smtpPort: z.number().int().min(1).max(65535),
+  smtpSecure: z.boolean(),
+  smtpUsername: z.string().min(1),
+  smtpPassword: z.string().min(1),
+});
+
+export const accountSettingsSchema = z.object({
+  id: accountIdSchema,
+  name: z.string().min(1),
+  email: z.email(),
+  kind: z.literal("imap"),
+  host: z.string().min(1),
+  port: z.number().int().min(1).max(65535),
+  secure: z.boolean(),
+  username: z.string().min(1),
+  smtpHost: z.string().min(1),
+  smtpPort: z.number().int().min(1).max(65535),
+  smtpSecure: z.boolean(),
+  smtpUsername: z.string().min(1),
+});
+
+export const updateAccountInputSchema = accountSettingsSchema.omit({ id: true, kind: true }).extend({
+  password: z.string().min(1).optional(),
+  smtpPassword: z.string().min(1).optional(),
+});
+
+export const connectionTestResultSchema = z.object({ ok: z.literal(true) });
 
 export const sendMessageInputSchema = z.object({
   accountId: accountIdSchema,
@@ -189,6 +210,9 @@ export type ProposalStatus = z.infer<typeof proposalStatusSchema>;
 export type OperationResult = z.infer<typeof operationResultSchema>;
 export type OperationBatch = z.infer<typeof operationBatchSchema>;
 export type CreateAccountInput = z.infer<typeof createAccountInputSchema>;
+export type AccountSettings = z.infer<typeof accountSettingsSchema>;
+export type UpdateAccountInput = z.infer<typeof updateAccountInputSchema>;
+export type ConnectionTestResult = z.infer<typeof connectionTestResultSchema>;
 export type OutboundAddress = z.infer<typeof outboundAddressSchema>;
 export type SendMessageInput = z.infer<typeof sendMessageInputSchema>;
 export type SendReceipt = z.infer<typeof sendReceiptSchema>;

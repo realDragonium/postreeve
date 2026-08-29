@@ -1,35 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { MessageRef, ProposalItem, SendMessageInput } from "../src/shared/contracts";
-import { PostreeveService } from "../src/server/core/postreeve";
-import { Store } from "../src/server/db/store";
-import { FixtureMailSender } from "../src/server/mail/fixture-sender";
-import { MailProviderRegistry } from "../src/server/mail/provider";
-import { MailSenderRegistry } from "../src/server/mail/sender";
-import { CredentialVault } from "../src/server/security/credentials";
-
-async function createHarness() {
-  const store = new Store(":memory:");
-  const sent: SendMessageInput[] = [];
-  const service = new PostreeveService(
-    store,
-    new MailProviderRegistry(),
-    new MailSenderRegistry(),
-    new CredentialVault(),
-    () => { throw new Error("Not used in fixture tests"); },
-    (senderAccount, _credentials, fixtureProvider) => new FixtureMailSender({
-      accountId: senderAccount.id,
-      fromName: senderAccount.name,
-      fromAddress: senderAccount.email,
-    }, ({ input, receipt }) => {
-        sent.push(structuredClone(input));
-        fixtureProvider?.appendSent(input, receipt.messageId, receipt.submittedAt);
-    }),
-  );
-  await service.initialize();
-  const account = (await service.listAccounts())[0]!;
-  const messages = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 });
-  return { store, service, account, messages, sent };
-}
+import type { MessageRef, ProposalItem } from "../src/shared/contracts";
+import { createEmptyTestHarness, createTestHarness, testAccountInput } from "./support/test-mail";
 
 function proposalItem(message: MessageRef, id: string = crypto.randomUUID()): ProposalItem {
   return {
@@ -42,9 +13,29 @@ function proposalItem(message: MessageRef, id: string = crypto.randomUUID()): Pr
 }
 
 describe("Postreeve core workflow", () => {
+  test("starts with no synthetic account or mail", async () => {
+    const { store, service } = await createEmptyTestHarness();
+    expect(await service.listAccounts()).toEqual([]);
+    store.close();
+  });
+
+  test("does not persist or register an account when either connection check fails", async () => {
+    const imap = await createEmptyTestHarness({ imapFailure: new Error("incoming-test-password") });
+    await expect(imap.service.createAccount(testAccountInput())).rejects.toThrow("IMAP connection failed");
+    expect(await imap.service.listAccounts()).toEqual([]);
+    await expect(imap.service.createAccount(testAccountInput())).rejects.not.toThrow("incoming-test-password");
+    imap.store.close();
+
+    const smtp = await createEmptyTestHarness({ smtpFailure: new Error("outgoing-test-password") });
+    await expect(smtp.service.createAccount(testAccountInput())).rejects.toThrow("SMTP connection failed");
+    expect(await smtp.service.listAccounts()).toEqual([]);
+    await expect(smtp.service.createAccount(testAccountInput())).rejects.not.toThrow("outgoing-test-password");
+    smtp.store.close();
+  });
+
   test("isolates multiple accounts", async () => {
-    const { store, service, account, messages } = await createHarness();
-    const second = await service.createAccount({ kind: "fixture", name: "Second", email: "second@example.com" });
+    const { store, service, account, messages } = await createTestHarness();
+    const second = await service.createAccount(testAccountInput("Second", "second@example.test"));
     const secondMessages = await service.listMessages({ accountId: second.id, mailbox: "INBOX", limit: 50 });
 
     expect(secondMessages[0]?.ref.accountId).toBe(second.id);
@@ -55,7 +46,7 @@ describe("Postreeve core workflow", () => {
   });
 
   test("keeps proposal edits separate from human approval", async () => {
-    const { store, service, account, messages } = await createHarness();
+    const { store, service, account, messages } = await createTestHarness();
     const proposal = await service.createProposal({
       accountId: account.id,
       title: "Inbox pass",
@@ -73,7 +64,7 @@ describe("Postreeve core workflow", () => {
   });
 
   test("reports stale messages as partial failures without touching another message", async () => {
-    const { store, service, account, messages } = await createHarness();
+    const { store, service, account, messages } = await createTestHarness();
     const valid = messages[0]!;
     const stale: MessageRef = { ...messages[1]!.ref, modseq: "stale" };
     const proposal = await service.createProposal({
@@ -93,7 +84,7 @@ describe("Postreeve core workflow", () => {
   });
 
   test("undoes supported applied actions and records the audit state", async () => {
-    const { store, service, account, messages } = await createHarness();
+    const { store, service, account, messages } = await createTestHarness();
     const message = messages.find(({ read }) => !read)!;
     const proposal = await service.createProposal({
       accountId: account.id,
@@ -116,7 +107,7 @@ describe("Postreeve core workflow", () => {
   });
 
   test("lets the human manage mail directly through the audited action path", async () => {
-    const { store, service, account, messages } = await createHarness();
+    const { store, service, account, messages } = await createTestHarness();
     const message = messages[0]!;
     const batch = await service.applyDirectActions({
       accountId: account.id,
@@ -137,7 +128,7 @@ describe("Postreeve core workflow", () => {
   });
 
   test("sends from the selected account without crossing account boundaries", async () => {
-    const { store, service, account, sent } = await createHarness();
+    const { store, service, account, sent } = await createTestHarness();
     const receipt = await service.sendMessage({
       accountId: account.id,
       to: [{ name: "Recipient", address: "recipient@example.com" }],
@@ -160,6 +151,45 @@ describe("Postreeve core workflow", () => {
       subject: "Wrong account",
       text: "Must not send.",
     })).rejects.toThrow("Account not found");
+    store.close();
+  });
+
+  test("tests and reconnects an account without returning or replacing blank passwords", async () => {
+    const { store, service, account, connections } = await createTestHarness();
+    const settings = await service.getAccountSettings(account.id);
+    expect(settings).not.toHaveProperty("password");
+    expect(settings).not.toHaveProperty("smtpPassword");
+    const { id: _id, kind: _kind, ...unchanged } = settings;
+
+    await service.testAccountConnection(account.id, unchanged);
+    expect(connections.at(-1)?.imap.password).toBe("incoming-test-password");
+    expect(connections.at(-1)?.smtp?.password).toBe("outgoing-test-password");
+
+    const updated = await service.updateAccount(account.id, {
+      ...unchanged,
+      name: "Primary work",
+      password: "new-incoming-password",
+      smtpPassword: "new-outgoing-password",
+    });
+    expect(updated.name).toBe("Primary work");
+    expect((await service.getAccountSettings(account.id)).name).toBe("Primary work");
+    expect(connections.at(-1)?.imap.password).toBe("new-incoming-password");
+    expect(connections.at(-1)?.smtp?.password).toBe("new-outgoing-password");
+    store.close();
+  });
+
+  test("removes encrypted account data and its local workflow history", async () => {
+    const { store, service, account, messages } = await createTestHarness();
+    const batch = await service.applyDirectActions({
+      accountId: account.id,
+      items: [{ message: messages[0]!.ref, subject: messages[0]!.subject, action: { type: "mark_read" } }],
+    });
+
+    await service.removeAccount(account.id);
+
+    expect(await service.listAccounts()).toEqual([]);
+    await expect(service.getProposal(batch.proposalId)).rejects.toThrow("Proposal not found");
+    await expect(service.listFolders(account.id)).rejects.toThrow("Account not found");
     store.close();
   });
 });

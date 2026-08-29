@@ -37,6 +37,7 @@ export interface SmtpDeliveryResult {
 }
 
 export interface SmtpTransportClient {
+  verify(): Promise<boolean>;
   sendMail(options: SendMailOptions): Promise<SmtpDeliveryResult>;
 }
 
@@ -45,6 +46,7 @@ export type SmtpTransportFactory = (options: SMTPTransport.Options) => SmtpTrans
 const defaultTransportFactory: SmtpTransportFactory = (options) => {
   const transport = createTransport(options);
   return {
+    verify: () => transport.verify(),
     sendMail: (message) => transport.sendMail(message),
   };
 };
@@ -66,6 +68,11 @@ export class SmtpMailSender implements MailSender {
       logger: false,
       debug: false,
     });
+  }
+
+  async verifyConnection(): Promise<void> {
+    const verified = await this.#transport.verify();
+    if (!verified) throw new Error("SMTP server rejected the connection");
   }
 
   async send(rawInput: SendMessageInput): Promise<SendReceipt> {

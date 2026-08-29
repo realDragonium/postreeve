@@ -1,5 +1,6 @@
 import { expect, test, type Route } from "@playwright/test";
 import {
+  createAccountInputSchema,
   directActionInputSchema,
   sendMessageInputSchema,
   updateProposalInputSchema,
@@ -13,10 +14,10 @@ import {
 } from "../../src/shared/contracts";
 
 const account: Account = {
-  id: "account-demo",
-  name: "Demo inbox",
+  id: "account-work",
+  name: "Work inbox",
   email: "alex@example.com",
-  kind: "fixture",
+  kind: "imap",
 };
 
 const folders: Folder[] = [
@@ -35,10 +36,11 @@ const proposalItem: ProposalItem = {
 
 const message: MessageDetail = {
   ref: proposalItem.message,
-  messageId: "fixture-message@example.com",
+  messageId: "message@example.com",
   subject: proposalItem.subject,
   from: [{ name: "Sam Rivera", address: "sam@example.com" }],
   to: [{ name: "Alex", address: account.email }],
+  deliveredTo: ["planning-alias@example.com"],
   receivedAt: "2026-08-29T08:30:00.000Z",
   preview: "Here are the decisions and follow-ups from our quarterly planning session.",
   read: false,
@@ -139,7 +141,7 @@ test("sends and manages mail, then reviews, applies, and undoes an AI proposal",
       proposal = { ...proposal, status: "undone" };
       return json(route, batch);
     }
-    return json(route, { error: `Unhandled fixture route: ${method} ${url.pathname}` }, 404);
+    return json(route, { error: `Unhandled test route: ${method} ${url.pathname}` }, 404);
   });
 
   await page.goto("/");
@@ -158,6 +160,7 @@ test("sends and manages mail, then reviews, applies, and undoes an AI proposal",
 
   await page.getByText("Quarterly planning notes", { exact: true }).click();
   await expect(page.getByRole("heading", { name: "Quarterly planning notes" })).toBeVisible();
+  await expect(page.getByText("delivered to planning-alias@example.com", { exact: true })).toBeVisible();
   await expect(page.getByText("Remote images blocked to protect your privacy.")).toBeVisible();
   await expect(page.locator(".email-html img")).not.toHaveAttribute("src");
   await expect(page.locator(".email-html script")).toHaveCount(0);
@@ -185,4 +188,65 @@ test("sends and manages mail, then reviews, applies, and undoes an AI proposal",
   await expect(page.getByText("Move to folder", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Undo supported actions" }).click();
   await expect(page.locator(".status-pill", { hasText: "undone" })).toBeVisible();
+});
+
+test("shows and selects a newly connected account without a reload", async ({ page }) => {
+  const personal: Account = {
+    id: "account-personal",
+    name: "Personal",
+    email: "person@example.com",
+    kind: "imap",
+  };
+  const work: Account = {
+    id: "account-new-work",
+    name: "New work",
+    email: "person@work.example",
+    kind: "imap",
+  };
+  let created = false;
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method();
+    if (method === "GET" && url.pathname === "/api/accounts") return json(route, created ? [personal, work] : [personal]);
+    if (method === "POST" && url.pathname === "/api/accounts") {
+      createAccountInputSchema.parse(request.postDataJSON());
+      created = true;
+      return json(route, work, 201);
+    }
+    if (method === "GET" && url.pathname.endsWith("/folders")) {
+      return json(route, [{ path: "INBOX", name: "Inbox", specialUse: "inbox", unread: 0, total: 0 }]);
+    }
+    if (method === "GET" && url.pathname.endsWith("/messages")) return json(route, []);
+    if (method === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    return json(route, { error: `Unhandled test route: ${method} ${url.pathname}` }, 404);
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Add account" }).click();
+  await page.getByLabel("Name", { exact: true }).fill(work.name);
+  await page.getByLabel("Email address").fill(work.email);
+  await page.getByLabel("IMAP host").fill("imap.work.example");
+  await page.getByLabel("Username").first().fill(work.email);
+  await page.getByLabel(/Password/).first().fill("incoming-password");
+  await page.getByRole("button", { name: "Connect account" }).click();
+
+  const picker = page.getByLabel("Email account");
+  await expect(picker.locator("option", { hasText: `${work.name} · ${work.email}` })).toHaveCount(1);
+  await expect(picker).toHaveValue(work.id);
+  await expect(page.getByText(work.email, { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
+});
+
+test("starts with real account onboarding when no mailbox is connected", async ({ page }) => {
+  await page.route("**/api/accounts", async (route) => json(route, []));
+
+  await page.goto("/");
+
+  await expect(page.getByRole("heading", { name: "Connect your email" })).toBeVisible();
+  await expect(page.getByText("No account connected", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Connect account" }).click();
+  await expect(page.getByRole("heading", { name: "Connect a mailbox" })).toBeVisible();
+  await expect(page.getByText(/demo/i)).toHaveCount(0);
 });

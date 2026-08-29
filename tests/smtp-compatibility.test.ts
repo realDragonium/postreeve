@@ -3,10 +3,6 @@ import type { SendMailOptions } from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
 
 import {
-  FixtureMailSender,
-  type FixtureSentMessage,
-} from "../src/server/mail/fixture-sender";
-import {
   SmtpMailSender,
   type SmtpDeliveryResult,
   type SmtpTransportClient,
@@ -25,6 +21,16 @@ const smtpConfig = {
 };
 
 describe("Bun Nodemailer compatibility", () => {
+  test("verifies SMTP authentication without sending a message", async () => {
+    const transport = new FakeSmtpTransport(deliveredResult());
+    const sender = new SmtpMailSender(smtpConfig, () => transport);
+
+    await sender.verifyConnection();
+
+    expect(transport.verifications).toBe(1);
+    expect(transport.messages).toHaveLength(0);
+  });
+
   test("loads Nodemailer and maps a validated message to an SMTP transport", async () => {
     const transport = new FakeSmtpTransport({
       messageId: "<server-id@example.test>",
@@ -104,64 +110,18 @@ describe("Bun Nodemailer compatibility", () => {
   });
 });
 
-describe("fixture outgoing mail", () => {
-  test("reports all recipients and exposes a typed sent-message callback", async () => {
-    const sent: FixtureSentMessage[] = [];
-    const sender = new FixtureMailSender(
-      {
-        accountId: smtpConfig.accountId,
-        fromName: smtpConfig.fromName,
-        fromAddress: smtpConfig.fromAddress,
-      },
-      (message) => {
-        sent.push(message);
-      },
-    );
-
-    const receipt = await sender.send(messageInput());
-
-    expect(receipt.accepted).toEqual([
-      "to@example.test",
-      "copy@example.test",
-      "hidden@example.test",
-    ]);
-    expect(receipt.rejected).toEqual([]);
-    expect(sent).toHaveLength(1);
-    expect(sent[0]?.from).toEqual({
-      name: smtpConfig.fromName,
-      address: smtpConfig.fromAddress,
-    });
-    expect(sent[0]?.input).toEqual(messageInput());
-    expect(sent[0]?.receipt).toEqual(receipt);
-  });
-
-  test("validates input and isolates fixture accounts", async () => {
-    const sent: FixtureSentMessage[] = [];
-    const sender = new FixtureMailSender(
-      {
-        accountId: smtpConfig.accountId,
-        fromName: smtpConfig.fromName,
-        fromAddress: smtpConfig.fromAddress,
-      },
-      (message) => {
-        sent.push(message);
-      },
-    );
-
-    expect(sender.send({ ...messageInput(), accountId: "account-b" })).rejects.toThrow(
-      "cannot send for account account-b",
-    );
-    expect(sender.send({ ...messageInput(), text: "" })).rejects.toThrow();
-    expect(sent).toHaveLength(0);
-  });
-});
-
 class FakeSmtpTransport implements SmtpTransportClient {
   readonly messages: SendMailOptions[] = [];
+  verifications = 0;
   readonly #result: SmtpDeliveryResult;
 
   constructor(result: SmtpDeliveryResult) {
     this.#result = result;
+  }
+
+  async verify(): Promise<boolean> {
+    this.verifications += 1;
+    return true;
   }
 
   async sendMail(options: SendMailOptions): Promise<SmtpDeliveryResult> {

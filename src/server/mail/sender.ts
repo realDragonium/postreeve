@@ -1,6 +1,7 @@
 import type { SendMessageInput, SendReceipt } from "../../shared/contracts";
 
 export interface MailSender {
+  verifyConnection(): Promise<void>;
   send(input: SendMessageInput): Promise<SendReceipt>;
 }
 
@@ -9,6 +10,10 @@ export class MailSenderRegistry {
 
   register(accountId: string, sender: MailSender): void {
     this.#senders.set(accountId, sender);
+  }
+
+  remove(accountId: string): void {
+    this.#senders.delete(accountId);
   }
 
   forAccount(accountId: string): MailSender {

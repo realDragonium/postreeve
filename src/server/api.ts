@@ -12,6 +12,7 @@ import {
   proposalIdSchema,
   sendMessageInputSchema,
   updateProposalInputSchema,
+  updateAccountInputSchema,
 } from "../shared/contracts";
 import type { PostreeveService } from "./core/postreeve";
 
@@ -31,8 +32,39 @@ export function createApi(service: PostreeveService) {
     .basePath("/api")
     .get("/health", (context) => context.json({ ok: true as const }))
     .get("/accounts", async (context) => context.json(await service.listAccounts()))
+    .post("/accounts/test", zValidator("json", createAccountInputSchema), async (context) => {
+      await service.testNewAccountConnection(context.req.valid("json"));
+      return context.json({ ok: true as const });
+    })
     .post("/accounts", zValidator("json", createAccountInputSchema), async (context) =>
       context.json(await service.createAccount(context.req.valid("json")), 201))
+    .get("/accounts/:accountId/settings", zValidator("param", accountParamsSchema), async (context) =>
+      context.json(await service.getAccountSettings(context.req.valid("param").accountId)))
+    .post(
+      "/accounts/:accountId/test",
+      zValidator("param", accountParamsSchema),
+      zValidator("json", updateAccountInputSchema),
+      async (context) => {
+        await service.testAccountConnection(
+          context.req.valid("param").accountId,
+          context.req.valid("json"),
+        );
+        return context.json({ ok: true as const });
+      },
+    )
+    .put(
+      "/accounts/:accountId",
+      zValidator("param", accountParamsSchema),
+      zValidator("json", updateAccountInputSchema),
+      async (context) => context.json(await service.updateAccount(
+        context.req.valid("param").accountId,
+        context.req.valid("json"),
+      )),
+    )
+    .delete("/accounts/:accountId", zValidator("param", accountParamsSchema), async (context) => {
+      await service.removeAccount(context.req.valid("param").accountId);
+      return context.json({ ok: true as const });
+    })
     .get("/accounts/:accountId/folders", zValidator("param", accountParamsSchema), async (context) =>
       context.json(await service.listFolders(context.req.valid("param").accountId)))
     .get(

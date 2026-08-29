@@ -14,6 +14,7 @@ export interface AppliedMailAction {
 }
 
 export interface MailProvider {
+  verifyConnection(): Promise<void>;
   listFolders(accountId: string): Promise<Folder[]>;
   listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]>;
   readMessages(accountId: string, references: MessageRef[]): Promise<MessageDetail[]>;
@@ -28,6 +29,10 @@ export class MailProviderRegistry {
 
   register(accountId: string, provider: MailProvider): void {
     this.#providers.set(accountId, provider);
+  }
+
+  remove(accountId: string): void {
+    this.#providers.delete(accountId);
   }
 
   forAccount(accountId: string): MailProvider {

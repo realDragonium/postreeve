@@ -18,6 +18,6 @@
 ## Safety
 
 - Keep Postreeve bound to loopback unless the user explicitly requests and secures another deployment model. The web interface does not have authentication yet.
-- Start with the fixture mailbox. Do not connect a real mailbox, enter credentials, send mail, or modify live mail unless the user explicitly requests that action.
+- Use deterministic test doubles for automated verification. Do not connect a mailbox, enter credentials, send mail, or modify live mail unless the user explicitly requests that action. When the user does request live testing, recommend starting with a secondary mailbox.
 - Never print, commit, or expose `.env`, `POSTREEVE_MASTER_KEY`, mailbox passwords, or the SQLite data files.
 - Preserve the human approval boundary. An agent may prepare or update a proposal, but only the human-facing UI may approve it.

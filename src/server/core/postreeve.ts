@@ -1,5 +1,6 @@
 import type {
   Account,
+  AccountSettings,
   CreateAccountInput,
   CreateProposalInput,
   DirectActionInput,
@@ -14,6 +15,7 @@ import type {
   SendMessageInput,
   SendReceipt,
   UpdateProposalInput,
+  UpdateAccountInput,
 } from "../../shared/contracts";
 import {
   createProposalInputSchema,
@@ -23,17 +25,12 @@ import {
 } from "../../shared/contracts";
 import type { Store, StoredAccount, StoredBatch } from "../db/store";
 import type { StoredOperation } from "../db/schema";
-import { FixtureMailProvider } from "../mail/fixture";
 import { MailProviderRegistry, type MailProvider } from "../mail/provider";
 import { MailSenderRegistry, type MailSender } from "../mail/sender";
 import { CredentialVault, type AccountCredentials, type ImapCredentials } from "../security/credentials";
 
 export type ImapProviderFactory = (accountId: string, credentials: ImapCredentials) => MailProvider;
-export type MailSenderFactory = (
-  account: Account,
-  credentials: AccountCredentials | null,
-  fixtureProvider: FixtureMailProvider | null,
-) => MailSender;
+export type MailSenderFactory = (account: Account, credentials: AccountCredentials) => MailSender;
 
 export class PostreeveService {
   readonly #store: Store;
@@ -61,39 +58,6 @@ export class PostreeveService {
 
   async initialize(): Promise<void> {
     const accounts = await this.#store.listAccounts();
-    if (accounts.length === 0) {
-      const account = await this.createAccount({
-        kind: "fixture",
-        name: "Postreeve Demo",
-        email: "demo@postreeve.local",
-      });
-      const messages = await this.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 });
-      const digest = messages.find(({ subject }) => subject.includes("weekly engineering"));
-      const receipt = messages.find(({ subject }) => subject.includes("Receipt"));
-      if (digest && receipt) {
-        await this.createProposal({
-          accountId: account.id,
-          title: "Agent proposal: tidy the demo inbox",
-          items: [
-            {
-              id: crypto.randomUUID(),
-              message: digest.ref,
-              subject: digest.subject,
-              action: { type: "move", destination: "Archive" },
-              reason: "Keep the newsletter available without leaving it in the active inbox.",
-            },
-            {
-              id: crypto.randomUUID(),
-              message: receipt.ref,
-              subject: receipt.subject,
-              action: { type: "leave" },
-              reason: "No action is required and the receipt is already read.",
-            },
-          ],
-        });
-      }
-      return;
-    }
     for (const account of accounts) this.#registerStoredAccount(account);
   }
 
@@ -103,33 +67,92 @@ export class PostreeveService {
 
   async createAccount(input: CreateAccountInput): Promise<Account> {
     const id = crypto.randomUUID();
-    const account: StoredAccount = input.kind === "fixture"
-      ? { id, name: input.name, email: input.email, kind: "fixture", encryptedCredentials: null }
-      : {
-          id,
-          name: input.name,
-          email: input.email,
-          kind: "imap",
-          encryptedCredentials: this.#vault.encrypt({
-            imap: {
-              host: input.host,
-              port: input.port,
-              secure: input.secure,
-              username: input.username,
-              password: input.password,
-            },
-            smtp: {
-              host: input.smtpHost,
-              port: input.smtpPort,
-              secure: input.smtpSecure,
-              username: input.smtpUsername,
-              password: input.smtpPassword,
-            },
-          }),
-        };
+    const publicAccount: Account = { id, name: input.name, email: input.email, kind: "imap" };
+    const credentials: AccountCredentials = {
+      imap: {
+        host: input.host,
+        port: input.port,
+        secure: input.secure,
+        username: input.username,
+        password: input.password,
+      },
+      smtp: {
+        host: input.smtpHost,
+        port: input.smtpPort,
+        secure: input.smtpSecure,
+        username: input.smtpUsername,
+        password: input.smtpPassword,
+      },
+    };
+    const clients = await this.#verifiedClients(publicAccount, credentials);
+    const account: StoredAccount = {
+      ...publicAccount,
+      encryptedCredentials: this.#vault.encrypt(credentials),
+    };
     await this.#store.insertAccount(account);
-    this.#registerStoredAccount(account);
-    return toPublicAccount(account);
+    this.#registerClients(id, clients);
+    return publicAccount;
+  }
+
+  async testNewAccountConnection(input: CreateAccountInput): Promise<void> {
+    const account: Account = { id: crypto.randomUUID(), name: input.name, email: input.email, kind: "imap" };
+    await this.#verifiedClients(account, {
+      imap: {
+        host: input.host,
+        port: input.port,
+        secure: input.secure,
+        username: input.username,
+        password: input.password,
+      },
+      smtp: {
+        host: input.smtpHost,
+        port: input.smtpPort,
+        secure: input.smtpSecure,
+        username: input.smtpUsername,
+        password: input.smtpPassword,
+      },
+    });
+  }
+
+  async getAccountSettings(id: string): Promise<AccountSettings> {
+    const account = await this.#requireAccount(id);
+    const credentials = this.#credentialsFor(account);
+    if (!credentials.smtp) throw new Error("This account has no outgoing-mail settings; reconnect it before editing");
+    return {
+      ...toPublicAccount(account),
+      host: credentials.imap.host,
+      port: credentials.imap.port,
+      secure: credentials.imap.secure,
+      username: credentials.imap.username,
+      smtpHost: credentials.smtp.host,
+      smtpPort: credentials.smtp.port,
+      smtpSecure: credentials.smtp.secure,
+      smtpUsername: credentials.smtp.username,
+    };
+  }
+
+  async testAccountConnection(id: string, input: UpdateAccountInput): Promise<void> {
+    const account = await this.#requireAccount(id);
+    const { publicAccount, credentials } = this.#updatedConnection(account, input);
+    await this.#verifiedClients(publicAccount, credentials);
+  }
+
+  async updateAccount(id: string, input: UpdateAccountInput): Promise<Account> {
+    const account = await this.#requireAccount(id);
+    const { publicAccount, credentials } = this.#updatedConnection(account, input);
+    const clients = await this.#verifiedClients(publicAccount, credentials);
+    await this.#store.updateAccount({
+      ...publicAccount,
+      encryptedCredentials: this.#vault.encrypt(credentials),
+    });
+    this.#registerClients(id, clients);
+    return publicAccount;
+  }
+
+  async removeAccount(id: string): Promise<void> {
+    if (!await this.#store.deleteAccount(id)) throw new Error("Account not found");
+    this.#providers.remove(id);
+    this.#senders.remove(id);
   }
 
   async listFolders(accountId: string): Promise<Folder[]> {
@@ -351,16 +374,70 @@ export class PostreeveService {
   }
 
   #registerStoredAccount(account: StoredAccount): void {
-    if (account.kind === "fixture") {
-      const provider = new FixtureMailProvider(account.id);
-      this.#providers.register(account.id, provider);
-      this.#senders.register(account.id, this.#mailSenderFactory(toPublicAccount(account), null, provider));
-      return;
-    }
+    const credentials = this.#credentialsFor(account);
+    this.#registerClients(account.id, this.#clientsFor(toPublicAccount(account), credentials));
+  }
+
+  #credentialsFor(account: StoredAccount): AccountCredentials {
     if (!account.encryptedCredentials) throw new Error(`IMAP account ${account.id} has no credentials`);
-    const credentials = this.#vault.decrypt(account.encryptedCredentials);
-    this.#providers.register(account.id, this.#imapProviderFactory(account.id, credentials.imap));
-    this.#senders.register(account.id, this.#mailSenderFactory(toPublicAccount(account), credentials, null));
+    return this.#vault.decrypt(account.encryptedCredentials);
+  }
+
+  #updatedConnection(account: StoredAccount, input: UpdateAccountInput): {
+    publicAccount: Account;
+    credentials: AccountCredentials;
+  } {
+    const current = this.#credentialsFor(account);
+    if (!current.smtp) throw new Error("This account has no outgoing-mail settings; add SMTP credentials to reconnect it");
+    return {
+      publicAccount: { id: account.id, name: input.name, email: input.email, kind: "imap" },
+      credentials: {
+        imap: {
+          host: input.host,
+          port: input.port,
+          secure: input.secure,
+          username: input.username,
+          password: input.password ?? current.imap.password,
+        },
+        smtp: {
+          host: input.smtpHost,
+          port: input.smtpPort,
+          secure: input.smtpSecure,
+          username: input.smtpUsername,
+          password: input.smtpPassword ?? current.smtp.password,
+        },
+      },
+    };
+  }
+
+  #clientsFor(account: Account, credentials: AccountCredentials): { provider: MailProvider; sender: MailSender } {
+    return {
+      provider: this.#imapProviderFactory(account.id, credentials.imap),
+      sender: this.#mailSenderFactory(account, credentials),
+    };
+  }
+
+  async #verifiedClients(
+    account: Account,
+    credentials: AccountCredentials,
+  ): Promise<{ provider: MailProvider; sender: MailSender }> {
+    const clients = this.#clientsFor(account, credentials);
+    try {
+      await clients.provider.verifyConnection();
+    } catch {
+      throw new Error("IMAP connection failed. Check the server, port, TLS setting, username, and password.");
+    }
+    try {
+      await clients.sender.verifyConnection();
+    } catch {
+      throw new Error("SMTP connection failed. Check the server, port, TLS setting, username, and password.");
+    }
+    return clients;
+  }
+
+  #registerClients(accountId: string, clients: { provider: MailProvider; sender: MailSender }): void {
+    this.#providers.register(accountId, clients.provider);
+    this.#senders.register(accountId, clients.sender);
   }
 
   async #requireAccount(id: string): Promise<StoredAccount> {

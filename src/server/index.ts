@@ -5,7 +5,6 @@ import { z } from "zod";
 import { createApi } from "./api";
 import { PostreeveService } from "./core/postreeve";
 import { Store } from "./db/store";
-import { FixtureMailSender } from "./mail/fixture-sender";
 import { ImapMailProvider } from "./mail/imap";
 import { MailProviderRegistry } from "./mail/provider";
 import { MailSenderRegistry } from "./mail/sender";
@@ -23,18 +22,12 @@ const service = new PostreeveService(
   senders,
   vault,
   (accountId, credentials) => new ImapMailProvider({ accountId, ...credentials }),
-  (account, credentials, fixtureProvider) => {
-    if (fixtureProvider) {
-      return new FixtureMailSender({
-        accountId: account.id,
-        fromName: account.name,
-        fromAddress: account.email,
-      }, ({ input, receipt }) => {
-        fixtureProvider.appendSent(input, receipt.messageId, receipt.submittedAt);
-      });
-    }
-    if (!credentials?.smtp) {
+  (account, credentials) => {
+    if (!credentials.smtp) {
       return {
+        verifyConnection: async () => {
+          throw new Error("This existing account has no SMTP configuration; add it again with outgoing-mail settings");
+        },
         send: async () => {
           throw new Error("This existing account has no SMTP configuration; add it again with outgoing-mail settings");
         },

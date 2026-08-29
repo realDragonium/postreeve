@@ -35,6 +35,7 @@ interface FakeState {
   readonly mailboxes: Map<string, StoredMailbox>;
   readonly options: ImapFlowOptions[];
   readonly searches: SearchObject[];
+  lists: number;
 }
 
 const config = {
@@ -47,6 +48,13 @@ const config = {
 };
 
 describe("Bun IMAP compatibility", () => {
+  test("verifies authentication with a folder list and no mailbox mutation", async () => {
+    const state = fakeState();
+    await new ImapMailProvider(config, fakeFactory(state)).verifyConnection();
+    expect(state.lists).toBe(1);
+    expect(state.searches).toEqual([]);
+  });
+
   test("imports ImapFlow and MailParser and parses messages through the adapter", async () => {
     const state = fakeState();
     const provider = new ImapMailProvider(config, fakeFactory(state));
@@ -107,6 +115,32 @@ describe("Bun IMAP compatibility", () => {
         ],
       },
     ]);
+  });
+
+  test("keeps visible recipients separate from conservative delivery attribution", async () => {
+    const state = fakeState();
+    const inbox = state.mailboxes.get("INBOX");
+    if (!inbox) throw new Error("Expected test inbox");
+    inbox.messages.clear();
+    inbox.messages.set(1, deliveryMessage(1, "Human <human@example.test>", "Delivered-To: human@example.test\r\n", "Copy <copy@example.test>"));
+    inbox.messages.set(2, deliveryMessage(2, "Human <human@example.test>", "Delivered-To: catchall+sales@example.test\r\n"));
+    inbox.messages.set(3, bccDeliveryMessage(3, "private@example.test"));
+    inbox.messages.set(4, deliveryMessage(4, "Human <human@example.test>", "Delivered-To: Alias@Example.Test\r\nEnvelope-To: alias@example.test\r\nDelivered-To: alias@example.test\r\n"));
+    inbox.messages.set(5, deliveryMessage(5, "Human <human@example.test>", "Delivered-To: not-an-address\r\nEnvelope-To: broken@@example.test\r\n"));
+    inbox.messages.set(6, deliveryMessage(6, "Human <human@example.test>", ""));
+
+    const messages = await new ImapMailProvider(config, fakeFactory(state)).listMessages(config.accountId, "INBOX", 6);
+    const byUid = new Map(messages.map((message) => [message.ref.uid, message]));
+
+    expect(byUid.get(1)?.to.map(({ address }) => address)).toEqual(["human@example.test"]);
+    expect(byUid.get(1)?.cc?.map(({ address }) => address)).toEqual(["copy@example.test"]);
+    expect(byUid.get(1)?.deliveredTo).toEqual(["human@example.test"]);
+    expect(byUid.get(2)?.deliveredTo).toEqual(["catchall+sales@example.test"]);
+    expect(byUid.get(3)?.to).toEqual([]);
+    expect(byUid.get(3)?.deliveredTo).toEqual(["private@example.test"]);
+    expect(byUid.get(4)?.deliveredTo).toEqual(["alias@example.test"]);
+    expect(byUid.get(5)?.deliveredTo).toBeUndefined();
+    expect(byUid.get(6)?.deliveredTo).toBeUndefined();
   });
 
   test("rejects stale UIDVALIDITY and MODSEQ before mutations", async () => {
@@ -186,6 +220,7 @@ class FakeImapClient implements ImapClient {
   close(): void {}
 
   async list(_options?: ListOptions): Promise<ListResponse[]> {
+    this.#state.lists += 1;
     return [...this.#state.mailboxes.values()].map((mailbox) => ({
       path: mailbox.path,
       pathAsListed: mailbox.path,
@@ -349,6 +384,7 @@ function fakeState(): FakeState {
   return {
     options: [],
     searches: [],
+    lists: 0,
     mailboxes: new Map([
       [
         "INBOX",
@@ -429,6 +465,31 @@ function fakeMessage(
       to: [{ name: "Human", address: "human@example.test" }],
     },
     source,
+  };
+}
+
+function deliveryMessage(uid: number, to: string, deliveryHeaders: string, cc?: string): FetchMessageObject {
+  const message = fakeMessage(uid, BigInt(uid), `Delivery ${uid}`, `Body ${uid}`, new Set());
+  const address = /<([^>]+)>/.exec(to)?.[1] ?? to;
+  const ccAddress = cc ? /<([^>]+)>/.exec(cc)?.[1] ?? cc : undefined;
+  return {
+    ...message,
+    envelope: {
+      ...message.envelope,
+      to: [{ name: to.includes("<") ? to.slice(0, to.indexOf("<")).trim() : "", address }],
+      ...(ccAddress ? { cc: [{ name: cc?.slice(0, cc.indexOf("<")).trim() ?? "", address: ccAddress }] } : {}),
+    },
+    source: Buffer.from(
+      `From: Sender <sender@example.test>\r\nTo: ${to}\r\n${cc ? `Cc: ${cc}\r\n` : ""}${deliveryHeaders}Message-ID: <delivery-${uid}@example.test>\r\nSubject: Delivery ${uid}\r\nDate: Fri, 29 Aug 2025 12:00:00 +0000\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nBody ${uid}\r\n`,
+    ),
+  };
+}
+
+function bccDeliveryMessage(uid: number, deliveredTo: string): FetchMessageObject {
+  const message = deliveryMessage(uid, "Undisclosed recipients:;", `X-Original-To: ${deliveredTo}\r\n`);
+  return {
+    ...message,
+    envelope: { ...message.envelope, to: [] },
   };
 }
 

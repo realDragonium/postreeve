@@ -25,9 +25,9 @@ import {
 
 const account: Account = {
   id: "account-1",
-  name: "Fixture mailbox",
-  email: "fixture@example.test",
-  kind: "fixture",
+  name: "Work mailbox",
+  email: "person@example.test",
+  kind: "imap",
 };
 
 const folder: Folder = {
@@ -51,7 +51,8 @@ const message: MessageSummary = {
   messageId: "message-1@example.test",
   subject: "Untrusted message subject",
   from: [{ name: "Sender", address: "sender@example.test" }],
-  to: [{ name: "Fixture", address: account.email }],
+  to: [{ name: "Person", address: account.email }],
+  deliveredTo: ["catchall+work@example.test"],
   receivedAt: "2026-08-29T12:00:00.000Z",
   preview: "Untrusted email preview",
   read: false,

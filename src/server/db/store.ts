@@ -59,6 +59,26 @@ export class Store {
     await this.#db.insert(accounts).values({ ...account, createdAt: new Date().toISOString() });
   }
 
+  async updateAccount(account: StoredAccount): Promise<void> {
+    await this.#db.update(accounts).set({
+      name: account.name,
+      email: account.email,
+      encryptedCredentials: account.encryptedCredentials,
+    }).where(eq(accounts.id, account.id));
+  }
+
+  async deleteAccount(id: string): Promise<boolean> {
+    const account = await this.getAccount(id);
+    if (!account) return false;
+    const remove = this.#sqlite.transaction((accountId: string) => {
+      this.#sqlite.query("DELETE FROM operation_batches WHERE account_id = ?").run(accountId);
+      this.#sqlite.query("DELETE FROM proposals WHERE account_id = ?").run(accountId);
+      this.#sqlite.query("DELETE FROM accounts WHERE id = ?").run(accountId);
+    });
+    remove(id);
+    return true;
+  }
+
   async insertProposal(proposal: Proposal): Promise<void> {
     await this.#db.insert(proposals).values(proposal);
   }
@@ -137,7 +157,7 @@ export class Store {
         id TEXT PRIMARY KEY NOT NULL,
         name TEXT NOT NULL,
         email TEXT NOT NULL,
-        kind TEXT NOT NULL CHECK (kind IN ('fixture', 'imap')),
+        kind TEXT NOT NULL CHECK (kind = 'imap'),
         encrypted_credentials TEXT,
         created_at TEXT NOT NULL
       );
@@ -167,6 +187,13 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS proposals_account_id_idx ON proposals(account_id);
       CREATE INDEX IF NOT EXISTS batches_account_id_idx ON operation_batches(account_id);
+    `);
+    this.#sqlite.exec(`
+      DELETE FROM operation_batches
+      WHERE account_id IN (SELECT id FROM accounts WHERE kind = 'fixture');
+      DELETE FROM proposals
+      WHERE account_id IN (SELECT id FROM accounts WHERE kind = 'fixture');
+      DELETE FROM accounts WHERE kind = 'fixture';
     `);
   }
 }

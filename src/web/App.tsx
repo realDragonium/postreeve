@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "re
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import DOMPurify from "dompurify";
 import {
+  type Account,
   type CreateAccountInput,
+  type UpdateAccountInput,
   type Folder,
   type MessageDetail,
   type MessageSummary,
@@ -78,6 +80,11 @@ function addresses(message: MessageSummary): string {
   return message.to.map((address) => address.name || address.address).join(", ") || "me";
 }
 
+function additionalDeliveryAddresses(message: MessageSummary): string[] {
+  const visible = new Set(message.to.map(({ address }) => address.toLowerCase()));
+  return (message.deliveredTo ?? []).filter((address) => !visible.has(address.toLowerCase()));
+}
+
 function folderIcon(folder: Folder): "archive" | "inbox" | "mail" | "trash" {
   if (folder.specialUse === "inbox") return "inbox";
   if (folder.specialUse === "trash") return "trash";
@@ -139,7 +146,7 @@ function App() {
   const [selectedUid, setSelectedUid] = useState<number | null>(null);
   const [panel, setPanel] = useState<Panel>(null);
   const [mobileNav, setMobileNav] = useState(false);
-  const [accountSetup, setAccountSetup] = useState(false);
+  const [accountSetup, setAccountSetup] = useState<"new" | string | null>(null);
   const [composeOpen, setComposeOpen] = useState(false);
   const [mailNotice, setMailNotice] = useState<string | null>(null);
   const [selectedProposalId, setSelectedProposalId] = useState("");
@@ -211,6 +218,7 @@ function App() {
 
   const currentFolder = foldersQuery.data?.find((folder) => folder.path === mailbox);
   const currentAccount = accountsQuery.data?.find((account) => account.id === accountId);
+  const hasAccounts = Boolean(accountsQuery.data?.length);
 
   function switchAccount(next: string): void {
     setAccountId(next);
@@ -274,12 +282,11 @@ function App() {
         <div className="brand-group">
           <button className="icon-button mobile-menu" aria-label="Open navigation" onClick={() => setMobileNav(true)}><Icon name="menu" /></button>
           <a className="brand" href="/" aria-label="Postreeve home"><span className="brand-mark"><Icon name="mail" /></span><span>Postreeve</span></a>
-          <span className="early-badge">Early access</span>
         </div>
         <div className="topbar-actions">
           <button className="primary-button compose-button" disabled={!currentAccount} onClick={() => setComposeOpen(true)}><Icon name="plus" /><span>Compose</span></button>
-          <button className={`secondary-button ${panel === "history" ? "active" : ""}`} onClick={() => setPanel(panel === "history" ? null : "history")}><Icon name="history" /><span>Activity</span></button>
-          <button className={`proposal-button ${panel === "proposal" ? "active" : ""}`} onClick={() => setPanel(panel === "proposal" ? null : "proposal")}>
+          <button className={`secondary-button ${panel === "history" ? "active" : ""}`} disabled={!currentAccount} onClick={() => setPanel(panel === "history" ? null : "history")}><Icon name="history" /><span>Activity</span></button>
+          <button className={`proposal-button ${panel === "proposal" ? "active" : ""}`} disabled={!currentAccount} onClick={() => setPanel(panel === "proposal" ? null : "proposal")}>
             <Icon name="sparkles" /><span>Review proposals</span>
             {proposalsQuery.data?.filter((proposal) => proposal.status === "draft" || proposal.status === "review").length ? <span className="count-dot">{proposalsQuery.data.filter((proposal) => proposal.status === "draft" || proposal.status === "review").length}</span> : null}
           </button>
@@ -290,15 +297,15 @@ function App() {
         <aside className={`sidebar ${mobileNav ? "mobile-open" : ""}`}>
           <div className="mobile-sidebar-head"><span>Mailboxes</span><button className="icon-button" aria-label="Close navigation" onClick={() => setMobileNav(false)}><Icon name="x" /></button></div>
           <div className="account-label">Account</div>
-          {accountsQuery.isLoading ? <div className="account-skeleton skeleton" /> : accountsQuery.isError ? <ErrorState message={accountsQuery.error.message} retry={() => void accountsQuery.refetch()} /> : (
+          {accountsQuery.isLoading ? <div className="account-skeleton skeleton" /> : accountsQuery.isError ? <ErrorState message={accountsQuery.error.message} retry={() => void accountsQuery.refetch()} /> : hasAccounts ? (
             <div className="account-picker-wrap">
               <span className="avatar">{initials(currentAccount?.name ?? "P")}</span>
               <select className="account-picker" aria-label="Email account" value={accountId} onChange={(event) => switchAccount(event.target.value)}>
                 {accountsQuery.data?.map((account) => <option value={account.id} key={account.id}>{account.name} · {account.email}</option>)}
               </select>
             </div>
-          )}
-          <button className="add-account" onClick={() => setAccountSetup(true)}><Icon name="plus" /> Add account</button>
+          ) : <div className="account-picker-wrap disconnected-account"><span className="avatar"><Icon name="mail" /></span><span>No account connected</span></div>}
+          <div className="account-links"><button className="add-account" onClick={() => setAccountSetup("new")}><Icon name="plus" /> Add account</button>{currentAccount ? <button className="manage-account" onClick={() => setAccountSetup(currentAccount.id)}>Manage</button> : null}</div>
           <div className="section-label">Folders</div>
           <nav className="folders" aria-label="Mail folders">
             {foldersQuery.isLoading ? Array.from({ length: 5 }, (_, index) => <div className="folder-skeleton skeleton" key={index} />) : null}
@@ -313,6 +320,12 @@ function App() {
         </aside>
         {mobileNav ? <button className="backdrop nav-backdrop" aria-label="Close navigation" onClick={() => setMobileNav(false)} /> : null}
 
+        {!accountsQuery.isLoading && !accountsQuery.isError && !hasAccounts ? <section className="account-onboarding">
+          <span className="onboarding-icon"><Icon name="mail" /></span>
+          <h1>Connect your email</h1>
+          <p>Add the IMAP and SMTP settings from your email provider. Postreeve tests both connections before saving anything.</p>
+          <button className="primary-button" onClick={() => setAccountSetup("new")}><Icon name="plus" /> Connect account</button>
+        </section> : <>
         <section className="message-column">
           <div className="mailbox-heading">
             <div><p>{currentAccount?.email ?? "Mailbox"}</p><h1>{currentFolder?.name ?? "Messages"}</h1></div>
@@ -358,6 +371,7 @@ function App() {
             onClose={() => setSelectedUid(null)}
           /> : <EmptyState icon="mail" title="Message unavailable" body="It may have moved since this folder was loaded." />}
         </main>
+        </>}
       </div>
 
       {panel ? <button className="backdrop panel-backdrop" aria-label="Close panel" onClick={() => setPanel(null)} /> : null}
@@ -383,7 +397,15 @@ function App() {
           onRefresh={refreshWorkflow}
         /> : null}
       </aside>
-      {accountSetup ? <AccountSetup onClose={() => setAccountSetup(false)} onCreated={(id) => { setAccountSetup(false); switchAccount(id); }} /> : null}
+      {accountSetup ? <AccountSetup
+        accountId={accountSetup === "new" ? null : accountSetup}
+        onClose={() => setAccountSetup(null)}
+        onSaved={(account) => { setAccountSetup(null); switchAccount(account.id); }}
+        onRemoved={(removedId) => {
+          setAccountSetup(null);
+          if (accountId === removedId) switchAccount("");
+        }}
+      /> : null}
       {composeOpen && currentAccount ? <ComposeModal account={currentAccount} onClose={() => setComposeOpen(false)} /> : null}
     </div>
   );
@@ -402,6 +424,7 @@ function MessageReader({ message, folders, busy, error, onAction, onClose }: {
   onClose: () => void;
 }) {
   const safe = useMemo(() => message.html ? sanitizeEmailHtml(message.html) : null, [message.html]);
+  const deliveredTo = additionalDeliveryAddresses(message);
   const [destination, setDestination] = useState("");
   const moveFolders = folders.filter((folder) => folder.path !== message.ref.mailbox && folder.specialUse !== "trash");
   const messageIsInTrash = folders.some((folder) => folder.path === message.ref.mailbox && folder.specialUse === "trash");
@@ -421,7 +444,7 @@ function MessageReader({ message, folders, busy, error, onAction, onClose }: {
       <h2>{message.subject || "(No subject)"}</h2>
       <div className="reader-sender">
         <span className={`sender-avatar large tone-${message.ref.uid % 5}`}>{initials(sender(message))}</span>
-        <div><strong>{sender(message)}</strong><span>to {addresses(message)}</span></div>
+        <div><strong>{sender(message)}</strong><span>to {addresses(message)}</span>{message.cc?.length ? <span>cc {message.cc.map((address) => address.name || address.address).join(", ")}</span> : null}{deliveredTo.length ? <span className="delivered-to">delivered to {deliveredTo.join(", ")}</span> : null}</div>
         <time>{formatDate(message.receivedAt, true)}</time>
       </div>
     </div>
@@ -608,8 +631,13 @@ function HistoryPanel(props: HistoryPanelProps) {
   </>;
 }
 
-function AccountSetup({ onClose, onCreated }: { onClose: () => void; onCreated: (id: string) => void }) {
-  const [kind, setKind] = useState<"fixture" | "imap">("fixture");
+function AccountSetup({ accountId, onClose, onSaved, onRemoved }: {
+  accountId: string | null;
+  onClose: () => void;
+  onSaved: (account: Account) => void;
+  onRemoved: (accountId: string) => void;
+}) {
+  const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [host, setHost] = useState("");
@@ -625,48 +653,107 @@ function AccountSetup({ onClose, onCreated }: { onClose: () => void; onCreated: 
   const [smtpHostEdited, setSmtpHostEdited] = useState(false);
   const [smtpUsernameEdited, setSmtpUsernameEdited] = useState(false);
   const [smtpPasswordEdited, setSmtpPasswordEdited] = useState(false);
-  const mutation = useMutation({ mutationFn: api.createAccount, onSuccess: (account) => onCreated(account.id) });
-  function submit(event: FormEvent): void {
-    event.preventDefault();
-    const base = { name: name.trim(), email: email.trim() };
-    const input: CreateAccountInput = kind === "fixture" ? { kind, ...base } : {
-      kind,
-      ...base,
+  const [confirmRemoval, setConfirmRemoval] = useState(false);
+  const connectionFieldsComplete = [name, email, host, port, username, smtpHost, smtpPort, smtpUsername]
+    .every((value) => value.trim().length > 0)
+    && (Boolean(accountId) || Boolean(password && smtpPassword));
+  const settingsQuery = useQuery({
+    queryKey: ["account-settings", accountId],
+    queryFn: ({ signal }) => api.accountSettings(accountId ?? "", signal),
+    enabled: Boolean(accountId),
+  });
+  useEffect(() => {
+    const settings = settingsQuery.data;
+    if (!settings) return;
+    setName(settings.name);
+    setEmail(settings.email);
+    setHost(settings.host);
+    setPort(String(settings.port));
+    setSecure(settings.secure);
+    setUsername(settings.username);
+    setSmtpHost(settings.smtpHost);
+    setSmtpPort(String(settings.smtpPort));
+    setSmtpSecure(settings.smtpSecure);
+    setSmtpUsername(settings.smtpUsername);
+  }, [settingsQuery.data]);
+
+  function updateInput(): UpdateAccountInput {
+    return {
+      name: name.trim(),
+      email: email.trim(),
       host: host.trim(),
       port: Number(port),
       secure,
       username: username.trim(),
-      password,
+      ...(password ? { password } : {}),
       smtpHost: smtpHost.trim(),
       smtpPort: Number(smtpPort),
       smtpSecure,
       smtpUsername: smtpUsername.trim(),
-      smtpPassword,
+      ...(smtpPassword ? { smtpPassword } : {}),
     };
-    mutation.mutate(input);
+  }
+
+  function createInput(): CreateAccountInput {
+    return { kind: "imap", ...updateInput(), password, smtpPassword };
+  }
+
+  function cacheAccount(account: Account): void {
+    queryClient.setQueryData<Account[]>(["accounts"], (accounts = []) => {
+      const exists = accounts.some(({ id }) => id === account.id);
+      return exists ? accounts.map((current) => current.id === account.id ? account : current) : [...accounts, account];
+    });
+  }
+
+  const saveMutation = useMutation({
+    mutationFn: () => accountId ? api.updateAccount(accountId, updateInput()) : api.createAccount(createInput()),
+    onSuccess: (account) => {
+      cacheAccount(account);
+      onSaved(account);
+    },
+  });
+  const testMutation = useMutation({
+    mutationFn: () => accountId ? api.testAccount(accountId, updateInput()) : api.testNewAccount(createInput()),
+  });
+  const removeMutation = useMutation({
+    mutationFn: () => api.removeAccount(accountId ?? ""),
+    onSuccess: () => {
+      if (!accountId) return;
+      queryClient.setQueryData<Account[]>(["accounts"], (accounts = []) => accounts.filter(({ id }) => id !== accountId));
+      queryClient.removeQueries({ predicate: ({ queryKey }) => queryKey.includes(accountId) });
+      onRemoved(accountId);
+    },
+  });
+  function submit(event: FormEvent): void {
+    event.preventDefault();
+    saveMutation.mutate();
   }
   return <div className="modal-layer"><button className="backdrop" aria-label="Close account setup" onClick={onClose} /><form className="account-modal" onSubmit={submit}>
-    <div className="panel-head"><div><span className="eyebrow">Account setup</span><h2>Connect a mailbox</h2></div><button type="button" className="icon-button" aria-label="Close account setup" onClick={onClose}><Icon name="x" /></button></div>
+    <div className="panel-head"><div><span className="eyebrow">Account settings</span><h2>{accountId ? "Manage mailbox" : "Connect a mailbox"}</h2></div><button type="button" className="icon-button" aria-label="Close account setup" onClick={onClose}><Icon name="x" /></button></div>
     <div className="setup-body">
-      <div className="kind-toggle"><button type="button" className={kind === "fixture" ? "active" : ""} onClick={() => setKind("fixture")}>Demo fixture</button><button type="button" className={kind === "imap" ? "active" : ""} onClick={() => setKind("imap")}>IMAP account</button></div>
-      <p className="setup-copy">{kind === "fixture" ? "Add a deterministic demo inbox. No credentials needed." : "Credentials stay on this server and are never sent to the browser again."}</p>
+      <p className="setup-copy">Postreeve tests IMAP and SMTP before saving. Credentials stay encrypted on this server and passwords are never returned to the browser.</p>
+      {settingsQuery.isLoading ? <ReaderSkeleton /> : null}
+      {settingsQuery.isError ? <ErrorState message={settingsQuery.error.message} retry={() => void settingsQuery.refetch()} /> : null}
+      {!accountId || settingsQuery.isSuccess ? <>
       <div className="field-grid"><label className="field"><span>Name</span><input required value={name} placeholder="Work" onChange={(event) => setName(event.target.value)} /></label><label className="field"><span>Email address</span><input required type="email" value={email} placeholder="you@example.com" onChange={(event) => setEmail(event.target.value)} /></label></div>
-      {kind === "imap" ? <>
-        <fieldset className="connection-group"><legend>Incoming mail (IMAP)</legend>
+      <fieldset className="connection-group"><legend>Incoming mail (IMAP)</legend>
           <div className="field-grid host-grid"><label className="field"><span>IMAP host</span><input required value={host} placeholder="imap.example.com" onChange={(event) => { const value = event.target.value; setHost(value); if (!smtpHostEdited) setSmtpHost(value.replace(/^imap\./i, "smtp.")); }} /></label><label className="field"><span>Port</span><input required type="number" min="1" max="65535" value={port} onChange={(event) => setPort(event.target.value)} /></label></div>
           <label className="check-field"><input type="checkbox" checked={secure} onChange={(event) => setSecure(event.target.checked)} /><span>Use a secure TLS connection</span></label>
-          <div className="field-grid"><label className="field"><span>Username</span><input required autoComplete="username" value={username} onChange={(event) => { const value = event.target.value; setUsername(value); if (!smtpUsernameEdited) setSmtpUsername(value); }} /></label><label className="field"><span>Password</span><input required type="password" autoComplete="current-password" value={password} onChange={(event) => { const value = event.target.value; setPassword(value); if (!smtpPasswordEdited) setSmtpPassword(value); }} /></label></div>
+          <div className="field-grid"><label className="field"><span>Username</span><input required autoComplete="username" value={username} onChange={(event) => { const value = event.target.value; setUsername(value); if (!smtpUsernameEdited) setSmtpUsername(value); }} /></label><label className="field"><span>Password {accountId ? <i>(leave blank to keep current)</i> : null}</span><input required={!accountId} type="password" autoComplete="current-password" value={password} onChange={(event) => { const value = event.target.value; setPassword(value); if (!smtpPasswordEdited) setSmtpPassword(value); }} /></label></div>
         </fieldset>
-        <fieldset className="connection-group"><legend>Outgoing mail (SMTP)</legend>
+      <fieldset className="connection-group"><legend>Outgoing mail (SMTP)</legend>
           <p className="connection-hint">Prefilled from IMAP. Change any value if your provider uses different SMTP settings.</p>
           <div className="field-grid host-grid"><label className="field"><span>SMTP host</span><input required value={smtpHost} placeholder="smtp.example.com" onChange={(event) => { setSmtpHostEdited(true); setSmtpHost(event.target.value); }} /></label><label className="field"><span>Port</span><input required type="number" min="1" max="65535" value={smtpPort} onChange={(event) => setSmtpPort(event.target.value)} /></label></div>
           <label className="check-field"><input type="checkbox" checked={smtpSecure} onChange={(event) => setSmtpSecure(event.target.checked)} /><span>Use a secure TLS connection</span></label>
-          <div className="field-grid"><label className="field"><span>Username</span><input required autoComplete="username" value={smtpUsername} onChange={(event) => { setSmtpUsernameEdited(true); setSmtpUsername(event.target.value); }} /></label><label className="field"><span>Password</span><input required type="password" autoComplete="current-password" value={smtpPassword} onChange={(event) => { setSmtpPasswordEdited(true); setSmtpPassword(event.target.value); }} /></label></div>
+          <div className="field-grid"><label className="field"><span>Username</span><input required autoComplete="username" value={smtpUsername} onChange={(event) => { setSmtpUsernameEdited(true); setSmtpUsername(event.target.value); }} /></label><label className="field"><span>Password {accountId ? <i>(leave blank to keep current)</i> : null}</span><input required={!accountId} type="password" autoComplete="current-password" value={smtpPassword} onChange={(event) => { setSmtpPasswordEdited(true); setSmtpPassword(event.target.value); }} /></label></div>
         </fieldset>
+      {testMutation.isSuccess ? <div className="inline-alert success">IMAP and SMTP connections succeeded.</div> : null}
+      {testMutation.isError ? <div className="inline-alert error">{testMutation.error.message}</div> : null}
+      {saveMutation.isError ? <div className="inline-alert error">{saveMutation.error.message}</div> : null}
+      {accountId ? <div className="remove-account-section"><strong>Remove account</strong><p>This permanently removes its encrypted credentials and local proposal and activity history. It does not delete mail from your provider.</p>{confirmRemoval ? <div className="remove-confirmation"><span>This cannot be undone.</span><button type="button" className="danger-button" disabled={removeMutation.isPending} onClick={() => removeMutation.mutate()}>{removeMutation.isPending ? "Removing…" : "Remove account and local history"}</button><button type="button" className="text-button" onClick={() => setConfirmRemoval(false)}>Cancel</button></div> : <button type="button" className="danger-button" onClick={() => setConfirmRemoval(true)}>Remove account…</button>}{removeMutation.isError ? <div className="inline-alert error">{removeMutation.error.message}</div> : null}</div> : null}
       </> : null}
-      {mutation.isError ? <div className="inline-alert error">{mutation.error.message}</div> : null}
     </div>
-    <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={mutation.isPending}>{mutation.isPending ? "Connecting…" : kind === "fixture" ? "Add demo account" : "Connect account"}</button></div>
+    <div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button type="button" className="secondary-button" disabled={!connectionFieldsComplete || testMutation.isPending || saveMutation.isPending || (Boolean(accountId) && !settingsQuery.isSuccess)} onClick={() => testMutation.mutate()}>{testMutation.isPending ? "Testing…" : "Test connection"}</button><button className="primary-button" disabled={!connectionFieldsComplete || saveMutation.isPending || testMutation.isPending || (Boolean(accountId) && !settingsQuery.isSuccess)}>{saveMutation.isPending ? "Connecting…" : accountId ? "Save and reconnect" : "Connect account"}</button></div>
   </form></div>;
 }
 
