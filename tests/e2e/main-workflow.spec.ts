@@ -97,6 +97,7 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
     const method = request.method();
 
     if (method === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
+    if (method === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
     if (method === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) {
       folderRequests += 1;
       return json(route, liveFolders);
@@ -121,7 +122,7 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
     if (method === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) {
       messageRequests += 1;
       lastMessageQuery = url.searchParams.get("query") ?? "";
-      return json(route, [message]);
+      return json(route, url.searchParams.get("mailbox") === "INBOX" ? [message] : []);
     }
     if (method === "POST" && url.pathname === "/api/messages/read") return json(route, [message]);
     if (method === "POST" && url.pathname === "/api/messages/send") {
@@ -148,6 +149,7 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
       };
       return json(route, batch);
     }
+    if (method === "GET" && url.pathname === "/api/proposals") return json(route, []);
     if (method === "GET" && url.pathname === "/api/batches") return json(route, batch ? [batch] : []);
     if (method === "POST" && url.pathname === "/api/batches/direct-batch-1/undo" && batch) {
       batch = {
@@ -163,10 +165,11 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
 
   await page.clock.install();
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
-  await expect(page.getByLabel("Filter messages")).toHaveValue("all");
-  await expect(page.getByLabel("Sort messages")).toHaveValue("newest");
-  await expect(page.getByRole("button", { name: "Refresh mailbox" })).toBeVisible();
+  await expect(page.getByText("Work inbox · Inbox", { exact: true })).toHaveCount(0);
+  await expect(page.getByText(`${account.email} · Inbox`, { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "All", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "Newest", exact: true })).toHaveAttribute("aria-pressed", "true");
+
   await expect.poll(() => page.evaluate(() => {
     const harness: unknown = Reflect.get(window, "postreeveWebMcpHarness");
     if (typeof harness !== "object" || harness === null) return [];
@@ -189,10 +192,11 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   expect(searchResult).toEqual([messageSummarySchema.parse(message)]);
   expect(lastMessageQuery).toBe("quarterly planning");
   await expect(page.getByLabel("Search messages")).toHaveValue("quarterly planning");
-  await expect(page.getByLabel("Filter messages")).toHaveValue("unread");
-  await expect(page.getByLabel("Sort messages")).toHaveValue("oldest");
-  await expect(page.getByText("Results for “quarterly planning”")).toBeVisible();
-  await expect(page.getByRole("status")).toHaveText("WebMCP updated the visible mailbox view.");
+  await expect(page.getByRole("button", { name: "Unread", exact: true }).first()).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("button", { name: "Oldest", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText("matching “quarterly planning”")).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("WebMCP updated the visible mailbox view.");
+
   await page.evaluate(async () => {
     const harness: unknown = Reflect.get(window, "postreeveWebMcpHarness");
     if (typeof harness !== "object" || harness === null) throw new Error("Missing WebMCP harness");
@@ -201,9 +205,7 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
     await execute("create_folder", { accountId: "account-work", name: "Agent folder" });
   });
   await expect(page.getByRole("button", { name: /Agent folder/ })).toBeVisible();
-  await page.getByRole("button", { name: "Identities", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Identities" })).toBeVisible();
-  await page.getByRole("button", { name: "Close identities panel" }).click();
+
   await page.getByRole("button", { name: "Manage folders" }).click();
   await expect(page.getByRole("heading", { name: "Manage folders" })).toBeVisible();
   await page.getByLabel("New folder name").fill("Receipts");
@@ -213,93 +215,157 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await page.getByLabel("Rename Receipts").fill("Keep");
   await page.getByRole("button", { name: "Save name" }).click();
   await expect(page.getByRole("article", { name: "Keep" })).toBeVisible();
-  await page.getByRole("article", { name: "Keep" }).getByRole("button", { name: "Delete" }).click();
+  await page.getByRole("article", { name: "Keep" }).getByRole("button", { name: "Delete", exact: true }).click();
   await page.getByRole("button", { name: "Delete Keep" }).click();
   await expect(page.getByRole("article", { name: "Keep" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Close folder panel" }).click();
+  await page.getByRole("button", { name: "Close Manage folders" }).click();
+
   const initialFolderRequests = folderRequests;
   await page.clock.fastForward(15_000);
   await expect.poll(() => folderRequests).toBeGreaterThan(initialFolderRequests);
 
-  await page.getByRole("button", { name: "Compose" }).click();
+  await page.getByRole("button", { name: "New message" }).click();
   await expect(page.getByLabel("From identity")).toHaveValue("alex@example.com");
   await page.getByLabel("To", { exact: true }).fill("jordan@example.com, taylor@example.com");
   await page.getByLabel("Cc", { exact: true }).fill("team@example.com");
   await page.getByLabel("Subject", { exact: true }).fill("Planning follow-up");
   await page.getByLabel("Message", { exact: true }).fill("Here are the next steps from our planning session.");
   await page.getByRole("button", { name: "Send message" }).click();
-  await expect(page.getByRole("heading", { name: "Message sent", level: 2 })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Message sent" })).toBeVisible();
   expect(sentMessage).toMatchObject({ accountId: account.id, subject: "Planning follow-up", text: "Here are the next steps from our planning session." });
   await expect.poll(() => messageRequests).toBeGreaterThan(1);
   await page.getByRole("button", { name: "Done" }).click();
 
-  await page.getByRole("button", { name: "Compose" }).click();
+  await page.getByRole("button", { name: "New message" }).click();
   await page.getByLabel("Subject", { exact: true }).fill("Locally saved idea");
   await page.getByLabel("Message", { exact: true }).fill("Keep this as a draft for now.");
   await page.getByRole("button", { name: "Save draft" }).click();
-  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Close New message" }).click();
   await page.getByRole("button", { name: /Local drafts/ }).click();
   await expect(page.getByText("Locally saved idea", { exact: true })).toBeVisible();
   await page.getByText("Locally saved idea", { exact: true }).click();
   await expect(page.getByLabel("Message", { exact: true })).toHaveValue("Keep this as a draft for now.");
-  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Close Edit draft" }).click();
 
+  await page.getByLabel("Clear search").click();
   await page.getByText("Quarterly planning notes", { exact: true }).click();
   await expect(page.getByRole("heading", { name: "Quarterly planning notes" })).toBeVisible();
   await expect(page.getByText("delivered to planning-alias@example.com", { exact: true })).toBeVisible();
   await expect(page.getByText("Remote images blocked to protect your privacy.")).toBeVisible();
   await expect(page.locator(".email-html img")).not.toHaveAttribute("src");
   await expect(page.locator(".email-html script")).toHaveCount(0);
+
   await page.getByRole("button", { name: "Reply", exact: true }).click();
   await expect(page.getByLabel("To", { exact: true })).toHaveValue("sam@example.com");
   await expect(page.getByLabel("Subject", { exact: true })).toHaveValue("Re: Quarterly planning notes");
   await expect(page.getByText("Frontend ready, backend pending.", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
-  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByRole("button", { name: "Close Reply" }).click();
 
-  await page.getByLabel("Move destination").selectOption("Archive");
-  await page.getByRole("button", { name: "Move", exact: true }).click();
-  await expect(page.getByRole("status")).toHaveText("Moved to Archive.");
-  await page.getByRole("button", { name: "Activity" }).click();
-  await expect(page.getByText("Move to folder", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Undo supported actions" }).click();
-  await expect(page.locator(".status-pill", { hasText: "undone" })).toBeVisible();
+  await page.getByLabel("Move message to").selectOption("Archive");
+  await expect(page.getByRole("status")).toContainText("Moved 1 to Archive");
+
+  await page.getByRole("button", { name: "Activity", exact: true }).first().click();
+  await expect(page.getByText("moved to Archive", { exact: true })).toBeVisible();
+  await expect(page.getByText("you", { exact: true }).first()).toBeVisible();
+  await page.getByRole("button", { name: "Undo", exact: true }).click();
+  await expect(page.getByText("moved to Archive (undone)", { exact: true })).toBeVisible();
 });
 
-test("opens and closes the reading pane on a narrow screen", async ({ page }) => {
+test("reads a message and returns to the list on a narrow screen", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
+    if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
     if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
     if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, [message]);
     if (request.method() === "POST" && url.pathname === "/api/messages/read") return json(route, [message]);
+    if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
     return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
   });
 
   await page.goto("/");
   await page.getByText(message.subject, { exact: true }).click();
   await expect(page.getByRole("heading", { name: message.subject })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Back to messages" })).toBeVisible();
-  await page.getByRole("button", { name: "Back to messages" }).click();
-  await expect(page.getByRole("heading", { name: message.subject })).toBeHidden();
+  await page.getByRole("button", { name: "← Inbox" }).click();
+  await expect(page.getByRole("heading", { name: message.subject })).toHaveCount(0);
   await expect(page.getByText(message.subject, { exact: true })).toBeVisible();
 });
 
+test("keyboard shortcuts open, move through and archive mail", async ({ page }) => {
+  const second: MessageDetail = {
+    ...message,
+    ref: { ...messageRef, uid: 42 },
+    messageId: "second@example.com",
+    subject: "Budget review",
+    read: true,
+  };
+  const applied: string[] = [];
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
+    if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) {
+      return json(route, url.searchParams.get("mailbox") === "INBOX" ? [message, second] : []);
+    }
+    if (request.method() === "POST" && url.pathname === "/api/messages/read") {
+      const { references } = request.postDataJSON();
+      const uid = references[0]?.uid;
+      return json(route, [uid === second.ref.uid ? second : message]);
+    }
+    if (request.method() === "POST" && url.pathname === "/api/messages/actions") {
+      const input = directActionInputSchema.parse(request.postDataJSON());
+      applied.push(JSON.stringify(input.items.map((item) => [item.message.uid, item.action])));
+      return json(route, {
+        id: "kb-batch", proposalId: "kb", accountId: account.id, status: "applied",
+        operations: input.items.map((item, index) => ({ itemId: `kb-${index}`, message: item.message, action: item.action, status: "applied", error: null })),
+        createdAt: "2026-08-29T09:02:00.000Z", updatedAt: "2026-08-29T09:02:00.000Z",
+      });
+    }
+    if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
+    return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
+  });
+
+  await page.goto("/");
+  await expect(page.getByText("Budget review", { exact: true })).toBeVisible();
+
+  await page.keyboard.press("j");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("heading", { name: "Budget review" })).toBeVisible();
+  await page.keyboard.press("k");
+  await expect(page.getByRole("heading", { name: "Quarterly planning notes" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("heading", { name: "Quarterly planning notes" })).toHaveCount(0);
+
+  await page.keyboard.press("e");
+  await expect.poll(() => applied).toContain(JSON.stringify([[41, { type: "move", destination: "Archive" }]]));
+
+  const listWithSidebar = await page.locator(".list").boundingBox();
+  await page.keyboard.press("[");
+  await expect(page.getByRole("button", { name: "Show sidebar" })).toBeVisible();
+  await expect(page.locator(".side")).toBeHidden();
+  // Hiding the sidebar takes it out of the grid, so the list has to claim its track.
+  await expect(page.getByText("Budget review", { exact: true })).toBeVisible();
+  const listWithoutSidebar = await page.locator(".list").boundingBox();
+  expect(listWithoutSidebar!.width).toBeGreaterThan(listWithSidebar!.width);
+  expect(listWithoutSidebar!.x).toBe(0);
+
+  await page.keyboard.press("[");
+  await expect(page.locator(".side")).toBeVisible();
+  await page.keyboard.press("/");
+  await expect(page.getByLabel("Search messages")).toBeFocused();
+});
+
 test("shows and selects a newly connected account without a reload", async ({ page }) => {
-  const personal: Account = {
-    id: "account-personal",
-    name: "Personal",
-    email: "person@example.com",
-    kind: "imap",
-  };
-  const work: Account = {
-    id: "account-new-work",
-    name: "New work",
-    email: "person@work.example",
-    kind: "imap",
-  };
+  const personal: Account = { id: "account-personal", name: "Personal", email: "person@example.com", kind: "imap" };
+  const work: Account = { id: "account-new-work", name: "New work", email: "person@work.example", kind: "imap" };
   let created = false;
 
   await page.route("**/api/**", async (route) => {
@@ -307,6 +373,7 @@ test("shows and selects a newly connected account without a reload", async ({ pa
     const url = new URL(request.url());
     const method = request.method();
     if (method === "GET" && url.pathname === "/api/accounts") return json(route, created ? [personal, work] : [personal]);
+    if (method === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
     if (method === "POST" && url.pathname === "/api/accounts") {
       createAccountInputSchema.parse(request.postDataJSON());
       created = true;
@@ -316,10 +383,13 @@ test("shows and selects a newly connected account without a reload", async ({ pa
       return json(route, [{ path: "INBOX", name: "Inbox", specialUse: "inbox", unread: 0, total: 0 }]);
     }
     if (method === "GET" && url.pathname.endsWith("/messages")) return json(route, []);
+    if (method === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (method === "GET" && url.pathname === "/api/batches") return json(route, []);
     return json(route, { error: `Unhandled test route: ${method} ${url.pathname}` }, 404);
   });
 
   await page.goto("/");
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
   await page.getByRole("button", { name: "Add account" }).click();
   await page.getByLabel("Name", { exact: true }).fill(work.name);
   await page.getByLabel("Email address").fill(work.email);
@@ -328,20 +398,18 @@ test("shows and selects a newly connected account without a reload", async ({ pa
   await page.getByLabel(/Password/).first().fill("incoming-password");
   await page.getByRole("button", { name: "Connect account" }).click();
 
-  const picker = page.getByLabel("Email account");
-  await expect(picker.locator("option", { hasText: `${work.name} · ${work.email}` })).toHaveCount(1);
-  await expect(picker).toHaveValue(work.id);
   await expect(page.getByText(work.email, { exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Inbox" })).toBeVisible();
+  await expect(page.getByText(`${work.email} · Inbox`, { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Unified" })).toBeVisible();
 });
 
 test("starts with real account onboarding when no mailbox is connected", async ({ page }) => {
   await page.route("**/api/accounts", async (route) => json(route, []));
+  await page.route("**/api/oauth/google/status", async (route) => json(route, { configured: false }));
 
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "Connect your email" })).toBeVisible();
-  await expect(page.getByText("No account connected", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Connect account" }).click();
   await expect(page.getByRole("heading", { name: "Connect a mailbox" })).toBeVisible();
   await expect(page.getByText(/demo/i)).toHaveCount(0);

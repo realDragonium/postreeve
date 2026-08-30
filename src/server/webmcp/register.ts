@@ -40,16 +40,25 @@ export function resolveWebMcpModelContext(
   return modelContextFrom(environment.document) ?? modelContextFrom(environment.navigator);
 }
 
+export interface WebMcpRegisterFilter {
+  /** When given, only these tools are offered to the assistant. */
+  readonly exposedToolNames?: readonly string[];
+}
+
 export async function registerPostreeveWebMcp(
   services: WebMcpServices,
   modelContext: WebMcpModelContext | null = resolveWebMcpModelContext(),
+  filter: WebMcpRegisterFilter = {},
 ): Promise<WebMcpRegistration | null> {
   if (modelContext === null) {
     return null;
   }
 
   const controller = new AbortController();
-  const tools = createPostreeveWebMcpTools(services);
+  const exposed = filter.exposedToolNames;
+  const tools = exposed === undefined
+    ? createPostreeveWebMcpTools(services)
+    : createPostreeveWebMcpTools(services).filter(({ name }) => exposed.includes(name));
 
   try {
     await Promise.all(
