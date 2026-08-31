@@ -15,11 +15,23 @@ interface PreparedEmail {
 const minimumFrameHeight = 160;
 const maximumFrameHeight = 8_000;
 const resourceAttributes = ["src", "poster", "background"] as const;
+const lazyResourceAttributes = ["data-src", "data-original", "data-lazy-src"] as const;
+const sourceSetAttributes = ["srcset", "data-srcset"] as const;
 const remoteUrlPattern = /^(?:https?:)?\/\//i;
-const remoteCssUrlPattern = /url\s*\(\s*["']?(?:https?:)?\/\//gi;
+const remoteUrlInValuePattern = /(?:https?:)?\/\/[^\s,"')]+/gi;
+const remoteCssUrlPattern = /url\s*\(\s*(["']?)(?:https?:)?\/\//gi;
 
 function isRemoteUrl(value: string): boolean {
   return remoteUrlPattern.test(value.trim());
+}
+
+function normalizeRemoteUrl(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.startsWith("//") ? `https:${trimmed}` : trimmed;
+}
+
+function normalizeRemoteUrls(value: string): string {
+  return value.replace(remoteUrlInValuePattern, (url) => normalizeRemoteUrl(url));
 }
 
 function isSafeLink(value: string): boolean {
@@ -40,7 +52,7 @@ function prepareEmail(html: string, allowRemoteResources: boolean): PreparedEmai
     FORCE_BODY: true,
     SANITIZE_NAMED_PROPS: true,
     FORBID_TAGS: ["script", "iframe", "object", "embed", "form", "input", "button", "textarea", "select", "option", "base", "link", "meta"],
-    FORBID_ATTR: ["srcdoc", "srcset", "action", "formaction", "ping"],
+    FORBID_ATTR: ["srcdoc", "action", "formaction", "ping"],
   });
   const parsed = new DOMParser().parseFromString(cleaned, "text/html");
   let blockedRemoteResources = 0;
@@ -55,9 +67,46 @@ function prepareEmail(html: string, allowRemoteResources: boolean): PreparedEmai
         if (!allowRemoteResources) {
           element.removeAttribute(attribute);
           resourceUnavailable = true;
+        } else {
+          element.setAttribute(attribute, normalizeRemoteUrl(value));
         }
       } else if (/^cid:/i.test(value) || (!/^(?:data:|blob:)/i.test(value) && !value.startsWith("#"))) {
         element.removeAttribute(attribute);
+        resourceUnavailable = true;
+      }
+    }
+    if (resourceUnavailable) markUnavailableImage(element);
+  }
+
+  for (const element of parsed.querySelectorAll("[data-src], [data-original], [data-lazy-src]")) {
+    let resourceUnavailable = false;
+    for (const attribute of lazyResourceAttributes) {
+      const value = element.getAttribute(attribute);
+      if (!value) continue;
+      element.removeAttribute(attribute);
+      if (!isRemoteUrl(value)) continue;
+      blockedRemoteResources += 1;
+      if (allowRemoteResources) element.setAttribute("src", normalizeRemoteUrl(value));
+      else resourceUnavailable = true;
+    }
+    if (resourceUnavailable) markUnavailableImage(element);
+  }
+
+  for (const element of parsed.querySelectorAll("[srcset], [data-srcset]")) {
+    let resourceUnavailable = false;
+    for (const attribute of sourceSetAttributes) {
+      const value = element.getAttribute(attribute);
+      if (!value) continue;
+      if (attribute === "data-srcset") element.removeAttribute(attribute);
+      const remoteResources = value.match(remoteUrlInValuePattern)?.length ?? 0;
+      if (remoteResources === 0) {
+        if (/javascript:/i.test(value)) element.removeAttribute("srcset");
+        continue;
+      }
+      blockedRemoteResources += remoteResources;
+      if (allowRemoteResources) element.setAttribute("srcset", normalizeRemoteUrls(value));
+      else {
+        element.removeAttribute("srcset");
         resourceUnavailable = true;
       }
     }
@@ -74,14 +123,19 @@ function prepareEmail(html: string, allowRemoteResources: boolean): PreparedEmai
     anchor.setAttribute("rel", "noopener noreferrer");
   }
 
-  const retainedCss = [
+  const styledElements = [
     ...parsed.head.querySelectorAll("style"),
     ...parsed.body.querySelectorAll("style"),
     ...parsed.body.querySelectorAll("[style]"),
-  ].map((element) => element.tagName === "STYLE"
-    ? element.textContent ?? ""
-    : element.getAttribute("style") ?? "").join("\n");
-  blockedRemoteResources += retainedCss.match(remoteCssUrlPattern)?.length ?? 0;
+  ];
+  for (const element of styledElements) {
+    const css = element.tagName === "STYLE" ? element.textContent ?? "" : element.getAttribute("style") ?? "";
+    blockedRemoteResources += css.match(remoteCssUrlPattern)?.length ?? 0;
+    if (!allowRemoteResources) continue;
+    const normalized = css.replace(remoteCssUrlPattern, (_match, quote: string) => `url(${quote}https://`);
+    if (element.tagName === "STYLE") element.textContent = normalized;
+    else element.setAttribute("style", normalized);
+  }
 
   const imagePolicy = allowRemoteResources
     ? "img-src data: blob: http: https:;"

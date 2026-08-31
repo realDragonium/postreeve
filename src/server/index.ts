@@ -1,6 +1,5 @@
 import { serveStatic } from "hono/bun";
 import { Hono } from "hono";
-import { secureHeaders } from "hono/secure-headers";
 import { z } from "zod";
 import { createApi } from "./api";
 import { PostreeveService } from "./core/postreeve";
@@ -12,6 +11,7 @@ import { MailProviderRegistry } from "./mail/provider";
 import { MailSenderRegistry } from "./mail/sender";
 import { SmtpMailSender } from "./mail/smtp";
 import { CredentialVault } from "./security/credentials";
+import { postreeveSecureHeaders } from "./security/headers";
 
 const store = new Store();
 const providers = new MailProviderRegistry();
@@ -76,17 +76,7 @@ const service = new PostreeveService(
 await service.initialize();
 
 const app = new Hono();
-app.use("*", secureHeaders({
-  contentSecurityPolicy: {
-    defaultSrc: ["'self'"],
-    imgSrc: ["'self'", "data:"],
-    styleSrc: ["'self'", "'unsafe-inline'"],
-    scriptSrc: ["'self'"],
-    connectSrc: ["'self'"],
-    frameSrc: ["'none'"],
-  },
-  referrerPolicy: "no-referrer",
-}));
+app.use("*", postreeveSecureHeaders);
 app.route("/", createApi(service, googleOAuth));
 app.use("/*", serveStatic({ root: "./dist" }));
 app.get("/*", serveStatic({ path: "./dist/index.html" }));

@@ -53,6 +53,10 @@ const message: MessageDetail = {
       Here are the <strong>decisions</strong> and follow-ups.
     </div>
     <img class="tracker" src="https://tracker.invalid/pixel.gif">
+    <img class="protocol-relative" src="//tracker.invalid/protocol.gif">
+    <img class="responsive" srcset="https://tracker.invalid/responsive.gif 1x">
+    <img class="lazy" data-src="https://tracker.invalid/lazy.gif">
+    <div class="remote-background" style="background-image: url('//tracker.invalid/background.gif')"></div>
     <img class="embedded" alt="Embedded image" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
     <script>window.parent.compromised = true</script>
   `,
@@ -287,6 +291,9 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await expect(emailBody.locator(".email-card")).toHaveCSS("color", "rgb(18, 52, 86)");
   await expect(emailBody.locator(".email-card")).toHaveCSS("background-color", "rgb(238, 238, 238)");
   await expect(emailBody.locator("img.tracker")).not.toHaveAttribute("src");
+  await expect(emailBody.locator("img.protocol-relative")).not.toHaveAttribute("src");
+  await expect(emailBody.locator("img.responsive")).not.toHaveAttribute("srcset");
+  await expect(emailBody.locator("img.lazy")).not.toHaveAttribute("src");
   await expect(emailBody.locator("img.embedded")).toHaveAttribute("src", /^data:image\/gif;base64,/);
   await expect(emailBody.locator("img.embedded")).not.toHaveClass(/postreeve-blocked-image/);
   await expect(emailBody.locator("script")).toHaveCount(0);
@@ -295,7 +302,11 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
 
   await page.getByRole("button", { name: "Load images" }).click();
   await expect(emailBody.locator("img.tracker")).toHaveAttribute("src", "https://tracker.invalid/pixel.gif");
-  await expect.poll(() => remoteImageRequests).toBe(1);
+  await expect(emailBody.locator("img.protocol-relative")).toHaveAttribute("src", "https://tracker.invalid/protocol.gif");
+  await expect(emailBody.locator("img.responsive")).toHaveAttribute("srcset", "https://tracker.invalid/responsive.gif 1x");
+  await expect(emailBody.locator("img.lazy")).toHaveAttribute("src", "https://tracker.invalid/lazy.gif");
+  await expect(emailBody.locator(".remote-background")).toHaveAttribute("style", /https:\/\/tracker\.invalid\/background\.gif/);
+  await expect.poll(() => remoteImageRequests).toBeGreaterThan(0);
 
   await page.getByRole("button", { name: "Reply", exact: true }).click();
   await expect(page.getByLabel("To", { exact: true })).toHaveValue("sam@example.com");
