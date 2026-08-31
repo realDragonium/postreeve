@@ -129,6 +129,16 @@ select.input { cursor: pointer; }
   display: flex; align-items: center; gap: 20px; flex: none;
   height: 48px; padding: 0 24px 0 15px; border-bottom: 1px solid var(--div);
 }
+[data-desktop="true"] .topbar {
+  -webkit-app-region: drag;
+  user-select: none;
+}
+[data-desktop-platform="macos"] .topbar { padding-left: 82px; }
+[data-desktop-platform="other"] .topbar { padding-right: 154px; }
+[data-desktop="true"] .topbar button,
+[data-desktop="true"] .topbar input,
+[data-desktop="true"] .topbar .tabs,
+[data-desktop="true"] .topbar .search { -webkit-app-region: no-drag; }
 .brand-group { display: flex; align-items: center; gap: 12px; flex: none; }
 .brand { font-size: 11px; font-weight: 700; letter-spacing: .16em; color: var(--ink); }
 .icon-button {

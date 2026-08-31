@@ -4,6 +4,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import "./styles.css";
 
+if (window.location.protocol === "postreeve:") {
+  document.documentElement.dataset.desktop = "true";
+  document.documentElement.dataset.desktopPlatform = navigator.userAgent.includes("Macintosh")
+    ? "macos"
+    : "other";
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

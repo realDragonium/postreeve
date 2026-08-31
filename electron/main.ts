@@ -197,6 +197,13 @@ async function createWindow(): Promise<void> {
     height: 920,
     minWidth: 900,
     minHeight: 600,
+    ...(process.platform === "darwin" ? {
+      titleBarStyle: "hiddenInset" as const,
+      trafficLightPosition: { x: 15, y: 16 },
+    } : {
+      titleBarStyle: "hidden" as const,
+      titleBarOverlay: { height: 48 },
+    }),
     title: "Postreeve",
     backgroundColor: "#151413",
     show: false,
