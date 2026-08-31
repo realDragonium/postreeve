@@ -149,7 +149,6 @@ export class GmailMailClient implements MailProvider, MailSender {
       const raw = message.raw;
       if (!raw) throw new Error("Gmail did not return the message source");
       const parsed = await simpleParser(fromBase64Url(raw), {
-        skipImageLinks: true,
         skipHtmlToText: true,
         skipTextToHtml: true,
       });

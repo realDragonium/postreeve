@@ -553,8 +553,6 @@ function groupByMailbox(references: MessageRef[]): Map<string, MessageRef[]> {
 
 async function parseMessage(source: Buffer): Promise<ParsedMail> {
   return simpleParser(source, {
-    keepCidLinks: true,
-    skipImageLinks: true,
     skipTextToHtml: true,
   });
 }

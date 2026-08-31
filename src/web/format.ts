@@ -1,4 +1,3 @@
-import DOMPurify from "dompurify";
 import type { MessageDetail, MessageSummary, TriageAction } from "../shared/contracts";
 
 export const actionLabels: Record<TriageAction["type"], string> = {
@@ -90,24 +89,4 @@ export function quotedMessage(message: MessageDetail): string {
   const author = message.from[0]?.name || message.from[0]?.address || "Sender";
   const quoted = message.text.split("\n").map((line) => `> ${line}`).join("\n");
   return `\n\nOn ${formatDate(message.receivedAt, true)}, ${author} wrote:\n${quoted}`;
-}
-
-export function sanitizeEmailHtml(html: string): { html: string; blockedImages: number } {
-  const cleaned = DOMPurify.sanitize(html, {
-    FORBID_TAGS: ["style", "svg", "math", "iframe", "object", "embed", "form"],
-    FORBID_ATTR: ["style", "srcset"],
-  });
-  const document = new DOMParser().parseFromString(cleaned, "text/html");
-  const images = [...document.querySelectorAll("img")];
-  for (const image of images) {
-    image.removeAttribute("src");
-    image.removeAttribute("srcset");
-    image.setAttribute("alt", image.getAttribute("alt") || "Remote image blocked");
-    image.classList.add("blocked-email-image");
-  }
-  for (const anchor of document.querySelectorAll("a")) {
-    anchor.setAttribute("target", "_blank");
-    anchor.setAttribute("rel", "noreferrer noopener");
-  }
-  return { html: document.body.innerHTML, blockedImages: images.length };
 }

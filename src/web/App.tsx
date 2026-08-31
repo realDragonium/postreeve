@@ -266,7 +266,7 @@ function App() {
   function openRow(message: MessageSummary): void {
     setOpenKey(messageKey(message));
     setFocus(messages.findIndex((candidate) => messageKey(candidate) === messageKey(message)));
-    setSelected(new Set([messageKey(message)]));
+    setSelected(new Set());
   }
 
   function step(direction: 1 | -1): void {
@@ -274,7 +274,7 @@ function App() {
     const message = messages[next];
     if (!message) return;
     setFocus(next);
-    setSelected(new Set([messageKey(message)]));
+    setSelected(openKey ? new Set() : new Set([messageKey(message)]));
     if (openKey) setOpenKey(messageKey(message));
   }
 
@@ -496,68 +496,73 @@ function App() {
           <button className="btn" onClick={() => setOverlay({ kind: "account", accountId: "new" })}>Connect account</button>
         </div> : null}
 
-        {hasAccounts && view === "mail" && !openKey ? <MessageList
-          messages={messages}
-          provenance={provenance}
-          folders={scopeFolders}
-          loading={messagesLoading}
-          error={messagesError}
-          focus={focus}
-          selected={selected}
-          title={scopeTitle}
-          countLine={countLine(messages, { query, filter, awaiting: [...awaitingByAccount.values()].reduce((total, count) => total + count, 0) })}
-          sort={sort}
-          filter={filter}
-          query={query}
-          busy={busy || actionMutation.isPending}
-          canLoadMore={messageResults.some((result) => (result.data?.length ?? 0) >= limit) && limit < 100}
-          onSort={(next) => { setSort(next); setFocus(0); }}
-          onOpen={openRow}
-          onSelect={(message, modifiers) => {
-            const key = messageKey(message);
-            const index = messages.findIndex((candidate) => messageKey(candidate) === key);
-            if (modifiers.range) {
-              const [from, to] = [Math.min(focus, index), Math.max(focus, index)];
-              setSelected(new Set(messages.slice(from, to + 1).map(messageKey)));
-              return;
-            }
-            setFocus(index);
-            setSelected((current) => {
-              const next = new Set(current);
-              if (next.has(key)) next.delete(key);
-              else next.add(key);
-              return next;
-            });
-          }}
-          onBulk={(action) => applyTo(targetsFor(messages[focus]), action)}
-          onAcceptProposal={(proposalId) => acceptMutation.mutate(proposalId)}
-          onCompose={() => composeAccountId && setOverlay({ kind: "compose", accountId: composeAccountId, intent: { mode: "new" } })}
-          onLoadMore={() => setLimit((current) => Math.min(100, current + 50))}
-          onRetry={() => void refresh()}
-        /> : null}
+        {hasAccounts && view === "mail" ? <div className={`mail-view ${openKey ? "has-reader" : ""}`}>
+          <section className="mail-list-pane" aria-label="Mailbox list">
+            <MessageList
+              messages={messages}
+              provenance={provenance}
+              folders={scopeFolders}
+              loading={messagesLoading}
+              error={messagesError}
+              focus={focus}
+              selected={selected}
+              openKey={openKey}
+              title={scopeTitle}
+              countLine={countLine(messages, { query, filter, awaiting: [...awaitingByAccount.values()].reduce((total, count) => total + count, 0) })}
+              sort={sort}
+              filter={filter}
+              query={query}
+              busy={busy || actionMutation.isPending}
+              canLoadMore={messageResults.some((result) => (result.data?.length ?? 0) >= limit) && limit < 100}
+              onSort={(next) => { setSort(next); setFocus(0); }}
+              onOpen={openRow}
+              onSelect={(message, modifiers) => {
+                const key = messageKey(message);
+                const index = messages.findIndex((candidate) => messageKey(candidate) === key);
+                if (modifiers.range) {
+                  const [from, to] = [Math.min(focus, index), Math.max(focus, index)];
+                  setSelected(new Set(messages.slice(from, to + 1).map(messageKey)));
+                  return;
+                }
+                setFocus(index);
+                setSelected((current) => {
+                  const next = new Set(current);
+                  if (next.has(key)) next.delete(key);
+                  else next.add(key);
+                  return next;
+                });
+              }}
+              onBulk={(action) => applyTo(targetsFor(messages[focus]), action)}
+              onAcceptProposal={(proposalId) => acceptMutation.mutate(proposalId)}
+              onCompose={() => composeAccountId && setOverlay({ kind: "compose", accountId: composeAccountId, intent: { mode: "new" } })}
+              onLoadMore={() => setLimit((current) => Math.min(100, current + 50))}
+              onRetry={() => void refresh()}
+            />
+          </section>
 
-        {hasAccounts && view === "mail" && openKey ? (
-          detailQuery.data ? <Reader
-            message={detailQuery.data}
-            folders={foldersByAccount.get(detailQuery.data.ref.accountId) ?? []}
-            provenance={provenance.get(provenanceKey(detailQuery.data.ref))}
-            folderName={folderName}
-            position={`${focus + 1} of ${messages.length}`}
-            busy={actionMutation.isPending}
-            error={detailQuery.error?.message ?? null}
-            canUndo={undoStack.length > 0}
-            onClose={() => setOpenKey(null)}
-            onStep={step}
-            onAction={(action) => openMessage && applyTo([openMessage], action)}
-            onAcceptProposal={(proposalId) => acceptMutation.mutate(proposalId)}
-            onUndo={undoLast}
-            onCompose={(mode) => detailQuery.data && setOverlay({
-              kind: "compose",
-              accountId: detailQuery.data.ref.accountId,
-              intent: { mode, message: detailQuery.data },
-            })}
-          /> : <div className="pad t-dim">{detailQuery.isError ? detailQuery.error.message : "Loading message…"}</div>
-        ) : null}
+          {openKey ? <section className="mail-reader-pane" aria-label="Message reader">
+            {detailQuery.data ? <Reader
+              message={detailQuery.data}
+              folders={foldersByAccount.get(detailQuery.data.ref.accountId) ?? []}
+              provenance={provenance.get(provenanceKey(detailQuery.data.ref))}
+              folderName={folderName}
+              position={`${focus + 1} of ${messages.length}`}
+              busy={actionMutation.isPending}
+              error={detailQuery.error?.message ?? null}
+              canUndo={undoStack.length > 0}
+              onClose={() => setOpenKey(null)}
+              onStep={step}
+              onAction={(action) => openMessage && applyTo([openMessage], action)}
+              onAcceptProposal={(proposalId) => acceptMutation.mutate(proposalId)}
+              onUndo={undoLast}
+              onCompose={(mode) => detailQuery.data && setOverlay({
+                kind: "compose",
+                accountId: detailQuery.data.ref.accountId,
+                intent: { mode, message: detailQuery.data },
+              })}
+            /> : <div className="pad t-dim">{detailQuery.isError ? detailQuery.error.message : "Loading message…"}</div>}
+          </section> : null}
+        </div> : null}
 
         {hasAccounts && view === "activity" ? <ActivityView
           batches={batches}

@@ -80,6 +80,7 @@ describe("Bun IMAP compatibility", () => {
     expect(details[0]?.subject).toBe("Newest message");
     expect(details[0]?.text.trim()).toBe("Newest plain text body");
     expect(details[0]?.html).toContain("https://tracker.example.test/pixel.png");
+    expect(details[0]?.html).toContain("data:image/png;base64,");
 
     const plainTextReference = summaries.find((message) => message.ref.uid === 2)?.ref;
     if (!plainTextReference) throw new Error("Expected a plain-text message reference");
@@ -456,13 +457,12 @@ function fakeState(): FakeState {
     [2, fakeMessage(2, 12n, "Second message", "Second body", new Set())],
     [
       3,
-      fakeMessage(
+      fakeRelatedMessage(
         3,
         13n,
         "Newest message",
         "Newest plain text body",
         new Set(),
-        '<p>Newest HTML body</p><img src="https://tracker.example.test/pixel.png">',
       ),
     ],
   ]);
@@ -519,6 +519,50 @@ function fakeState(): FakeState {
         },
       ],
     ]),
+  };
+}
+
+function fakeRelatedMessage(
+  uid: number,
+  modseq: bigint,
+  subject: string,
+  text: string,
+  flags: Set<string>,
+): FetchMessageObject {
+  const message = fakeMessage(uid, modseq, subject, text, flags);
+  return {
+    ...message,
+    source: Buffer.from([
+      "From: Sender <sender@example.test>",
+      "To: Human <human@example.test>",
+      `Message-ID: <message-${uid}@example.test>`,
+      `Subject: ${subject}`,
+      "Date: Fri, 29 Aug 2025 12:00:00 +0000",
+      "MIME-Version: 1.0",
+      'Content-Type: multipart/related; boundary="related"',
+      "",
+      "--related",
+      'Content-Type: multipart/alternative; boundary="alternative"',
+      "",
+      "--alternative",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      text,
+      "--alternative",
+      "Content-Type: text/html; charset=utf-8",
+      "",
+      '<p>Newest HTML body</p><img src="https://tracker.example.test/pixel.png"><img src="cid:logo@example.test">',
+      "--alternative--",
+      "--related",
+      'Content-Type: image/png; name="logo.png"',
+      'Content-Disposition: inline; filename="logo.png"',
+      "Content-ID: <logo@example.test>",
+      "Content-Transfer-Encoding: base64",
+      "",
+      "iVBORw0KGgo=",
+      "--related--",
+      "",
+    ].join("\r\n")),
   };
 }
 

@@ -47,7 +47,15 @@ const message: MessageDetail = {
   read: false,
   flagged: false,
   text: "Here are the decisions and follow-ups.",
-  html: "<p>Here are the <strong>decisions</strong> and follow-ups.</p><img src=\"https://tracker.invalid/pixel.gif\"><script>window.compromised=true</script>",
+  html: `
+    <style>.email-card { color: rgb(18, 52, 86); font-weight: 700; }</style>
+    <div class="email-card" style="background-color: rgb(238, 238, 238)">
+      Here are the <strong>decisions</strong> and follow-ups.
+    </div>
+    <img class="tracker" src="https://tracker.invalid/pixel.gif">
+    <img class="embedded" alt="Embedded image" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
+    <script>window.parent.compromised = true</script>
+  `,
 };
 
 async function json(route: Route, value: unknown, status = 200): Promise<void> {
@@ -88,8 +96,18 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   let batch: OperationBatch | null = null;
   let lastMessageQuery = "";
   let liveFolders = structuredClone(folders);
+  let remoteImageRequests = 0;
 
   await installWebMcpHarness(page);
+
+  await page.route("https://tracker.invalid/**", async (route) => {
+    remoteImageRequests += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "image/gif",
+      body: Buffer.from("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==", "base64"),
+    });
+  });
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -248,12 +266,36 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await page.getByRole("button", { name: "Close Edit draft" }).click();
 
   await page.getByLabel("Clear search").click();
+  await page.setViewportSize({ width: 1024, height: 768 });
   await page.getByText("Quarterly planning notes", { exact: true }).click();
   await expect(page.getByRole("heading", { name: "Quarterly planning notes" })).toBeVisible();
+  await expect(page.getByLabel("Messages").getByText("Quarterly planning notes", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Messages").getByRole("button", { name: /Quarterly planning notes/ })).toHaveAttribute("aria-current", "true");
+  const listPane = await page.getByLabel("Mailbox list").boundingBox();
+  const readerPane = await page.getByLabel("Message reader").boundingBox();
+  expect(listPane).not.toBeNull();
+  expect(readerPane).not.toBeNull();
+  expect(listPane!.x + listPane!.width).toBeLessThanOrEqual(readerPane!.x);
+  expect(await page.getByLabel("Mailbox list").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(await page.getByLabel("Message reader").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await expect(page.getByText("delivered to planning-alias@example.com", { exact: true })).toBeVisible();
   await expect(page.getByText("Remote images blocked to protect your privacy.")).toBeVisible();
-  await expect(page.locator(".email-html img")).not.toHaveAttribute("src");
-  await expect(page.locator(".email-html script")).toHaveCount(0);
+  const emailFrame = page.locator('iframe[title="Quarterly planning notes"]');
+  const emailBody = page.frameLocator('iframe[title="Quarterly planning notes"]');
+  await expect(emailFrame).toHaveAttribute("sandbox", /allow-same-origin/);
+  expect(await emailFrame.getAttribute("sandbox")).not.toContain("allow-scripts");
+  await expect(emailBody.locator(".email-card")).toHaveCSS("color", "rgb(18, 52, 86)");
+  await expect(emailBody.locator(".email-card")).toHaveCSS("background-color", "rgb(238, 238, 238)");
+  await expect(emailBody.locator("img.tracker")).not.toHaveAttribute("src");
+  await expect(emailBody.locator("img.embedded")).toHaveAttribute("src", /^data:image\/gif;base64,/);
+  await expect(emailBody.locator("img.embedded")).not.toHaveClass(/postreeve-blocked-image/);
+  await expect(emailBody.locator("script")).toHaveCount(0);
+  expect(await page.evaluate(() => Reflect.get(window, "compromised"))).toBeUndefined();
+  expect(remoteImageRequests).toBe(0);
+
+  await page.getByRole("button", { name: "Load images" }).click();
+  await expect(emailBody.locator("img.tracker")).toHaveAttribute("src", "https://tracker.invalid/pixel.gif");
+  await expect.poll(() => remoteImageRequests).toBe(1);
 
   await page.getByRole("button", { name: "Reply", exact: true }).click();
   await expect(page.getByLabel("To", { exact: true })).toHaveValue("sam@example.com");
@@ -290,6 +332,7 @@ test("reads a message and returns to the list on a narrow screen", async ({ page
   await page.goto("/");
   await page.getByText(message.subject, { exact: true }).click();
   await expect(page.getByRole("heading", { name: message.subject })).toBeVisible();
+  await expect(page.getByLabel("Mailbox list")).toBeHidden();
   await page.getByRole("button", { name: "← Inbox" }).click();
   await expect(page.getByRole("heading", { name: message.subject })).toHaveCount(0);
   await expect(page.getByText(message.subject, { exact: true })).toBeVisible();

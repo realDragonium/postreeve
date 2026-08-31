@@ -22,6 +22,7 @@ export interface MessageListProps {
   error: string | null;
   focus: number;
   selected: ReadonlySet<string>;
+  openKey: string | null;
   title: string;
   countLine: string;
   sort: MessageSort;
@@ -112,7 +113,8 @@ export function MessageList(props: MessageListProps) {
         const proposed = entry?.kind === "proposed";
         return <button
           key={key}
-          className={`row ${message.read ? "" : "unread"} ${index === props.focus ? "focus" : props.selected.has(key) ? "cosel" : ""}`}
+          className={`row ${message.read ? "" : "unread"} ${key === props.openKey ? "open" : index === props.focus ? "focus" : props.selected.has(key) ? "cosel" : ""}`}
+          aria-current={key === props.openKey ? "true" : undefined}
           onClick={(event) => {
             if (event.metaKey || event.ctrlKey) props.onSelect(message, { toggle: true, range: false });
             else if (event.shiftKey) props.onSelect(message, { toggle: false, range: true });
@@ -123,7 +125,7 @@ export function MessageList(props: MessageListProps) {
           <span className={`row-dot ${message.read ? "" : "unread"}`} />
           <span className="row-sender truncate">{senderName(message)}</span>
           <span className="row-subject truncate">{message.subject || "(No subject)"}</span>
-          <span style={{ fontSize: proposed ? 10 : 11, lineHeight: 1, color: proposed ? "var(--ink)" : "var(--dim)" }}>{entry?.mark ?? ""}</span>
+          <span className="row-mark" style={{ fontSize: proposed ? 10 : 11, lineHeight: 1, color: proposed ? "var(--ink)" : "var(--dim)" }}>{entry?.mark ?? ""}</span>
           <span className="row-lead-wrap">
             {entry ? <span className={`row-lead ${proposed ? "propose" : ""}`}>{entry.lead}{proposed ? "" : " · "}</span> : null}
             {proposed ? null : <span className="row-snippet truncate">{message.preview}</span>}

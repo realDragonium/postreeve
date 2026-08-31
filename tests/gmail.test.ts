@@ -20,9 +20,30 @@ describe("Gmail compatibility", () => {
       "Subject: Gmail test",
       "Message-ID: <gmail-test@example.test>",
       "Date: Sat, 29 Aug 2026 10:00:00 +0200",
+      "MIME-Version: 1.0",
+      'Content-Type: multipart/related; boundary="related"',
+      "",
+      "--related",
+      'Content-Type: multipart/alternative; boundary="alternative"',
+      "",
+      "--alternative",
       "Content-Type: text/plain; charset=UTF-8",
       "",
       "Hello from Gmail.",
+      "--alternative",
+      "Content-Type: text/html; charset=UTF-8",
+      "",
+      '<p>Hello from Gmail.</p><img src="cid:logo@example.test">',
+      "--alternative--",
+      "--related",
+      'Content-Type: image/png; name="logo.png"',
+      'Content-Disposition: inline; filename="logo.png"',
+      "Content-ID: <logo@example.test>",
+      "Content-Transfer-Encoding: base64",
+      "",
+      "iVBORw0KGgo=",
+      "--related--",
+      "",
     ].join("\r\n"), "utf8").toString("base64url");
     const request: HttpFetch = async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
@@ -80,6 +101,7 @@ describe("Gmail compatibility", () => {
     expect(summaries[0]?.ref.providerId).toBe("18fabc123");
     const details = await client.readMessages(account.id, [summaries[0]!.ref]);
     expect(details[0]?.text.trim()).toBe("Hello from Gmail.");
+    expect(details[0]?.html).toContain("data:image/png;base64,");
     const applied = await client.apply(summaries[0]!.ref, { type: "mark_read" });
     expect(applied.previousRead).toBe(false);
     expect(labelIds).not.toContain("UNREAD");

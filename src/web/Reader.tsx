@@ -1,11 +1,11 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import type { Folder, MessageDetail, TriageAction } from "../shared/contracts";
+import { EmailBody } from "./EmailBody";
 import {
   additionalDeliveryAddresses,
   formatDate,
   fromAddress,
   recipients,
-  sanitizeEmailHtml,
 } from "./format";
 import { senderName } from "./mail-view";
 import type { MessageProvenance } from "./provenance";
@@ -30,7 +30,6 @@ export interface ReaderProps {
 
 export function Reader(props: ReaderProps) {
   const { message } = props;
-  const safe = useMemo(() => message.html ? sanitizeEmailHtml(message.html) : null, [message.html]);
   const [destination, setDestination] = useState("");
   const deliveredTo = additionalDeliveryAddresses(message);
   const archive = props.folders.find((folder) => folder.specialUse === "archive" && folder.path !== message.ref.mailbox);
@@ -98,10 +97,12 @@ export function Reader(props: ReaderProps) {
 
         {props.error ? <div className="alert error" style={{ marginTop: 16 }}>{props.error}</div> : null}
 
-        {safe ? <>
-          {safe.blockedImages ? <div className="notice" style={{ marginTop: 20 }}>Remote images blocked to protect your privacy.</div> : null}
-          <div className="msgbody email-html" dangerouslySetInnerHTML={{ __html: safe.html }} />
-        </> : <div className="msgbody plain">{message.text}</div>}
+        <EmailBody
+          key={`${message.ref.accountId}:${message.ref.mailbox}:${message.ref.uidValidity}:${message.ref.uid}`}
+          html={message.html}
+          text={message.text}
+          title={message.subject}
+        />
 
         <div className="replybox">
           <button className="replyhint" onClick={() => props.onCompose("reply")}>Reply to {senderName(message).split(" ")[0]}…</button>
