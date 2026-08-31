@@ -14,6 +14,7 @@ import type {
   WebMcpServices,
 } from "../server/webmcp/types";
 import { api } from "./api";
+import { recordAssistantBatch } from "./provenance";
 
 type MailboxViewListener = (view: WebMcpMailboxView) => void;
 type FolderListListener = (accountId: string, folders: readonly Folder[]) => void;
@@ -63,7 +64,11 @@ export const webMcpServices: WebMcpServices = {
   searchMessages: (input: WebMcpSearchMessagesInput, signal) =>
     api.messages(input.accountId, input.mailbox, input.query, input.limit, signal),
   sendMessage: (input: SendMessageInput, signal) => api.sendMessage(input, signal),
-  applyMessageActions: (input: DirectActionInput, signal) => api.applyDirectActions(input, signal),
+  applyMessageActions: async (input: DirectActionInput, signal) => {
+    const batch = await api.applyDirectActions(input, signal);
+    recordAssistantBatch(batch.id);
+    return batch;
+  },
   listActivity: (accountId, signal) => api.batches(accountId, signal),
   undoBatch: (batchId, signal) => api.undoBatch(batchId, signal),
   showMailboxView,
