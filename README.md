@@ -27,6 +27,18 @@ Open [http://127.0.0.1:3000](http://127.0.0.1:3000). A new installation starts e
 
 Postreeve binds to `127.0.0.1` by default because the web interface does not have authentication yet. Do not expose it to a public or shared network.
 
+## Desktop app
+
+Run Postreeve as a desktop application without starting the server manually:
+
+```bash
+bun run desktop
+```
+
+The development desktop app reuses the repository's private `.env` and database. It starts a compiled Bun sidecar on a temporary loopback port and stops it when the application quits.
+
+Create an unpacked application bundle with `bun run desktop:pack`, or platform installers with `bun run desktop:dist`. Packaged applications keep their database in the operating system's application-data directory and protect the generated credential key with Electron's secure storage when it is available.
+
 ## Connect an email account
 
 For Gmail, create a Google OAuth desktop client with the Gmail API enabled and the `gmail.modify` scope, then add its public client ID to the ignored `.env`:
@@ -81,6 +93,9 @@ Docker Compose publishes Postreeve only on `127.0.0.1:3000` and stores SQLite da
 - `bun run verify`: run strict typechecking, deterministic tests, and the production build
 - `bun run start`: serve the production application
 - `bun run dev`: run the API server in watch mode after building the web application
+- `bun run desktop`: build and open the Electron desktop application
+- `bun run desktop:pack`: create an unpacked desktop application
+- `bun run desktop:dist`: create the current platform's desktop installers
 - `bun run test:e2e`: run the Playwright browser workflow
 
 Licensed under the [Apache License 2.0](LICENSE).

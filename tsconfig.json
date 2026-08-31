@@ -17,5 +17,5 @@
     "types": ["bun", "vite/client"],
     "skipLibCheck": true
   },
-  "include": ["src", "tests", "scripts", "vite.config.ts", "playwright.config.ts", "drizzle.config.ts"]
+  "include": ["electron", "src", "tests", "scripts", "vite.config.ts", "playwright.config.ts", "drizzle.config.ts"]
 }

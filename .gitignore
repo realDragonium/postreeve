@@ -92,6 +92,8 @@ typings/
 # Nuxt.js build / generate output
 .nuxt
 dist
+build
+release
 playwright-report/
 test-results/
 

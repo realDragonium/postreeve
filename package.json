@@ -1,13 +1,19 @@
 {
   "name": "postreeve",
   "version": "0.1.0",
+  "description": "A local-first email client for humans and agents.",
   "private": true,
   "type": "module",
+  "main": "build/electron/main.cjs",
   "scripts": {
     "setup:local": "bun scripts/setup-local.ts",
     "dev": "bun run --hot src/server/index.ts",
     "dev:web": "vite",
     "build": "vite build",
+    "build:desktop": "bun scripts/build-desktop.ts",
+    "desktop": "bun run build:desktop && electron .",
+    "desktop:pack": "bun run build:desktop && electron-builder --dir",
+    "desktop:dist": "bun run build:desktop && electron-builder",
     "start": "bun src/server/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test --path-ignore-patterns='tests/e2e/**'",
@@ -40,7 +46,29 @@
     "@types/react-dom": "latest",
     "@vitejs/plugin-react": "latest",
     "drizzle-kit": "latest",
+    "electron": "^44.1.0",
+    "electron-builder": "^26.15.3",
     "typescript": "latest",
     "vite": "latest"
+  },
+  "build": {
+    "appId": "nl.dragonium.postreeve",
+    "productName": "Postreeve",
+    "asar": true,
+    "directories": { "output": "release" },
+    "files": ["build/electron/**", "package.json"],
+    "extraResources": [
+      { "from": "dist", "to": "dist" },
+      { "from": "build/server", "to": "server" }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": ["dmg", "zip"]
+    },
+    "win": { "target": ["nsis"] },
+    "linux": {
+      "category": "Office",
+      "target": ["AppImage"]
+    }
   }
 }
