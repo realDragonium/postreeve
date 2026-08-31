@@ -1,23 +1,51 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join } from "node:path";
-import { app, BrowserWindow, dialog, safeStorage, shell } from "electron";
+import { pathToFileURL } from "node:url";
+import { app, BrowserWindow, dialog, net, protocol, safeStorage, shell } from "electron";
 import {
   configuredDatabasePath,
   desktopRuntimePaths,
   readDevelopmentEnvironment,
+  resolveDesktopRendererPath,
   type DesktopEnvironment,
 } from "./runtime";
 
+const desktopScheme = "postreeve";
+const desktopUrl = `${desktopScheme}://app/`;
 const secureKeyPrefix = "safe-storage-v1\n";
 const plainKeyPrefix = "plain-v1\n";
 const startupTimeoutMs = 20_000;
+const rendererContentSecurityPolicy = [
+  "default-src 'self'",
+  "img-src 'self' data: blob: http: https:",
+  "style-src 'self' 'unsafe-inline'",
+  "script-src 'self'",
+  "connect-src 'self'",
+  "frame-src 'none'",
+].join("; ");
+
+protocol.registerSchemesAsPrivileged([{
+  scheme: desktopScheme,
+  privileges: {
+    corsEnabled: true,
+    secure: true,
+    standard: true,
+    supportFetchAPI: true,
+  },
+}]);
+
+interface DesktopSession {
+  readonly backendToken: string;
+  readonly backendUrl: string;
+  readonly rendererRoot: string;
+}
 
 let backend: ChildProcess | null = null;
 let mainWindow: BrowserWindow | null = null;
-let appUrl: string | null = null;
+let desktopSession: DesktopSession | null = null;
 
 function desktopMasterKey(userDataPath: string): string {
   const keyPath = join(userDataPath, "master-key");
@@ -60,12 +88,14 @@ async function availablePort(): Promise<number> {
   });
 }
 
-async function waitForBackend(url: string, process: ChildProcess): Promise<void> {
+async function waitForBackend(url: string, token: string, process: ChildProcess): Promise<void> {
   const deadline = Date.now() + startupTimeoutMs;
   while (Date.now() < deadline) {
     if (process.exitCode !== null) throw new Error(`Postreeve backend exited with code ${process.exitCode}`);
     try {
-      const response = await fetch(url);
+      const response = await fetch(new URL("api/health", url), {
+        headers: { Authorization: `Bearer ${token}` },
+      });
       if (response.ok) return;
     } catch {
       // The sidecar has not bound its port yet.
@@ -82,7 +112,7 @@ function mergedEnvironment(local: DesktopEnvironment): NodeJS.ProcessEnv {
   };
 }
 
-async function startBackend(): Promise<string> {
+async function startBackend(): Promise<DesktopSession> {
   const appPath = app.getAppPath();
   const userDataPath = app.getPath("userData");
   const paths = desktopRuntimePaths({
@@ -98,6 +128,7 @@ async function startBackend(): Promise<string> {
   const environment = mergedEnvironment(localEnvironment);
   const port = await availablePort();
   const url = `http://127.0.0.1:${port}/`;
+  const backendToken = randomBytes(32).toString("base64url");
   const masterKey = environment.POSTREEVE_MASTER_KEY || desktopMasterKey(userDataPath);
   const databasePath = configuredDatabasePath(environment.POSTREEVE_DB_PATH, appPath, paths.databasePath);
 
@@ -107,6 +138,8 @@ async function startBackend(): Promise<string> {
       ...environment,
       PORT: String(port),
       POSTREEVE_DB_PATH: databasePath,
+      POSTREEVE_DESKTOP_TOKEN: backendToken,
+      POSTREEVE_DESKTOP_URL: desktopUrl,
       POSTREEVE_HOST: "127.0.0.1",
       POSTREEVE_MASTER_KEY: masterKey,
     },
@@ -114,12 +147,51 @@ async function startBackend(): Promise<string> {
     windowsHide: true,
   });
   backend = spawnedBackend;
-  await waitForBackend(url, spawnedBackend);
-  return url;
+  await waitForBackend(url, backendToken, spawnedBackend);
+  return { backendToken, backendUrl: url, rendererRoot: paths.rendererRoot };
+}
+
+async function proxyBackendRequest(request: Request, session: DesktopSession): Promise<Response> {
+  const requestUrl = new URL(request.url);
+  const backendUrl = new URL(`${requestUrl.pathname}${requestUrl.search}`, session.backendUrl);
+  const headers = new Headers(request.headers);
+  headers.set("Authorization", `Bearer ${session.backendToken}`);
+  const methodHasBody = request.method !== "GET" && request.method !== "HEAD";
+  const requestInit: RequestInit = {
+    headers,
+    method: request.method,
+    redirect: "manual",
+  };
+  if (methodHasBody) requestInit.body = await request.arrayBuffer();
+  return net.fetch(backendUrl.toString(), requestInit);
+}
+
+async function serveRenderer(requestUrl: URL, rendererRoot: string): Promise<Response> {
+  const candidate = resolveDesktopRendererPath(rendererRoot, requestUrl.pathname);
+  if (!candidate) return new Response("Not found", { status: 404 });
+
+  const indexPath = join(rendererRoot, "index.html");
+  const filePath = existsSync(candidate) && statSync(candidate).isFile() ? candidate : indexPath;
+  if (!existsSync(filePath)) return new Response("Renderer bundle is missing", { status: 500 });
+
+  const response = await net.fetch(pathToFileURL(filePath).toString());
+  const headers = new Headers(response.headers);
+  headers.set("Content-Security-Policy", rendererContentSecurityPolicy);
+  headers.set("Referrer-Policy", "no-referrer");
+  headers.set("X-Content-Type-Options", "nosniff");
+  return new Response(response.body, { headers, status: response.status, statusText: response.statusText });
+}
+
+async function handleDesktopRequest(request: Request, session: DesktopSession): Promise<Response> {
+  const requestUrl = new URL(request.url);
+  if (requestUrl.host !== "app") return new Response("Not found", { status: 404 });
+  return requestUrl.pathname.startsWith("/api/")
+    ? proxyBackendRequest(request, session)
+    : serveRenderer(requestUrl, session.rendererRoot);
 }
 
 async function createWindow(): Promise<void> {
-  if (!appUrl) appUrl = await startBackend();
+  if (!desktopSession) throw new Error("Postreeve desktop has not finished starting");
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 920,
@@ -140,13 +212,20 @@ async function createWindow(): Promise<void> {
   });
   mainWindow.once("ready-to-show", () => mainWindow?.show());
   mainWindow.on("closed", () => { mainWindow = null; });
-  await mainWindow.loadURL(appUrl);
+  await mainWindow.loadURL(desktopUrl);
+}
+
+async function initializeDesktop(): Promise<void> {
+  const session = await startBackend();
+  desktopSession = session;
+  protocol.handle(desktopScheme, (request) => handleDesktopRequest(request, session));
+  await createWindow();
 }
 
 function stopBackend(): void {
-  if (!backend || backend.exitCode !== null) return;
-  backend.kill();
+  if (backend?.exitCode === null) backend.kill();
   backend = null;
+  desktopSession = null;
 }
 
 function showStartupError(error: unknown): void {
@@ -171,5 +250,5 @@ if (!app.requestSingleInstanceLock()) {
   app.on("activate", () => {
     if (!mainWindow) void createWindow().catch(showStartupError);
   });
-  void app.whenReady().then(createWindow).catch(showStartupError);
+  void app.whenReady().then(initializeDesktop).catch(showStartupError);
 }

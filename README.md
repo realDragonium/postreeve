@@ -35,7 +35,7 @@ Run Postreeve as a desktop application without starting the server manually:
 bun run desktop
 ```
 
-The development desktop app reuses the repository's private `.env` and database. It starts a compiled Bun sidecar on a temporary loopback port and stops it when the application quits.
+The development desktop app reuses the repository's private `.env` and database. It starts a compiled Bun sidecar on a temporary loopback port and stops it when the application quits. Electron loads the web bundle through the private `postreeve://` protocol and proxies API calls with a fresh authentication token that exists only for that launch.
 
 Create an unpacked application bundle with `bun run desktop:pack`, or platform installers with `bun run desktop:dist`. Packaged applications keep their database in the operating system's application-data directory and protect the generated credential key with Electron's secure storage when it is available.
 

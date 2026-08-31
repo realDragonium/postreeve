@@ -1,10 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import { hc } from "hono/client";
 import { accountSchema, folderSchema, messageSummarySchema, proposalSchema } from "../src/shared/contracts";
-import { createApi, type AppType } from "../src/server/api";
+import { createApi, oauthResultUrl, type AppType } from "../src/server/api";
 import { createTestHarness } from "./support/test-mail";
 
 describe("Hono RPC API", () => {
+  test("returns OAuth results to the active web client", () => {
+    expect(oauthResultUrl(undefined, "error")).toBe("/?google=error");
+    expect(oauthResultUrl("postreeve://app/", "connected", "account one"))
+      .toBe("postreeve://app/?google=connected&accountId=account+one");
+  });
+
   test("exposes an account mailbox through typed routes", async () => {
     const { store, service } = await createTestHarness();
     const app = createApi(service);

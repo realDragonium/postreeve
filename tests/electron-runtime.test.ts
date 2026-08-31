@@ -3,6 +3,7 @@ import {
   configuredDatabasePath,
   desktopRuntimePaths,
   parseDesktopEnvironment,
+  resolveDesktopRendererPath,
 } from "../electron/runtime";
 
 describe("Electron runtime", () => {
@@ -27,6 +28,7 @@ describe("Electron runtime", () => {
       userDataPath: "/Users/drago/Library/Application Support/Postreeve",
     })).toEqual({
       databasePath: "/Users/drago/Library/Application Support/Postreeve/postreeve.sqlite",
+      rendererRoot: "/Applications/Postreeve.app/Contents/Resources/dist",
       serverPath: "/Applications/Postreeve.app/Contents/Resources/server/postreeve-server",
       workingDirectory: "/Applications/Postreeve.app/Contents/Resources",
     });
@@ -35,5 +37,12 @@ describe("Electron runtime", () => {
   test("resolves a development database relative to the repository", () => {
     expect(configuredDatabasePath("./data/postreeve.sqlite", "/workspace/postreeve", "/fallback.sqlite"))
       .toBe("/workspace/postreeve/data/postreeve.sqlite");
+  });
+
+  test("keeps custom-protocol files inside the renderer bundle", () => {
+    expect(resolveDesktopRendererPath("/app/dist", "/assets/main.js")).toBe("/app/dist/assets/main.js");
+    expect(resolveDesktopRendererPath("/app/dist", "/")).toBe("/app/dist/index.html");
+    expect(resolveDesktopRendererPath("/app/dist", "/../../secrets")).toBeUndefined();
+    expect(resolveDesktopRendererPath("/app/dist", "/%E0%A4%A")).toBeUndefined();
   });
 });

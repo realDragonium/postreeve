@@ -31,7 +31,11 @@ const messageQuerySchema = z.object({
 const accountQuerySchema = z.object({ accountId: accountIdSchema });
 const readMessagesSchema = z.object({ references: z.array(messageRefSchema).min(1).max(100) });
 
-export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth) {
+export interface ApiOptions {
+  readonly oauthReturnUrl?: string | undefined;
+}
+
+export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, options: ApiOptions = {}) {
   return new Hono()
     .basePath("/api")
     .get("/health", (context) => context.json({ ok: true as const }))
@@ -45,10 +49,10 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth) 
       try {
         const authorized = await googleOAuth.complete(context.req.url);
         const account = await service.connectGmailAccount(authorized.email, authorized.refreshToken);
-        return context.redirect(`/?google=connected&accountId=${encodeURIComponent(account.id)}`);
+        return context.redirect(oauthResultUrl(options.oauthReturnUrl, "connected", account.id));
       } catch (error) {
         console.error(`Google account connection failed: ${safeOAuthError(error)}`);
-        return context.redirect("/?google=error");
+        return context.redirect(oauthResultUrl(options.oauthReturnUrl, "error"));
       }
     })
     .get("/accounts", async (context) => context.json(await service.listAccounts()))
@@ -157,6 +161,20 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth) 
 }
 
 export type AppType = ReturnType<typeof createApi>;
+
+export function oauthResultUrl(
+  returnUrl: string | undefined,
+  result: "connected" | "error",
+  accountId?: string,
+): string {
+  const query = new URLSearchParams({ google: result });
+  if (accountId) query.set("accountId", accountId);
+  if (!returnUrl) return `/?${query.toString()}`;
+
+  const url = new URL(returnUrl);
+  url.search = query.toString();
+  return url.toString();
+}
 
 function safeOAuthError(error: unknown): string {
   if (!(error instanceof Error)) return "Unknown authorization failure";

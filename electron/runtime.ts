@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 
 const desktopEnvironmentKeys = [
   "POSTREEVE_DB_PATH",
@@ -20,6 +20,7 @@ export interface DesktopRuntimePathsInput {
 
 export interface DesktopRuntimePaths {
   readonly databasePath: string;
+  readonly rendererRoot: string;
   readonly serverPath: string;
   readonly workingDirectory: string;
 }
@@ -54,10 +55,12 @@ export function desktopRuntimePaths(input: DesktopRuntimePathsInput): DesktopRun
   const executable = input.platform === "win32" ? "postreeve-server.exe" : "postreeve-server";
   return input.packaged ? {
     databasePath: resolve(input.userDataPath, "postreeve.sqlite"),
+    rendererRoot: resolve(input.resourcesPath, "dist"),
     serverPath: resolve(input.resourcesPath, "server", executable),
     workingDirectory: input.resourcesPath,
   } : {
     databasePath: resolve(input.userDataPath, "postreeve.sqlite"),
+    rendererRoot: resolve(input.appPath, "dist"),
     serverPath: resolve(input.appPath, "build", "server", executable),
     workingDirectory: input.appPath,
   };
@@ -69,4 +72,19 @@ export function configuredDatabasePath(
   fallbackPath: string,
 ): string {
   return configuredPath ? resolve(appPath, configuredPath) : fallbackPath;
+}
+
+export function resolveDesktopRendererPath(rendererRoot: string, pathname: string): string | undefined {
+  let decodedPath: string;
+  try {
+    decodedPath = decodeURIComponent(pathname);
+  } catch {
+    return undefined;
+  }
+  if (decodedPath.includes("\0")) return undefined;
+
+  const root = resolve(rendererRoot);
+  const relativePath = decodedPath.replace(/^\/+/, "") || "index.html";
+  const candidate = resolve(root, relativePath);
+  return candidate === root || candidate.startsWith(`${root}${sep}`) ? candidate : undefined;
 }

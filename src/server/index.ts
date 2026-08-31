@@ -11,6 +11,7 @@ import { MailProviderRegistry } from "./mail/provider";
 import { MailSenderRegistry } from "./mail/sender";
 import { SmtpMailSender } from "./mail/smtp";
 import { CredentialVault } from "./security/credentials";
+import { desktopApiAuthentication } from "./security/desktop-auth";
 import { postreeveSecureHeaders } from "./security/headers";
 
 const store = new Store();
@@ -77,7 +78,10 @@ await service.initialize();
 
 const app = new Hono();
 app.use("*", postreeveSecureHeaders);
-app.route("/", createApi(service, googleOAuth));
+app.use("/api/*", desktopApiAuthentication(process.env.POSTREEVE_DESKTOP_TOKEN));
+app.route("/", createApi(service, googleOAuth, {
+  oauthReturnUrl: process.env.POSTREEVE_DESKTOP_URL,
+}));
 app.use("/*", serveStatic({ root: "./dist" }));
 app.get("/*", serveStatic({ path: "./dist/index.html" }));
 
