@@ -48,3 +48,31 @@ export const migrations = sqliteTable("schema_migrations", {
   version: integer("version").primaryKey(),
   appliedAt: text("applied_at").notNull(),
 });
+
+export const messages = sqliteTable("messages", {
+  id: text("id").primaryKey(),
+  tenantId: text("tenant_id").notNull(),
+  identityKey: text("identity_key").notNull(),
+  messageId: text("message_id"),
+  inReplyTo: text("in_reply_to"),
+  references: text("references", { mode: "json" }).$type<string[]>().notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const messageLocations = sqliteTable("message_locations", {
+  id: text("id").primaryKey(),
+  messageId: text("message_id").notNull().references(() => messages.id),
+  tenantId: text("tenant_id").notNull(),
+  accountId: text("account_id").notNull().references(() => accounts.id),
+  provider: text("provider", { enum: ["imap", "gmail"] }).notNull(),
+  mailbox: text("mailbox").notNull(),
+  locationKey: text("location_key").notNull(),
+  uidValidity: text("uid_validity").notNull(),
+  uid: integer("uid").notNull(),
+  modseq: text("modseq"),
+  providerId: text("provider_id"),
+  read: integer("read", { mode: "boolean" }).notNull(),
+  flagged: integer("flagged", { mode: "boolean" }).notNull(),
+  observedAt: text("observed_at").notNull(),
+});

@@ -3,8 +3,45 @@ import type {
   MessageDetail,
   MessageRef,
   MessageSummary,
+  CanonicalMessageObservation,
+  MailProviderKind,
   TriageAction,
 } from "../../shared/contracts";
+
+export function toCanonicalObservation(
+  tenantId: string,
+  provider: MailProviderKind,
+  message: MessageSummary,
+): CanonicalMessageObservation {
+  const messageId = normalizeMessageId(message.messageId);
+  return {
+    tenantId,
+    messageId,
+    inReplyTo: normalizeMessageId(message.inReplyTo),
+    references: (message.references ?? []).flatMap((reference) => {
+      const normalized = normalizeMessageId(reference);
+      return normalized ? [normalized] : [];
+    }),
+    location: {
+      accountId: message.ref.accountId,
+      provider,
+      mailbox: message.ref.mailbox,
+      uidValidity: message.ref.uidValidity,
+      uid: message.ref.uid,
+      modseq: message.ref.modseq,
+      providerId: message.ref.providerId ?? null,
+      read: message.read,
+      flagged: message.flagged,
+    },
+  };
+}
+
+function normalizeMessageId(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  const match = /^<([^<>\s@]+)@([^<>\s@]+)>$/.exec(trimmed);
+  return match ? `<${match[1]}@${match[2]!.toLowerCase()}>` : null;
+}
 
 export interface AppliedMailAction {
   current: MessageRef;

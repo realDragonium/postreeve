@@ -63,6 +63,8 @@ export const messageAddressSchema = z.object({
 export const messageSummarySchema = z.object({
   ref: messageRefSchema,
   messageId: z.string(),
+  inReplyTo: z.string().nullable().optional(),
+  references: z.array(z.string()).optional(),
   subject: z.string(),
   from: z.array(messageAddressSchema),
   to: z.array(messageAddressSchema),
@@ -72,6 +74,36 @@ export const messageSummarySchema = z.object({
   preview: z.string(),
   read: z.boolean(),
   flagged: z.boolean(),
+});
+
+export const mailProviderKindSchema = z.enum(["imap", "gmail"]);
+
+export const canonicalMessageObservationSchema = z.object({
+  tenantId: z.string().min(1),
+  messageId: z.string().nullable(),
+  inReplyTo: z.string().nullable(),
+  references: z.array(z.string()),
+  location: z.object({
+    accountId: accountIdSchema,
+    provider: mailProviderKindSchema,
+    mailbox: z.string().min(1),
+    uidValidity: z.string().min(1),
+    uid: z.number().int().positive(),
+    modseq: z.string().min(1).nullable(),
+    providerId: z.string().min(1).nullable(),
+    read: z.boolean(),
+    flagged: z.boolean(),
+  }),
+});
+
+export const canonicalMessageSchema = z.object({
+  id: z.string().min(1),
+  tenantId: z.string().min(1),
+  messageId: z.string().nullable(),
+  inReplyTo: z.string().nullable(),
+  references: z.array(z.string()),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
 });
 
 export const messageDetailSchema = messageSummarySchema.extend({
@@ -229,6 +261,9 @@ export type DeleteFolderInput = z.infer<typeof deleteFolderInputSchema>;
 export type MessageRef = z.infer<typeof messageRefSchema>;
 export type MessageSummary = z.infer<typeof messageSummarySchema>;
 export type MessageDetail = z.infer<typeof messageDetailSchema>;
+export type MailProviderKind = z.infer<typeof mailProviderKindSchema>;
+export type CanonicalMessageObservation = z.infer<typeof canonicalMessageObservationSchema>;
+export type CanonicalMessage = z.infer<typeof canonicalMessageSchema>;
 export type TriageAction = z.infer<typeof triageActionSchema>;
 export type ProposalItem = z.infer<typeof proposalItemSchema>;
 export type Proposal = z.infer<typeof proposalSchema>;

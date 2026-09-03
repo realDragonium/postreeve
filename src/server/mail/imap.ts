@@ -569,6 +569,8 @@ function toSummary(
   return {
     ref: referenceFor(accountId, mailboxPath, mailbox, message),
     messageId: message.envelope?.messageId ?? headerString(parsed, "message-id") ?? "",
+    inReplyTo: message.envelope?.inReplyTo ?? headerString(parsed, "in-reply-to") ?? null,
+    references: headerString(parsed, "references")?.match(/<[^<>]+>/g) ?? [],
     subject: message.envelope?.subject ?? parsed?.subject ?? "(no subject)",
     from: message.envelope?.from?.map(toEnvelopeAddress) ?? parsedAddresses(parsed?.from?.value),
     to: message.envelope?.to?.map(toEnvelopeAddress) ?? parsedAddresses(flattenAddresses(parsed?.to)),

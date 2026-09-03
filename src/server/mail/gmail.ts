@@ -266,7 +266,7 @@ export class GmailMailClient implements MailProvider, MailSender {
     const listed = await this.#request(`/messages?${params.toString()}`, messageListSchema);
     const messages = await Promise.all(listed.messages.map(({ id }) => {
       const metadata = new URLSearchParams({ format: "metadata" });
-      for (const header of ["Subject", "From", "To", "Cc", "Delivered-To", "Message-ID", "Date"]) {
+      for (const header of ["Subject", "From", "To", "Cc", "Delivered-To", "Message-ID", "In-Reply-To", "References", "Date"]) {
         metadata.append("metadataHeaders", header);
       }
       return this.#request(`/messages/${encodeURIComponent(id)}?${metadata.toString()}`, gmailMessageSchema);
@@ -388,6 +388,8 @@ function toSummary(accountId: string, mailbox: string, message: z.infer<typeof g
   return {
     ref: toReference(accountId, mailbox, message),
     messageId: headers.get("message-id") ?? message.id,
+    inReplyTo: headers.get("in-reply-to") ?? null,
+    references: parseReferences(headers.get("references")),
     subject: headers.get("subject") ?? "(no subject)",
     from: parseAddresses(headers.get("from")),
     to: parseAddresses(headers.get("to")),
@@ -416,6 +418,8 @@ function toDetail(
         ["Cc", addressText(parsed.cc)],
         ["Delivered-To", headerString(parsed, "delivered-to")],
         ["Message-ID", parsed.messageId],
+        ["In-Reply-To", headerString(parsed, "in-reply-to")],
+        ["References", headerString(parsed, "references")],
         ["Date", parsed.date?.toUTCString()],
       ].flatMap(([name, value]) => value ? [{ name: name!, value }] : []),
     },
@@ -428,6 +432,10 @@ function toDetail(
     text: parsed.text ?? "",
     html: typeof parsed.html === "string" ? parsed.html : null,
   };
+}
+
+function parseReferences(value?: string): string[] {
+  return value?.match(/<[^<>]+>/g) ?? [];
 }
 
 function toReference(accountId: string, mailbox: string, message: z.infer<typeof gmailMessageSchema>): MessageRef {
