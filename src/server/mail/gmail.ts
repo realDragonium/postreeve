@@ -12,7 +12,7 @@ import type {
   TriageAction,
 } from "../../shared/contracts";
 import type { GmailAccountCredentials } from "../security/credentials";
-import type { AppliedMailAction, MailProvider } from "./provider";
+import type { AppliedMailAction, MailboxPage, MailProvider } from "./provider";
 import type { MailSender } from "./sender";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -32,7 +32,10 @@ const labelSchema = z.object({
 });
 const labelsSchema = z.object({ labels: z.array(labelSchema).default([]) });
 const messageStubSchema = z.object({ id: z.string().min(1) });
-const messageListSchema = z.object({ messages: z.array(messageStubSchema).default([]) });
+const messageListSchema = z.object({
+  messages: z.array(messageStubSchema).default([]),
+  nextPageToken: z.string().min(1).optional(),
+});
 const gmailMessageSchema = z.object({
   id: z.string().min(1),
   threadId: z.string().optional(),
@@ -131,13 +134,17 @@ export class GmailMailClient implements MailProvider, MailSender {
   }
 
   async listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]> {
+    return (await this.listMessagePage(accountId, mailbox, limit)).messages;
+  }
+
+  async listMessagePage(accountId: string, mailbox: string, limit: number): Promise<MailboxPage> {
     this.#assertAccount(accountId);
-    return this.#list(mailbox, "", limit);
+    return this.#listPage(mailbox, "", limit);
   }
 
   async searchMessages(accountId: string, mailbox: string, query: string, limit: number): Promise<MessageSummary[]> {
     this.#assertAccount(accountId);
-    return this.#list(mailbox, query.trim(), limit);
+    return (await this.#listPage(mailbox, query.trim(), limit)).messages;
   }
 
   async readMessages(accountId: string, references: MessageRef[]): Promise<MessageDetail[]> {
@@ -253,7 +260,7 @@ export class GmailMailClient implements MailProvider, MailSender {
     };
   }
 
-  async #list(mailbox: string, query: string, limit: number): Promise<MessageSummary[]> {
+  async #listPage(mailbox: string, query: string, limit: number): Promise<MailboxPage> {
     if (!Number.isInteger(limit) || limit < 1) throw new Error("Message limit must be a positive integer");
     const params = new URLSearchParams({ maxResults: String(limit) });
     const archiveQuery = "-label:inbox -label:sent -label:drafts -label:spam -label:trash";
@@ -271,7 +278,10 @@ export class GmailMailClient implements MailProvider, MailSender {
       }
       return this.#request(`/messages/${encodeURIComponent(id)}?${metadata.toString()}`, gmailMessageSchema);
     }));
-    return messages.map((message) => toSummary(this.#account.id, mailbox, message));
+    return {
+      messages: messages.map((message) => toSummary(this.#account.id, mailbox, message)),
+      complete: listed.nextPageToken === undefined,
+    };
   }
 
   async #getMinimal(id: string) {

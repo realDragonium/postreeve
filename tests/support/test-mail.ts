@@ -12,7 +12,7 @@ import {
 } from "../../src/shared/contracts";
 import { PostreeveService } from "../../src/server/core/postreeve";
 import { Store } from "../../src/server/db/store";
-import { MailProviderRegistry, type AppliedMailAction, type MailProvider } from "../../src/server/mail/provider";
+import { MailProviderRegistry, type AppliedMailAction, type MailboxPage, type MailProvider } from "../../src/server/mail/provider";
 import { MailSenderRegistry, type MailSender } from "../../src/server/mail/sender";
 import { CredentialVault } from "../../src/server/security/credentials";
 import type { ImapAccountCredentials } from "../../src/server/security/credentials";
@@ -60,6 +60,7 @@ export async function createEmptyTestHarness(options: {
   const providers = new Map<string, TestMailProvider>();
   const service = new PostreeveService(
     store,
+    { tenantId: "test-tenant" },
     new MailProviderRegistry(),
     new MailSenderRegistry(),
     new CredentialVault(testMasterKey),
@@ -138,12 +139,15 @@ class TestMailProvider implements MailProvider {
   }
 
   async listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]> {
+    return (await this.listMessagePage(accountId, mailbox, limit)).messages;
+  }
+
+  async listMessagePage(accountId: string, mailbox: string, limit: number): Promise<MailboxPage> {
     this.#assertAccount(accountId);
-    return this.#messages
+    const observed = this.#messages
       .filter((message) => message.mailbox === mailbox)
-      .sort((left, right) => right.receivedAt.localeCompare(left.receivedAt))
-      .slice(0, limit)
-      .map(toSummary);
+      .sort((left, right) => right.receivedAt.localeCompare(left.receivedAt));
+    return { messages: observed.slice(0, limit).map(toSummary), complete: observed.length <= limit };
   }
 
   async readMessages(accountId: string, references: MessageRef[]): Promise<MessageDetail[]> {

@@ -64,7 +64,9 @@ describe("Gmail compatibility", () => {
       if (url.endsWith("/labels/INBOX")) return json({ id: "INBOX", name: "INBOX", type: "system", messagesTotal: 1, messagesUnread: 1 });
       if (url.endsWith("/labels/SENT")) return json({ id: "SENT", name: "SENT", type: "system", messagesTotal: 2, messagesUnread: 0 });
       if (url.endsWith("/labels/Label_1")) return json({ id: "Label_1", name: "Projects", type: "user", messagesTotal: 1, messagesUnread: 0 });
-      if (url.includes("/messages?") && method === "GET") return json({ messages: [{ id: "18fabc123" }] });
+      if (url.includes("/messages?") && method === "GET") {
+        return json({ messages: [{ id: "18fabc123" }], nextPageToken: "more-results" });
+      }
       if (url.includes("/messages/18fabc123?format=raw")) return json(message({ raw }));
       if (url.includes("/messages/18fabc123?format=metadata")) return json(message({
         payload: { headers: [
@@ -72,6 +74,8 @@ describe("Gmail compatibility", () => {
           { name: "From", value: "Sender <sender@example.test>" },
           { name: "To", value: "Person <person@example.test>" },
           { name: "Message-ID", value: "<gmail-test@example.test>" },
+          { name: "In-Reply-To", value: "<parent@example.test>" },
+          { name: "References", value: "<root@example.test> <parent@example.test>" },
           { name: "Date", value: "Sat, 29 Aug 2026 10:00:00 +0200" },
         ] },
       }));
@@ -96,9 +100,13 @@ describe("Gmail compatibility", () => {
     await client.verifyConnection();
     const folders = await client.listFolders(account.id);
     expect(folders.map(({ name }) => name)).toEqual(["Inbox", "Archive", "Sent", "Projects"]);
-    const summaries = await client.listMessages(account.id, "INBOX", 20);
+    const page = await client.listMessagePage(account.id, "INBOX", 20);
+    const summaries = page.messages;
+    expect(page.complete).toBe(false);
     expect(summaries[0]?.subject).toBe("Gmail test");
     expect(summaries[0]?.ref.providerId).toBe("18fabc123");
+    expect(summaries[0]?.inReplyTo).toBe("<parent@example.test>");
+    expect(summaries[0]?.references).toEqual(["<root@example.test>", "<parent@example.test>"]);
     const details = await client.readMessages(account.id, [summaries[0]!.ref]);
     expect(details[0]?.text.trim()).toBe("Hello from Gmail.");
     expect(details[0]?.html).toContain("data:image/png;base64,");

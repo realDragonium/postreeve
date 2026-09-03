@@ -12,6 +12,7 @@ import type {
   Proposal,
 } from "../../shared/contracts";
 import { accounts, batches, proposals, type StoredOperation } from "./schema";
+import { normalizeMessageId } from "../mail/message-id";
 
 export type StoredAccount = Account & { encryptedCredentials: string | null };
 
@@ -25,6 +26,7 @@ export interface MailboxSnapshot {
   provider: MailProviderKind;
   mailbox: string;
   observations: CanonicalMessageObservation[];
+  authoritative: boolean;
 }
 
 export type StoredMessageLocation = CanonicalMessageObservation["location"] & {
@@ -217,12 +219,14 @@ export class Store {
         observedLocationIds.push(locationId);
         canonicalIds.push(canonicalId);
       }
-      const locations = this.#sqlite.query(
-        "SELECT id FROM message_locations WHERE tenant_id = ? AND account_id = ? AND provider = ? AND mailbox = ?",
-      ).all(value.tenantId, value.accountId, value.provider, value.mailbox) as Array<{ id: string }>;
-      const retained = new Set(observedLocationIds);
-      const remove = this.#sqlite.query("DELETE FROM message_locations WHERE id = ?");
-      for (const location of locations) if (!retained.has(location.id)) remove.run(location.id);
+      if (value.authoritative) {
+        const locations = this.#sqlite.query(
+          "SELECT id FROM message_locations WHERE tenant_id = ? AND account_id = ? AND provider = ? AND mailbox = ?",
+        ).all(value.tenantId, value.accountId, value.provider, value.mailbox) as Array<{ id: string }>;
+        const retained = new Set(observedLocationIds);
+        const remove = this.#sqlite.query("DELETE FROM message_locations WHERE id = ?");
+        for (const location of locations) if (!retained.has(location.id)) remove.run(location.id);
+      }
       return [...new Set(canonicalIds)].map((id) => this.#getMessage(value.tenantId, id)!);
     });
     return reconcile(snapshot);
@@ -302,11 +306,12 @@ export class Store {
         "references" TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        UNIQUE (tenant_id, identity_key)
+        UNIQUE (tenant_id, identity_key),
+        UNIQUE (tenant_id, id)
       );
       CREATE TABLE IF NOT EXISTS message_locations (
         id TEXT PRIMARY KEY NOT NULL,
-        message_id TEXT NOT NULL REFERENCES messages(id),
+        message_id TEXT NOT NULL,
         tenant_id TEXT NOT NULL,
         account_id TEXT NOT NULL REFERENCES accounts(id),
         provider TEXT NOT NULL CHECK (provider IN ('imap', 'gmail')),
@@ -319,12 +324,14 @@ export class Store {
         read INTEGER NOT NULL,
         flagged INTEGER NOT NULL,
         observed_at TEXT NOT NULL,
+        FOREIGN KEY (tenant_id, message_id) REFERENCES messages(tenant_id, id),
         UNIQUE (tenant_id, account_id, provider, mailbox, location_key)
       );
       CREATE INDEX IF NOT EXISTS proposals_account_id_idx ON proposals(account_id);
       CREATE INDEX IF NOT EXISTS batches_account_id_idx ON operation_batches(account_id);
       CREATE INDEX IF NOT EXISTS message_locations_message_id_idx ON message_locations(message_id);
     `);
+    this.#migrateMessageLocationTenantForeignKey();
     const accountsTable = this.#sqlite.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
       .get() as { sql: string } | null;
     if (accountsTable && !accountsTable.sql.includes("'gmail'")) {
@@ -363,6 +370,69 @@ export class Store {
       DELETE FROM accounts WHERE kind = 'fixture';
     `);
   }
+
+  #migrateMessageLocationTenantForeignKey(): void {
+    this.#sqlite.exec("CREATE UNIQUE INDEX IF NOT EXISTS messages_tenant_id_id_unique ON messages(tenant_id, id)");
+    const foreignKeys = this.#sqlite.query("PRAGMA foreign_key_list('message_locations')").all() as Array<{
+      id: number;
+      table: string;
+      from: string;
+      to: string;
+    }>;
+    const messageForeignKeys = new Map<number, typeof foreignKeys>();
+    for (const foreignKey of foreignKeys.filter((candidate) => candidate.table === "messages")) {
+      const columns = messageForeignKeys.get(foreignKey.id) ?? [];
+      columns.push(foreignKey);
+      messageForeignKeys.set(foreignKey.id, columns);
+    }
+    const hasTenantMessageForeignKey = [...messageForeignKeys.values()].some((columns) =>
+      columns.some((column) => column.from === "tenant_id" && column.to === "tenant_id")
+      && columns.some((column) => column.from === "message_id" && column.to === "id"));
+    if (!hasTenantMessageForeignKey) {
+      this.#sqlite.exec("PRAGMA foreign_keys = OFF");
+      try {
+        this.#sqlite.exec(`
+          BEGIN;
+          CREATE TABLE message_locations_with_tenant_fk (
+            id TEXT PRIMARY KEY NOT NULL,
+            message_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            account_id TEXT NOT NULL REFERENCES accounts(id),
+            provider TEXT NOT NULL CHECK (provider IN ('imap', 'gmail')),
+            mailbox TEXT NOT NULL,
+            location_key TEXT NOT NULL,
+            uid_validity TEXT NOT NULL,
+            uid INTEGER NOT NULL,
+            modseq TEXT,
+            provider_id TEXT,
+            read INTEGER NOT NULL,
+            flagged INTEGER NOT NULL,
+            observed_at TEXT NOT NULL,
+            FOREIGN KEY (tenant_id, message_id) REFERENCES messages(tenant_id, id),
+            UNIQUE (tenant_id, account_id, provider, mailbox, location_key)
+          );
+          INSERT INTO message_locations_with_tenant_fk
+          SELECT location.*
+          FROM message_locations location
+          INNER JOIN messages message
+            ON message.id = location.message_id AND message.tenant_id = location.tenant_id;
+          DROP TABLE message_locations;
+          ALTER TABLE message_locations_with_tenant_fk RENAME TO message_locations;
+          INSERT OR IGNORE INTO schema_migrations (version, applied_at)
+          VALUES (476, CURRENT_TIMESTAMP);
+          COMMIT;
+        `);
+      } catch (error) {
+        if (this.#sqlite.inTransaction) this.#sqlite.exec("ROLLBACK");
+        throw error;
+      } finally {
+        this.#sqlite.exec("PRAGMA foreign_keys = ON");
+      }
+    }
+    this.#sqlite.exec("CREATE INDEX IF NOT EXISTS message_locations_message_id_idx ON message_locations(message_id)");
+    const violations = this.#sqlite.query("PRAGMA foreign_key_check").all();
+    if (violations.length > 0) throw new Error("Canonical message migration left invalid foreign keys");
+  }
 }
 
 interface MessageRow { id: string; tenant_id: string; message_id: string | null; in_reply_to: string | null; references: string; created_at: string; updated_at: string }
@@ -373,12 +443,6 @@ function identityKeyFor(observation: CanonicalMessageObservation): string {
   return normalizedMessageId
     ? `message-id:${normalizedMessageId}`
     : `provider:${observation.location.provider}:${observation.location.accountId}:${locationKeyFor(observation)}`;
-}
-
-function normalizeMessageId(value: string | null): string | null {
-  if (!value) return null;
-  const match = /^<([^<>\s@]+)@([^<>\s@]+)>$/.exec(value.trim());
-  return match ? `<${match[1]}@${match[2]!.toLowerCase()}>` : null;
 }
 
 function locationKeyFor(observation: CanonicalMessageObservation): string {

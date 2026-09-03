@@ -31,7 +31,7 @@ import {
 } from "../../shared/contracts";
 import type { Store, StoredAccount, StoredBatch } from "../db/store";
 import type { StoredOperation } from "../db/schema";
-import { MailProviderRegistry, type MailProvider } from "../mail/provider";
+import { MailProviderRegistry, toCanonicalObservation, type MailProvider } from "../mail/provider";
 import { MailSenderRegistry, type MailSender } from "../mail/sender";
 import {
   CredentialVault,
@@ -48,8 +48,13 @@ export type GmailClientFactory = (
   credentials: GmailAccountCredentials,
 ) => { provider: MailProvider; sender: MailSender };
 
+export interface PostreeveContext {
+  tenantId: string;
+}
+
 export class PostreeveService {
   readonly #store: Store;
+  readonly #context: PostreeveContext;
   readonly #providers: MailProviderRegistry;
   readonly #senders: MailSenderRegistry;
   readonly #vault: CredentialVault;
@@ -59,6 +64,7 @@ export class PostreeveService {
 
   constructor(
     store: Store,
+    context: PostreeveContext,
     providers: MailProviderRegistry,
     senders: MailSenderRegistry,
     vault: CredentialVault,
@@ -68,7 +74,9 @@ export class PostreeveService {
       throw new Error("Google account support is not configured");
     },
   ) {
+    if (!context.tenantId.trim()) throw new Error("A tenant ID is required");
     this.#store = store;
+    this.#context = context;
     this.#providers = providers;
     this.#senders = senders;
     this.#vault = vault;
@@ -231,17 +239,25 @@ export class PostreeveService {
   }
 
   async listMessages(input: ListMessagesInput): Promise<MessageSummary[]> {
-    await this.#requireAccount(input.accountId);
+    const account = await this.#requireAccount(input.accountId);
     const provider = this.#providers.forAccount(input.accountId);
-    return input.query
-      ? provider.searchMessages(input.accountId, input.mailbox, input.query, input.limit)
-      : provider.listMessages(input.accountId, input.mailbox, input.limit);
+    if (input.query) {
+      const messages = await provider.searchMessages(input.accountId, input.mailbox, input.query, input.limit);
+      await this.#persistObservedMessages(account, input.mailbox, messages, false);
+      return messages;
+    }
+
+    const page = await provider.listMessagePage(input.accountId, input.mailbox, input.limit);
+    await this.#persistObservedMessages(account, input.mailbox, page.messages, page.complete);
+    return page.messages;
   }
 
   async searchMessages(input: ListMessagesInput & { query: string }): Promise<MessageSummary[]> {
-    await this.#requireAccount(input.accountId);
-    return this.#providers.forAccount(input.accountId)
+    const account = await this.#requireAccount(input.accountId);
+    const messages = await this.#providers.forAccount(input.accountId)
       .searchMessages(input.accountId, input.mailbox, input.query, input.limit);
+    await this.#persistObservedMessages(account, input.mailbox, messages, false);
+    return messages;
   }
 
   async readMessages(references: MessageRef[]): Promise<MessageDetail[]> {
@@ -446,6 +462,22 @@ export class PostreeveService {
   #registerStoredAccount(account: StoredAccount): void {
     const credentials = this.#credentialsFor(account);
     this.#registerClients(account.id, this.#clientsFor(toPublicAccount(account), credentials));
+  }
+
+  async #persistObservedMessages(
+    account: StoredAccount,
+    mailbox: string,
+    messages: MessageSummary[],
+    authoritative: boolean,
+  ): Promise<void> {
+    await this.#store.reconcileMailbox({
+      tenantId: this.#context.tenantId,
+      accountId: account.id,
+      provider: account.kind,
+      mailbox,
+      observations: messages.map((message) => toCanonicalObservation(this.#context.tenantId, account.kind, message)),
+      authoritative,
+    });
   }
 
   #credentialsFor(account: StoredAccount): AccountCredentials {

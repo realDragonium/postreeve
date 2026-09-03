@@ -23,7 +23,7 @@ import type {
   MessageSummary,
   TriageAction,
 } from "../../shared/contracts";
-import type { AppliedMailAction, MailProvider } from "./provider";
+import type { AppliedMailAction, MailboxPage, MailProvider } from "./provider";
 
 export interface ImapAccountConfig {
   accountId: string;
@@ -149,13 +149,19 @@ export class ImapMailProvider implements MailProvider {
   }
 
   async listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]> {
+    return (await this.listMessagePage(accountId, mailbox, limit)).messages;
+  }
+
+  async listMessagePage(accountId: string, mailbox: string, limit: number): Promise<MailboxPage> {
     this.#assertAccount(accountId);
     assertLimit(limit);
     return this.#withClient(async (client) => {
       const opened = await client.mailboxOpen(mailbox, { readOnly: true });
-      const selected = await searchUids(client, { all: true }, limit);
-      if (selected.length === 0) return [];
-      return this.#fetchSummaries(client, opened, selected);
+      const selected = await searchUids(client, { all: true }, limit + 1);
+      const messages = selected.length === 0
+        ? []
+        : await this.#fetchSummaries(client, opened, selected.slice(0, limit));
+      return { messages, complete: selected.length <= limit };
     });
   }
 
@@ -570,7 +576,7 @@ function toSummary(
     ref: referenceFor(accountId, mailboxPath, mailbox, message),
     messageId: message.envelope?.messageId ?? headerString(parsed, "message-id") ?? "",
     inReplyTo: message.envelope?.inReplyTo ?? headerString(parsed, "in-reply-to") ?? null,
-    references: headerString(parsed, "references")?.match(/<[^<>]+>/g) ?? [],
+    references: parseReferences(parsed),
     subject: message.envelope?.subject ?? parsed?.subject ?? "(no subject)",
     from: message.envelope?.from?.map(toEnvelopeAddress) ?? parsedAddresses(parsed?.from?.value),
     to: message.envelope?.to?.map(toEnvelopeAddress) ?? parsedAddresses(flattenAddresses(parsed?.to)),
@@ -651,7 +657,16 @@ function flattenAddresses(value: ParsedMail["to"]): EmailAddress[] {
 
 function headerString(parsed: ParsedMail | undefined, name: string): string | undefined {
   const value = parsed?.headers.get(name);
-  return typeof value === "string" ? value : undefined;
+  if (typeof value === "string") return value;
+  return Array.isArray(value) && value.every((entry): entry is string => typeof entry === "string")
+    ? value.join(" ")
+    : undefined;
+}
+
+function parseReferences(parsed: ParsedMail | undefined): string[] {
+  const references = parsed?.references;
+  const values = Array.isArray(references) ? references : references ? [references] : [];
+  return values.flatMap((reference) => reference.match(/<[^<>]+>/g) ?? []);
 }
 
 function previewFor(text: string | undefined): string {

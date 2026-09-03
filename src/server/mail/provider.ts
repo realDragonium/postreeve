@@ -7,6 +7,7 @@ import type {
   MailProviderKind,
   TriageAction,
 } from "../../shared/contracts";
+import { normalizeMessageId } from "./message-id";
 
 export function toCanonicalObservation(
   tenantId: string,
@@ -36,18 +37,16 @@ export function toCanonicalObservation(
   };
 }
 
-function normalizeMessageId(value: string | null | undefined): string | null {
-  if (!value) return null;
-  const trimmed = value.trim();
-  const match = /^<([^<>\s@]+)@([^<>\s@]+)>$/.exec(trimmed);
-  return match ? `<${match[1]}@${match[2]!.toLowerCase()}>` : null;
-}
-
 export interface AppliedMailAction {
   current: MessageRef;
   previous: MessageRef;
   action: TriageAction;
   previousRead: boolean;
+}
+
+export interface MailboxPage {
+  messages: MessageSummary[];
+  complete: boolean;
 }
 
 export interface MailProvider {
@@ -56,6 +55,7 @@ export interface MailProvider {
   createFolder(accountId: string, name: string): Promise<void>;
   renameFolder(accountId: string, path: string, name: string): Promise<void>;
   deleteFolder(accountId: string, path: string): Promise<void>;
+  listMessagePage(accountId: string, mailbox: string, limit: number): Promise<MailboxPage>;
   listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]>;
   readMessages(accountId: string, references: MessageRef[]): Promise<MessageDetail[]>;
   searchMessages(accountId: string, mailbox: string, query: string, limit: number): Promise<MessageSummary[]>;

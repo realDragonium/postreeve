@@ -45,6 +45,43 @@ describe("Postreeve core workflow", () => {
     store.close();
   });
 
+  test("persists provider listings in the tenant without treating truncated results as authoritative", async () => {
+    const { store, service } = await createEmptyTestHarness();
+    const account = await service.createAccount(testAccountInput());
+    const stale = (uid: number, read: boolean) => ({
+      tenantId: "test-tenant",
+      messageId: null,
+      inReplyTo: null,
+      references: [],
+      location: {
+        accountId: account.id,
+        provider: "imap" as const,
+        mailbox: "INBOX",
+        uidValidity: "1723371481",
+        uid,
+        modseq: "1",
+        providerId: null,
+        read,
+        flagged: false,
+      },
+    });
+    const [listed, unseen] = await store.reconcileMailbox({
+      tenantId: "test-tenant",
+      accountId: account.id,
+      provider: "imap",
+      mailbox: "INBOX",
+      observations: [stale(103, true), stale(101, true)],
+      authoritative: true,
+    });
+
+    const messages = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 1 });
+
+    expect(messages.map(({ ref }) => ref.uid)).toEqual([103]);
+    expect(await store.listMessageLocations("test-tenant", listed!.id)).toMatchObject([{ read: false, flagged: true }]);
+    expect(await store.listMessageLocations("test-tenant", unseen!.id)).toHaveLength(1);
+    store.close();
+  });
+
   test("creates, renames, and deletes custom folders while protecting system folders", async () => {
     const { store, service, account } = await createTestHarness();
 
