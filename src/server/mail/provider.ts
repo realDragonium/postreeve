@@ -7,7 +7,7 @@ import type {
   MailProviderKind,
   TriageAction,
 } from "../../shared/contracts";
-import { normalizeMessageId, normalizeMessageIdList } from "./message-id";
+import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "./message-id";
 
 interface ProviderMessageMetadata {
   providerConversationId?: string;
@@ -32,10 +32,7 @@ export function toCanonicalObservation(
       : message.canonicalReceivedAt,
     messageId,
     inReplyTo: inReplyTo.length > 0 ? inReplyTo.join(" ") : null,
-    references: (message.references ?? []).flatMap((reference) => {
-      const normalized = normalizeMessageId(reference);
-      return normalized ? [normalized] : [];
-    }),
+    references: normalizeMessageIdLists(message.references ?? []),
     ...(message.providerConversationId ? { providerConversationId: message.providerConversationId } : {}),
     location: {
       accountId: message.ref.accountId,

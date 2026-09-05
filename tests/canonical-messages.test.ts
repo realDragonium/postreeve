@@ -836,7 +836,7 @@ describe("canonical message persistence", () => {
     const child = observation({
       messageId: "<multi-child@example.test>",
       inReplyTo: "<parent-b@Example.Test> (between) <parent-a@example.test> <parent-b@Example.Test>",
-      references: [],
+      references: ["<reference-a@example.test> <reference-b@example.test>", "<reference-a@example.test>"],
     });
     const [storedChild] = await store.reconcileMailbox({
       tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
@@ -855,6 +855,8 @@ describe("canonical message persistence", () => {
     expect(new Set(parents.map(({ conversationId }) => conversationId))).toEqual(new Set([storedChild!.conversationId]));
     expect((await store.getMessage("tenant-a", storedChild!.id))?.inReplyTo)
       .toBe("<parent-a@example.test> <parent-b@example.test>");
+    expect((await store.getMessage("tenant-a", storedChild!.id))?.references)
+      .toEqual(["<reference-a@example.test>", "<reference-b@example.test>"]);
     expect((await store.getConversation("tenant-a", storedChild!.conversationId))?.messages.map(({ messageId }) => messageId))
       .toEqual(["<parent-a@example.test>", "<parent-b@example.test>", "<multi-child@example.test>"]);
   });
@@ -1000,13 +1002,14 @@ test("provider summaries map identifiers, threading, location, and flags into th
     ref: { accountId: "gmail-account", mailbox: "INBOX", uidValidity: "gmail", uid: 7, modseq: "3", providerId: "gmail-id" },
     messageId: " <MESSAGE@Example.Test> ",
     inReplyTo: "<PARENT-B@Example.Test> (alternate) <PARENT-A@Example.Test>",
-    references: ["<ROOT@Example.Test>"],
+    references: ["<ROOT@Example.Test> <PARENT-A@Example.Test>", "<ROOT@Example.Test>"],
     subject: "Subject", from: [], to: [], receivedAt: "2026-09-03T00:00:00.000Z", preview: "", read: true, flagged: false,
     providerConversationId: "gmail-thread",
   };
   expect(toCanonicalObservation("tenant-a", "gmail", summary)).toEqual({
     tenantId: "tenant-a", messageId: "<MESSAGE@example.test>",
-    inReplyTo: "<PARENT-B@example.test> <PARENT-A@example.test>", references: ["<ROOT@example.test>"],
+    inReplyTo: "<PARENT-B@example.test> <PARENT-A@example.test>",
+    references: ["<ROOT@example.test>", "<PARENT-A@example.test>"],
     receivedAt: "2026-09-03T00:00:00.000Z",
     providerConversationId: "gmail-thread",
     location: { accountId: "gmail-account", provider: "gmail", mailbox: "INBOX", uidValidity: "gmail", uid: 7,
@@ -1072,6 +1075,9 @@ test("normalizes complete RFC 5322 Message-ID lists without extracting from malf
   )).toEqual(['<"quoted local"@example.test>', "<local@[ipv6:2001:db8::1]>"]);
   expect(normalizeMessageIdList("<one@example.test> garbage <two@example.test>")).toEqual([]);
   expect(normalizeMessageIdList("comment <one@example.test>")).toEqual([]);
+  expect(normalizeMessageIdList("(ignore <fake@example.test>)")).toEqual([]);
+  expect(normalizeMessageIdList('(ignore <fake@example.test>) <"a>b<c"@Example.Test>'))
+    .toEqual(['<"a>b<c"@example.test>']);
   expect(normalizeMessageId("<one@example.test> <two@example.test>")).toBeNull();
 });
 

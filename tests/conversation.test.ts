@@ -30,6 +30,14 @@ describe("conversation resolution", () => {
     ]);
   });
 
+  test("deduplicates each References sequence before retaining first-occurrence order", () => {
+    expect(mergeThreadingMetadata(null, [
+      "<parent-b@example.test>", "<parent-a@example.test>", "<parent-b@example.test>",
+    ], { inReplyTo: null, references: [] }, [])).toMatchObject({
+      references: ["<parent-b@example.test>", "<parent-a@example.test>"],
+    });
+  });
+
   test("orders causally, then chronologically with null timestamps last", () => {
     const message = (
       id: string,

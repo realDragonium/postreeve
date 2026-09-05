@@ -151,7 +151,7 @@ describe("Gmail compatibility", () => {
       "Subject: Threaded Gmail message",
       "Message-ID: <threaded@example.test>",
       "In-Reply-To: <parent-a@example.test> <parent-b@example.test>",
-      "References: <root@example.test> <parent@example.test>",
+      'References: (ignore <fake@example.test>) <root@example.test> <"a>b<c"@Example.Test> <root@example.test>',
       "Date: Sat, 29 Aug 2026 10:00:00 +0200",
       "Content-Type: text/plain; charset=UTF-8",
       "",
@@ -190,7 +190,7 @@ describe("Gmail compatibility", () => {
     }]);
 
     expect(detail?.inReplyTo).toBe("<parent-a@example.test> <parent-b@example.test>");
-    expect(detail?.references).toEqual(["<root@example.test>", "<parent@example.test>"]);
+    expect(detail?.references).toEqual(["<root@example.test>", '<"a>b<c"@example.test>']);
     expect(detail?.providerConversationId).toBeUndefined();
   });
 

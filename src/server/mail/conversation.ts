@@ -30,10 +30,11 @@ export function mergeThreadingMetadata(
 }
 
 function mergeReferenceSequences(sequences: readonly (readonly string[])[]): string[] {
-  const values = [...new Set(sequences.flat())];
+  const uniqueSequences = sequences.map((sequence) => [...new Set(sequence)]);
+  const values = [...new Set(uniqueSequences.flat())];
   const after = new Map(values.map((value) => [value, new Set<string>()]));
   const incoming = new Map(values.map((value) => [value, 0]));
-  for (const sequence of sequences) {
+  for (const sequence of uniqueSequences) {
     for (let index = 0; index < sequence.length; index += 1) {
       for (const later of sequence.slice(index + 1)) {
         const earlier = sequence[index]!;

@@ -100,3 +100,7 @@ export function normalizeMessageId(value: string | null | undefined): string | n
 export function normalizeMessageIdList(value: string | null | undefined): string[] {
   return [...new Set(parseMessageIds(value) ?? [])];
 }
+
+export function normalizeMessageIdLists(values: readonly (string | null | undefined)[]): string[] {
+  return [...new Set(values.flatMap(normalizeMessageIdList))];
+}

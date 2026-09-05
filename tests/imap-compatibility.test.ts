@@ -20,9 +20,13 @@ import {
   type ImapClient,
   type ImapClientFactory,
 } from "../src/server/mail/imap";
-import { toCanonicalObservation } from "../src/server/mail/provider";
+import { MailProviderRegistry, toCanonicalObservation } from "../src/server/mail/provider";
+import { MailSenderRegistry } from "../src/server/mail/sender";
 import { Store } from "../src/server/db/store";
-import type { MessageRef } from "../src/shared/contracts";
+import { canonicalConversationSchema, type MessageRef } from "../src/shared/contracts";
+import { PostreeveService } from "../src/server/core/postreeve";
+import { CredentialVault } from "../src/server/security/credentials";
+import { createApi } from "../src/server/api";
 
 interface StoredMailbox {
   path: string;
@@ -40,6 +44,7 @@ interface FakeState {
   readonly storeOptions: StoreOptions[];
   readonly searches: SearchObject[];
   readonly searchOptions: Array<{ uid?: boolean; returnOptions: Array<"MIN" | "MAX" | "COUNT" | "ALL" | { partial: string }> }>;
+  readonly fetchQueries: FetchQueryObject[];
   eSearchAll?: string;
   lists: number;
 }
@@ -112,7 +117,7 @@ describe("Bun IMAP compatibility", () => {
       "From: Sender <sender@example.test>",
       "To: Human <human@example.test>",
       `Message-ID: <message-${uid}@example.test>`,
-      "In-Reply-To: <parent-a@example.test> <parent-b@example.test>",
+      "In-Reply-To: (ignore <fake@example.test>) <parent-a@example.test> <parent-b@example.test>",
       `Subject: Message ${uid}`,
       "Date: Fri, 29 Aug 2025 12:00:00 +0000",
       "Content-Type: text/plain; charset=utf-8",
@@ -132,10 +137,118 @@ describe("Bun IMAP compatibility", () => {
     const provider = new ImapMailProvider(config, fakeFactory(state));
     const summaries = await provider.listMessages(config.accountId, "INBOX", 2);
     expect(summaries.map(({ inReplyTo }) => inReplyTo))
-      .toEqual(["<parent-a@example.test> <parent-b@example.test>", "<parent-a@example.test> <parent-b@example.test>"]);
+      .toEqual([
+        "(ignore <fake@example.test>) <parent-a@example.test> <parent-b@example.test>",
+        "(ignore <fake@example.test>) <parent-a@example.test> <parent-b@example.test>",
+      ]);
+    expect(summaries.map((message) => toCanonicalObservation("tenant-a", "imap", message).inReplyTo))
+      .toEqual([
+        "<parent-a@example.test> <parent-b@example.test>",
+        "<parent-a@example.test> <parent-b@example.test>",
+      ]);
     const details = await provider.readMessages(config.accountId, summaries.map(({ ref }) => ref));
     expect(details.map(({ inReplyTo }) => inReplyTo))
-      .toEqual(["<parent-a@example.test> <parent-b@example.test>", "<parent-a@example.test> <parent-b@example.test>"]);
+      .toEqual([
+        "(ignore <fake@example.test>) <parent-a@example.test> <parent-b@example.test>",
+        "(ignore <fake@example.test>) <parent-a@example.test> <parent-b@example.test>",
+      ]);
+  });
+
+  test("fetches complete threading headers while keeping IMAP summary source bounded", async () => {
+    const state = fakeState();
+    const inbox = state.mailboxes.get("INBOX");
+    if (!inbox) throw new Error("Expected test inbox");
+    const message = fakeMessage(1, 1n, "Oversized headers", "Body", new Set());
+    const paddingHeader = [
+      `X-Padding: ${"x".repeat(980)}`,
+      ...Array.from({ length: 73 }, () => ` ${"x".repeat(980)}`),
+    ];
+    inbox.messages.clear();
+    inbox.messages.set(1, { ...message, source: Buffer.from([
+      "From: Sender <sender@example.test>",
+      "To: Human <human@example.test>",
+      "Message-ID: <oversized@example.test>",
+      ...paddingHeader,
+      'References: (ignore <fake@example.test>) <root@example.test> <"a>b<c"@Example.Test> <root@example.test>',
+      "Subject: Oversized headers",
+      "Date: Fri, 29 Aug 2025 12:00:00 +0000",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "Body",
+    ].join("\r\n")) });
+
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const [listed] = await provider.listMessages(config.accountId, "INBOX", 1);
+    const [searched] = await provider.searchMessages(config.accountId, "INBOX", "oversized", 1);
+
+    expect(listed?.references).toEqual(["<root@example.test>", '<"a>b<c"@example.test>']);
+    expect(searched?.references).toEqual(listed?.references);
+    expect(listed?.preview.length).toBeLessThanOrEqual(240);
+    expect(state.fetchQueries.filter(({ headers }) => Array.isArray(headers)).map(({ headers }) => headers))
+      .toEqual([
+        ["Message-ID", "In-Reply-To", "References"],
+        ["Message-ID", "In-Reply-To", "References"],
+      ]);
+    expect(state.fetchQueries.filter(({ source }) => typeof source === "object")
+      .every(({ source }) => typeof source === "object" && source.maxLength === 64 * 1024)).toBe(true);
+  });
+
+  test("returns every raw IMAP multi-parent conversation member through the public API", async () => {
+    const state = fakeState();
+    const inbox = state.mailboxes.get("INBOX");
+    if (!inbox) throw new Error("Expected test inbox");
+    inbox.messages.clear();
+    for (const uid of [1, 2, 3]) {
+      const message = fakeMessage(uid, BigInt(uid), "Thread", "Body", new Set());
+      const inReplyTo = uid === 3 ? "<message-1@example.test> <message-2@example.test>" : undefined;
+      const { inReplyTo: _existing, ...envelope } = message.envelope!;
+      inbox.messages.set(uid, {
+        ...message,
+        envelope: { ...envelope, ...(inReplyTo ? { inReplyTo } : {}) },
+        source: Buffer.from([
+          "From: Sender <sender@example.test>",
+          "To: Human <human@example.test>",
+          `Message-ID: <message-${uid}@example.test>`,
+          ...(inReplyTo ? [`In-Reply-To: ${inReplyTo}`] : []),
+          "Subject: Thread",
+          "Date: Fri, 29 Aug 2025 12:00:00 +0000",
+          "Content-Type: text/plain; charset=utf-8",
+          "",
+          "Body",
+        ].join("\r\n")),
+      });
+    }
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const providers = new MailProviderRegistry();
+    providers.register(config.accountId, provider);
+    const store = new Store(":memory:");
+    try {
+      await store.insertAccount({
+        id: config.accountId, name: "IMAP", email: config.username, kind: "imap", encryptedCredentials: null,
+      });
+      const unavailable = () => {
+        throw new Error("Factory is not used by this fixture");
+      };
+      const service = new PostreeveService(
+        store,
+        { tenantId: "tenant-a" },
+        providers,
+        new MailSenderRegistry(),
+        new CredentialVault(Buffer.alloc(32, 7).toString("base64")),
+        unavailable,
+        unavailable,
+      );
+      const listed = await service.listMessages({ accountId: config.accountId, mailbox: "INBOX", limit: 50 });
+      const response = await createApi(service).request(`/api/conversations/${listed[0]!.conversationId}`);
+      const conversation = canonicalConversationSchema.parse(await response.json());
+
+      expect(response.status).toBe(200);
+      expect(conversation.messages.map(({ messageId }) => messageId)).toEqual([
+        "<message-1@example.test>", "<message-2@example.test>", "<message-3@example.test>",
+      ]);
+    } finally {
+      store.close();
+    }
   });
 
   test("keeps missing and malformed IMAP dates out of canonical ordering", async () => {
@@ -465,23 +578,25 @@ class FakeImapClient implements ImapClient {
 
   async *fetch(
     range: number[],
-    _query: FetchQueryObject,
+    query: FetchQueryObject,
     _options?: FetchOptions,
   ): AsyncIterableIterator<FetchMessageObject> {
+    this.#state.fetchQueries.push(query);
     const mailbox = this.#requireSelected();
     for (const uid of range) {
       const message = mailbox.messages.get(uid);
-      if (message) yield cloneMessage(message);
+      if (message) yield fetchedMessage(message, query);
     }
   }
 
   async fetchOne(
     sequence: number,
-    _query: FetchQueryObject,
+    query: FetchQueryObject,
     _options?: FetchOptions,
   ): Promise<FetchMessageObject | false> {
+    this.#state.fetchQueries.push(query);
     const message = this.#requireSelected().messages.get(sequence);
-    return message ? cloneMessage(message) : false;
+    return message ? fetchedMessage(message, query) : false;
   }
 
   async messageFlagsAdd(
@@ -580,6 +695,7 @@ function fakeState(): FakeState {
     storeOptions: [],
     searches: [],
     searchOptions: [],
+    fetchQueries: [],
     lists: 0,
     mailboxes: new Map([
       [
@@ -752,7 +868,38 @@ function cloneMessage(message: FetchMessageObject): FetchMessageObject {
     ...message,
     ...(message.flags === undefined ? {} : { flags: new Set(message.flags) }),
     ...(message.source === undefined ? {} : { source: Buffer.from(message.source) }),
+    ...(message.headers === undefined ? {} : { headers: Buffer.from(message.headers) }),
   };
+}
+
+function fetchedMessage(message: FetchMessageObject, query: FetchQueryObject): FetchMessageObject {
+  const cloned = cloneMessage(message);
+  if (typeof query.source === "object" && cloned.source) {
+    const start = query.source.start ?? 0;
+    const end = query.source.maxLength === undefined ? undefined : start + query.source.maxLength;
+    cloned.source = cloned.source.subarray(start, end);
+  }
+  if (Array.isArray(query.headers) && message.source) {
+    cloned.headers = selectedHeaders(message.source, query.headers);
+  }
+  return cloned;
+}
+
+function selectedHeaders(source: Buffer, names: readonly string[]): Buffer {
+  const selected = new Set(names.map((name) => name.toLowerCase()));
+  const headers: string[] = [];
+  let currentSelected = false;
+  for (const line of source.toString("utf8").split("\r\n")) {
+    if (line === "") break;
+    if (/^[ \t]/.test(line)) {
+      if (currentSelected) headers[headers.length - 1] += `\r\n${line}`;
+      continue;
+    }
+    const separator = line.indexOf(":");
+    currentSelected = separator >= 0 && selected.has(line.slice(0, separator).toLowerCase());
+    if (currentSelected) headers.push(line);
+  }
+  return Buffer.from(`${headers.join("\r\n")}\r\n\r\n`);
 }
 
 function messageRef(overrides: Partial<MessageRef> = {}): MessageRef {

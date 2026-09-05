@@ -31,6 +31,7 @@ import type {
   ProviderMessageDetail,
   ProviderMessageSummary,
 } from "./provider";
+import { normalizeMessageIdLists } from "./message-id";
 
 export interface ImapAccountConfig {
   accountId: string;
@@ -380,12 +381,14 @@ export class ImapMailProvider implements MailProvider {
         flags: true,
         envelope: true,
         internalDate: true,
+        headers: ["Message-ID", "In-Reply-To", "References"],
         source: { maxLength: SUMMARY_SOURCE_BYTES },
       },
       { uid: true },
     )) {
       const parsed = message.source ? await parseMessage(message.source) : undefined;
-      summaries.push(toSummary(this.#config.accountId, mailbox.path, mailbox, message, parsed));
+      const threadingHeaders = message.headers ? await parseMessage(message.headers) : undefined;
+      summaries.push(toSummary(this.#config.accountId, mailbox.path, mailbox, message, parsed, threadingHeaders));
     }
 
     const order = new Map(uids.map((uid, index) => [uid, index]));
@@ -590,17 +593,21 @@ function toSummary(
   mailbox: MailboxObject,
   message: FetchMessageObject,
   parsed?: ParsedMail,
+  threadingHeaders?: ParsedMail,
 ): ProviderMessageSummary {
   const canonicalReceivedAt = [message.internalDate, message.envelope?.date, parsedDate(parsed)]
     .map(toDate)
     .find((date): date is Date => date !== undefined)
     ?.toISOString() ?? null;
   const deliveredTo = deliveryAddresses(parsed);
+  const threading = threadingHeaders ?? parsed;
+  const rawMessageId = rawHeaderValues(threading, "message-id").join(" ");
+  const rawInReplyTo = rawHeaderValues(threading, "in-reply-to").join(" ");
   return {
     ref: referenceFor(accountId, mailboxPath, mailbox, message),
-    messageId: message.envelope?.messageId ?? headerString(parsed, "message-id") ?? "",
-    inReplyTo: message.envelope?.inReplyTo ?? headerString(parsed, "in-reply-to") ?? null,
-    references: parseReferences(parsed),
+    messageId: rawMessageId || message.envelope?.messageId || "",
+    inReplyTo: rawInReplyTo || message.envelope?.inReplyTo || null,
+    references: normalizeMessageIdLists(rawHeaderValues(threading, "references")),
     subject: message.envelope?.subject ?? parsed?.subject ?? "(no subject)",
     from: message.envelope?.from?.map(toEnvelopeAddress) ?? parsedAddresses(parsed?.from?.value),
     to: message.envelope?.to?.map(toEnvelopeAddress) ?? parsedAddresses(flattenAddresses(parsed?.to)),
@@ -680,14 +687,6 @@ function flattenAddresses(value: ParsedMail["to"]): EmailAddress[] {
   return Array.isArray(value) ? value.flatMap((address) => address.value) : value.value;
 }
 
-function headerString(parsed: ParsedMail | undefined, name: string): string | undefined {
-  const value = parsed?.headers.get(name);
-  if (typeof value === "string") return value;
-  return Array.isArray(value) && value.every((entry): entry is string => typeof entry === "string")
-    ? value.join(" ")
-    : undefined;
-}
-
 function parsedDate(parsed: ParsedMail | undefined): string | undefined {
   const header = parsed?.headerLines.find(({ key }) => key.toLowerCase() === "date")?.line;
   if (!header) return undefined;
@@ -695,10 +694,13 @@ function parsedDate(parsed: ParsedMail | undefined): string | undefined {
   return separator < 0 ? undefined : header.slice(separator + 1).trim();
 }
 
-function parseReferences(parsed: ParsedMail | undefined): string[] {
-  const references = parsed?.references;
-  const values = Array.isArray(references) ? references : references ? [references] : [];
-  return values.flatMap((reference) => reference.match(/<[^<>]+>/g) ?? []);
+function rawHeaderValues(parsed: ParsedMail | undefined, name: string): string[] {
+  return (parsed?.headerLines ?? [])
+    .filter(({ key }) => key.toLowerCase() === name)
+    .flatMap(({ line }) => {
+      const separator = line.indexOf(":");
+      return separator < 0 ? [] : [line.slice(separator + 1).trim()];
+    });
 }
 
 function previewFor(text: string | undefined): string {

@@ -14,7 +14,7 @@ import type {
   Proposal,
 } from "../../shared/contracts";
 import { accounts, batches, proposals, type StoredOperation } from "./schema";
-import { normalizeMessageId, normalizeMessageIdList } from "../mail/message-id";
+import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
 import type { ProviderMessageObservation } from "../mail/provider";
 import {
   mergeThreadingMetadata,
@@ -198,10 +198,7 @@ export class Store {
         const normalizedMessageId = normalizeMessageId(observation.messageId);
         const normalizedInReplyToIds = normalizeMessageIdList(observation.inReplyTo);
         const normalizedInReplyTo = normalizedInReplyToIds.length > 0 ? normalizedInReplyToIds.join(" ") : null;
-        const normalizedReferences = observation.references.flatMap((reference) => {
-          const normalized = normalizeMessageId(reference);
-          return normalized ? [normalized] : [];
-        });
+        const normalizedReferences = normalizeMessageIdLists(observation.references);
         const locationKey = locationKeyFor(observation);
         const legacyLocationKey = legacyLocationKeyFor(observation);
         const fallbackIdentityKey = fallbackIdentityKeyFor(observation);

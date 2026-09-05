@@ -18,6 +18,7 @@ import type {
   ProviderMessageDetail,
   ProviderMessageSummary,
 } from "./provider";
+import { normalizeMessageIdList, normalizeMessageIdLists } from "./message-id";
 import type { MailSender } from "./sender";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -436,8 +437,8 @@ function toDetail(
         ["To", addressText(parsed.to)],
         ["Cc", addressText(parsed.cc)],
         ["Delivered-To", headerString(parsed, "delivered-to")],
-        ["Message-ID", parsed.messageId],
-        ["In-Reply-To", headerString(parsed, "in-reply-to")],
+        ["Message-ID", rawHeaderValues(parsed, "message-id").join(" ")],
+        ["In-Reply-To", rawHeaderValues(parsed, "in-reply-to").join(" ")],
         ["Date", rawHeaderValue(parsed, "date")],
       ].flatMap(([name, value]) => value ? [{ name: name!, value }] : []),
     },
@@ -454,7 +455,7 @@ function toDetail(
 }
 
 function parseReferences(value?: string): string[] {
-  return value?.match(/<[^<>]+>/g) ?? [];
+  return normalizeMessageIdList(value);
 }
 
 function toReference(accountId: string, mailbox: string, message: z.infer<typeof gmailMessageSchema>): MessageRef {
@@ -520,16 +521,20 @@ function headerString(parsed: ParsedMail, name: string): string | undefined {
 }
 
 function rawHeaderValue(parsed: ParsedMail, name: string): string | undefined {
-  const line = parsed.headerLines.find(({ key }) => key.toLowerCase() === name)?.line;
-  if (!line) return undefined;
-  const separator = line.indexOf(":");
-  return separator < 0 ? undefined : line.slice(separator + 1).trim();
+  return rawHeaderValues(parsed, name)[0];
+}
+
+function rawHeaderValues(parsed: ParsedMail, name: string): string[] {
+  return parsed.headerLines
+    .filter(({ key }) => key.toLowerCase() === name)
+    .flatMap(({ line }) => {
+      const separator = line.indexOf(":");
+      return separator < 0 ? [] : [line.slice(separator + 1).trim()];
+    });
 }
 
 function parsedReferences(parsed: ParsedMail): string[] {
-  const references = parsed.references;
-  const values = Array.isArray(references) ? references : references ? [references] : [];
-  return values.flatMap((reference) => parseReferences(reference));
+  return normalizeMessageIdLists(rawHeaderValues(parsed, "references"));
 }
 
 function isEmail(value: string): boolean {
