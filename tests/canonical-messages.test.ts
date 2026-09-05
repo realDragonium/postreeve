@@ -374,7 +374,10 @@ describe("canonical message persistence", () => {
       tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
       observations: [missing], authoritative: true,
     });
-    const identified = observation({ inReplyTo: null, references: [] });
+    const identified = observation({
+      inReplyTo: null,
+      references: ["<parent@example.test>", "<new-parent@example.test>"],
+    });
     const [promoted] = await store.reconcileMailbox({
       tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
       observations: [identified], authoritative: true,
@@ -384,7 +387,7 @@ describe("canonical message persistence", () => {
       id: fallback!.id,
       messageId: "<message@example.test>",
       inReplyTo: "<parent@example.test>",
-      references: ["<root@example.test>", "<parent@example.test>"],
+      references: ["<root@example.test>", "<parent@example.test>", "<new-parent@example.test>"],
     });
   });
 
@@ -444,7 +447,10 @@ describe("canonical message persistence", () => {
 
   test("merges a provider fallback from another label into an existing canonical message", async () => {
     const store = await createStore();
-    const existing = observation({ inReplyTo: null, references: [] });
+    const existing = observation({
+      inReplyTo: null,
+      references: ["<canonical-root@example.test>", "<shared-root@example.test>"],
+    });
     const [canonical] = await store.reconcileMailbox({
       tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
       observations: [existing], authoritative: true,
@@ -452,7 +458,7 @@ describe("canonical message persistence", () => {
     const gmailFallback = observation({
       messageId: null,
       inReplyTo: "<fallback-parent@example.test>",
-      references: ["<fallback-root@example.test>", "<fallback-parent@example.test>"],
+      references: ["<shared-root@example.test>", "<fallback-parent@example.test>"],
       location: {
         ...existing.location, accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
         uidValidity: "gmail", uid: 7, providerId: "gmail-shared",
@@ -464,7 +470,7 @@ describe("canonical message persistence", () => {
     });
     const identifiedInArchive = observation({
       inReplyTo: null,
-      references: [],
+      references: ["<fallback-parent@example.test>", "<observed-parent@example.test>"],
       location: { ...gmailFallback.location, mailbox: "Archive", uid: 8 },
     });
     const [merged] = await store.reconcileMailbox({
@@ -481,7 +487,12 @@ describe("canonical message persistence", () => {
     expect((await store.listMessageLocations("tenant-a", canonical!.id)).map(({ mailbox }) => mailbox))
       .toEqual(["Archive", "INBOX", "INBOX"]);
     expect(merged!.inReplyTo).toBe(gmailFallback.inReplyTo);
-    expect(merged!.references).toEqual(gmailFallback.references);
+    expect(merged!.references).toEqual([
+      "<canonical-root@example.test>",
+      "<shared-root@example.test>",
+      "<fallback-parent@example.test>",
+      "<observed-parent@example.test>",
+    ]);
   });
 
   test("keeps every exposed fallback identity resolvable after repeated merges", async () => {
@@ -579,7 +590,7 @@ describe("canonical message persistence", () => {
     }
   });
 
-  test("retains threading metadata when an ordinary duplicate omits it", async () => {
+  test("composes retained and newly observed threading references on update", async () => {
     const store = await createStore();
     const first = observation();
     const [canonical] = await store.reconcileMailbox({
@@ -588,13 +599,18 @@ describe("canonical message persistence", () => {
     });
     const [duplicate] = await store.reconcileMailbox({
       tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
-      observations: [{ ...first, inReplyTo: null, references: [] }], authoritative: true,
+      observations: [{
+        ...first,
+        inReplyTo: null,
+        references: ["<parent@example.test>", "<new-parent@example.test>"],
+      }],
+      authoritative: true,
     });
 
     expect(duplicate).toMatchObject({
       id: canonical!.id,
       inReplyTo: "<parent@example.test>",
-      references: ["<root@example.test>", "<parent@example.test>"],
+      references: ["<root@example.test>", "<parent@example.test>", "<new-parent@example.test>"],
     });
   });
 

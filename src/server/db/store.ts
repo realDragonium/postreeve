@@ -861,10 +861,9 @@ function mergeThreadingMetadata(
 ): { inReplyTo: string | null; references: string[] } {
   const rows = [canonical, ...merged.filter(({ id }) => id !== canonical.id)];
   const retainedInReplyTo = rows.find(({ in_reply_to }) => in_reply_to !== null)?.in_reply_to ?? null;
-  const retainedReferences = rows.map(({ references }) => JSON.parse(references) as string[])
-    .find((references) => references.length > 0) ?? [];
+  const references = rows.flatMap((row) => JSON.parse(row.references) as string[]);
   return {
     inReplyTo: observedInReplyTo ?? retainedInReplyTo,
-    references: observedReferences.length > 0 ? observedReferences : retainedReferences,
+    references: [...new Set([...references, ...observedReferences])],
   };
 }

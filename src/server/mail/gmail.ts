@@ -430,13 +430,13 @@ function toDetail(
         ["Delivered-To", headerString(parsed, "delivered-to")],
         ["Message-ID", parsed.messageId],
         ["In-Reply-To", headerString(parsed, "in-reply-to")],
-        ["References", headerString(parsed, "references")],
         ["Date", parsed.date?.toUTCString()],
       ].flatMap(([name, value]) => value ? [{ name: name!, value }] : []),
     },
   });
   return {
     ...summary,
+    references: parsedReferences(parsed),
     from: flattenAddresses(parsed.from).map(toAddress),
     to: flattenAddresses(parsed.to).map(toAddress),
     cc: flattenAddresses(parsed.cc).map(toAddress),
@@ -498,7 +498,16 @@ function addressText(value: ParsedMail["to"]): string | undefined {
 
 function headerString(parsed: ParsedMail, name: string): string | undefined {
   const value = parsed.headers.get(name);
-  return typeof value === "string" ? value : undefined;
+  if (typeof value === "string") return value;
+  return Array.isArray(value) && value.every((entry): entry is string => typeof entry === "string")
+    ? value.join(" ")
+    : undefined;
+}
+
+function parsedReferences(parsed: ParsedMail): string[] {
+  const references = parsed.references;
+  const values = Array.isArray(references) ? references : references ? [references] : [];
+  return values.flatMap((reference) => parseReferences(reference));
 }
 
 function isEmail(value: string): boolean {

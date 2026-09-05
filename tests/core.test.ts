@@ -167,7 +167,7 @@ describe("Postreeve core workflow", () => {
     store.close();
   });
 
-  test("reads same-account mailboxes in request order without collapsing repeated references", async () => {
+  test("retains provider-result order across same-account mailboxes without collapsing repeated references", async () => {
     const { store, service } = await createEmptyTestHarness({ archiveDelivery: true });
     const account = await service.createAccount(testAccountInput());
     const archive = {

@@ -139,6 +139,55 @@ describe("Gmail compatibility", () => {
     }
   });
 
+  test("retains ordered References from a raw Gmail message", async () => {
+    const raw = Buffer.from([
+      "From: Sender <sender@example.test>",
+      "To: Person <person@example.test>",
+      "Subject: Threaded Gmail message",
+      "Message-ID: <threaded@example.test>",
+      "In-Reply-To: <parent@example.test>",
+      "References: <root@example.test> <parent@example.test>",
+      "Date: Sat, 29 Aug 2026 10:00:00 +0200",
+      "Content-Type: text/plain; charset=UTF-8",
+      "",
+      "Threaded body.",
+    ].join("\r\n"), "utf8").toString("base64url");
+    const request: HttpFetch = async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return json({ access_token: "short-lived-access-token", expires_in: 3600 });
+      }
+      if (url.includes("/messages/threaded?format=raw")) {
+        return json({
+          id: "threaded",
+          labelIds: ["INBOX"],
+          historyId: "1",
+          internalDate: "1787990400000",
+          raw,
+        });
+      }
+      return new Response(null, { status: 404 });
+    };
+    const client = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "stored-refresh-token" },
+      clientId: "desktop-client-id",
+      fetch: request,
+    });
+
+    const [detail] = await client.readMessages(account.id, [{
+      accountId: account.id,
+      mailbox: "INBOX",
+      uidValidity: "gmail",
+      uid: 1,
+      modseq: "1",
+      providerId: "threaded",
+    }]);
+
+    expect(detail?.inReplyTo).toBe("<parent@example.test>");
+    expect(detail?.references).toEqual(["<root@example.test>", "<parent@example.test>"]);
+  });
+
   test("uses a state-bound PKCE desktop authorization flow", async () => {
     const request: OAuthFetch = async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
