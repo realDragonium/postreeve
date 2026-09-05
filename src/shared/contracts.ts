@@ -118,6 +118,10 @@ export const messageDetailSchema = messageSummarySchema.extend({
   html: z.string().nullable(),
 });
 
+export const canonicalMessageDetailSchema = messageDetailSchema.required({ canonicalId: true }).extend({
+  canonicalAliases: z.array(z.string().min(1)).default([]),
+});
+
 export const triageActionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("leave") }),
   z.object({ type: z.literal("move"), destination: z.string().min(1) }),
@@ -269,6 +273,7 @@ export type MessageRef = z.infer<typeof messageRefSchema>;
 export type MessageSummary = z.infer<typeof messageSummarySchema>;
 export type CanonicalMessageSummary = z.infer<typeof canonicalMessageSummarySchema>;
 export type MessageDetail = z.infer<typeof messageDetailSchema>;
+export type CanonicalMessageDetail = z.infer<typeof canonicalMessageDetailSchema>;
 export type MailProviderKind = z.infer<typeof mailProviderKindSchema>;
 export type CanonicalMessageObservation = z.infer<typeof canonicalMessageObservationSchema>;
 export type CanonicalMessage = z.infer<typeof canonicalMessageSchema>;

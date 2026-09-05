@@ -88,6 +88,117 @@ describe("Postreeve core workflow", () => {
     store.close();
   });
 
+  test("reconciles read observations without removing unseen locations and promotes fallback identities", async () => {
+    const { store, service } = await createEmptyTestHarness({
+      duplicateDelivery: true,
+      missingMessageId: true,
+      readOverrides: {
+        messageId: " <READ-103@Example.Test> ",
+        inReplyTo: "<parent@example.test>",
+        references: ["<root@example.test>", "<parent@example.test>"],
+        read: false,
+        flagged: true,
+        text: "Complete read body.",
+        html: "<p>Complete read body.</p>",
+      },
+    });
+    const account = await service.createAccount(testAccountInput());
+    const fallback = (uid: number, providerId: string | null) => ({
+      tenantId: "test-tenant",
+      messageId: null,
+      inReplyTo: null,
+      references: [],
+      location: {
+        accountId: account.id,
+        provider: "imap" as const,
+        mailbox: "INBOX",
+        uidValidity: "1723371481",
+        uid,
+        modseq: "1",
+        providerId,
+        read: true,
+        flagged: false,
+      },
+    });
+    const [firstFallback, secondFallback, unseen] = await store.reconcileMailbox({
+      tenantId: "test-tenant",
+      accountId: account.id,
+      provider: "imap",
+      mailbox: "INBOX",
+      observations: [fallback(103, null), fallback(104, "provider-copy-104"), fallback(999, null)],
+      authoritative: true,
+    });
+    const references = [
+      { accountId: account.id, mailbox: "INBOX", uidValidity: "1723371481", uid: 103, modseq: "1" },
+      {
+        accountId: account.id,
+        mailbox: "INBOX",
+        uidValidity: "1723371481",
+        uid: 104,
+        modseq: "1",
+        providerId: "provider-copy-104",
+      },
+    ];
+
+    const details = await service.readMessages(references);
+
+    expect(details.map(({ ref }) => ref)).toEqual(references);
+    expect(details.map(({ text, html }) => ({ text, html }))).toEqual([
+      { text: "Complete read body.", html: "<p>Complete read body.</p>" },
+      { text: "Complete read body.", html: "<p>Complete read body.</p>" },
+    ]);
+    expect(new Set(details.map(({ canonicalId }) => canonicalId)).size).toBe(1);
+    expect(details[0]?.canonicalId).toBe(firstFallback!.id);
+    expect(details[0]?.canonicalAliases).toContain(secondFallback!.id);
+    expect(details[1]?.canonicalAliases).toEqual(details[0]?.canonicalAliases);
+    expect(await store.getMessage("test-tenant", firstFallback!.id)).toMatchObject({
+      id: firstFallback!.id,
+      messageId: "<READ-103@example.test>",
+      inReplyTo: "<parent@example.test>",
+      references: ["<root@example.test>", "<parent@example.test>"],
+    });
+    const locations = await store.listMessageLocations("test-tenant", firstFallback!.id);
+    expect(locations.toSorted((left, right) => left.uid - right.uid)).toMatchObject([
+      { uid: 103, read: false, flagged: true },
+      { uid: 104, read: false, flagged: true },
+    ]);
+    expect(await store.listMessageLocations("test-tenant", unseen!.id)).toHaveLength(1);
+    expect(await store.getMessage("another-tenant", firstFallback!.id)).toBeNull();
+    store.close();
+  });
+
+  test("reads same-account mailboxes in request order without collapsing repeated references", async () => {
+    const { store, service } = await createEmptyTestHarness({ archiveDelivery: true });
+    const account = await service.createAccount(testAccountInput());
+    const archive = {
+      accountId: account.id,
+      mailbox: "Archive",
+      uidValidity: "1723371481",
+      uid: 105,
+      modseq: "3",
+      providerId: "archive-copy-105",
+    };
+    const inbox = {
+      accountId: account.id,
+      mailbox: "INBOX",
+      uidValidity: "1723371481",
+      uid: 103,
+      modseq: "1",
+    };
+
+    const details = await service.readMessages([archive, inbox, archive]);
+
+    expect(details.map(({ ref }) => ref)).toEqual([archive, inbox, archive]);
+    expect(details.map(({ text }) => text)).toEqual([
+      "Archived full body.",
+      "Here are the decisions and follow-ups.",
+      "Archived full body.",
+    ]);
+    expect(new Set(details.map(({ canonicalId }) => canonicalId)).size).toBe(1);
+    expect(await store.listMessageLocations("test-tenant", details[0]!.canonicalId)).toHaveLength(2);
+    store.close();
+  });
+
   test("returns one canonical summary while retaining duplicate delivery locations", async () => {
     const { store, service } = await createEmptyTestHarness({ duplicateDelivery: true });
     const account = await service.createAccount(testAccountInput());

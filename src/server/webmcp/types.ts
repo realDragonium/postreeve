@@ -1,12 +1,12 @@
 import type {
   Account,
+  CanonicalMessageDetail,
   CanonicalMessageSummary,
   CreateFolderInput,
   DeleteFolderInput,
   DirectActionInput,
   Folder,
   ListMessagesInput,
-  MessageDetail,
   MessageRef,
   OperationBatch,
   RenameFolderInput,
@@ -21,7 +21,7 @@ export interface WebMcpServices {
   renameFolder(input: RenameFolderInput, signal: AbortSignal): Promise<readonly Folder[]>;
   deleteFolder(input: DeleteFolderInput, signal: AbortSignal): Promise<readonly Folder[]>;
   listMessages(input: WebMcpListMessagesInput, signal: AbortSignal): Promise<readonly CanonicalMessageSummary[]>;
-  readMessages(messages: readonly MessageRef[], signal: AbortSignal): Promise<readonly MessageDetail[]>;
+  readMessages(messages: readonly MessageRef[], signal: AbortSignal): Promise<readonly CanonicalMessageDetail[]>;
   searchMessages(input: WebMcpSearchMessagesInput, signal: AbortSignal): Promise<readonly CanonicalMessageSummary[]>;
   sendMessage(input: SendMessageInput, signal: AbortSignal): Promise<SendReceipt>;
   applyMessageActions(input: DirectActionInput, signal: AbortSignal): Promise<OperationBatch>;

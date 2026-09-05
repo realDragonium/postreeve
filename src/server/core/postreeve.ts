@@ -1,6 +1,7 @@
 import type {
   Account,
   AccountSettings,
+  CanonicalMessageDetail,
   CanonicalMessageSummary,
   CreateAccountInput,
   CreateFolderInput,
@@ -9,7 +10,6 @@ import type {
   DirectActionInput,
   Folder,
   ListMessagesInput,
-  MessageDetail,
   MessageRef,
   MessageSummary,
   OperationBatch,
@@ -264,14 +264,46 @@ export class PostreeveService {
     return this.#persistObservedMessages(account, input.mailbox, messages, false);
   }
 
-  async readMessages(references: MessageRef[]): Promise<MessageDetail[]> {
+  async readMessages(references: MessageRef[]): Promise<CanonicalMessageDetail[]> {
     if (references.length === 0) return [];
     const accountId = references[0]!.accountId;
     if (references.some((reference) => reference.accountId !== accountId)) {
       throw new Error("Messages from different accounts cannot be read in one request");
     }
-    await this.#requireAccount(accountId);
-    return this.#providers.forAccount(accountId).readMessages(accountId, references);
+    const account = await this.#requireAccount(accountId);
+    const details = await this.#providers.forAccount(accountId).readMessages(accountId, references);
+    if (details.length !== references.length) {
+      throw new Error("Provider read result count does not match references");
+    }
+
+    const canonicalByIndex = new Map<number, string>();
+    const mailboxGroups = new Map<string, Array<{ detail: typeof details[number]; index: number }>>();
+    for (const [index, detail] of details.entries()) {
+      if (detail.ref.accountId !== accountId) throw new Error("Provider read returned a message from a different account");
+      const group = mailboxGroups.get(detail.ref.mailbox) ?? [];
+      group.push({ detail, index });
+      mailboxGroups.set(detail.ref.mailbox, group);
+    }
+    for (const [mailbox, group] of mailboxGroups) {
+      const canonical = await this.#store.reconcileMailbox({
+        tenantId: this.#context.tenantId,
+        accountId,
+        provider: account.kind,
+        mailbox,
+        observations: group.map(({ detail }) => toCanonicalObservation(this.#context.tenantId, account.kind, detail)),
+        authoritative: false,
+      });
+      if (canonical.length !== group.length) throw new Error("Canonical reconciliation result count does not match observations");
+      group.forEach(({ index }, groupIndex) => canonicalByIndex.set(index, canonical[groupIndex]!.id));
+    }
+
+    return Promise.all(details.map(async (detail, index) => {
+      const observedId = canonicalByIndex.get(index);
+      if (!observedId) throw new Error("Canonical read result is missing");
+      const canonical = await this.#store.getMessage(this.#context.tenantId, observedId);
+      if (!canonical) throw new Error("Canonical read message is missing");
+      return { ...detail, canonicalId: canonical.id, canonicalAliases: canonical.aliases };
+    }));
   }
 
   async sendMessage(rawInput: SendMessageInput): Promise<SendReceipt> {

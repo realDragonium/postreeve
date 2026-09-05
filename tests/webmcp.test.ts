@@ -3,12 +3,12 @@ import { describe, expect, test } from "bun:test";
 import { canonicalMessageSummarySchema } from "../src/shared/contracts.ts";
 import type {
   Account,
+  CanonicalMessageDetail,
   CanonicalMessageSummary,
   CreateFolderInput,
   DeleteFolderInput,
   DirectActionInput,
   Folder,
-  MessageDetail,
   MessageRef,
   OperationBatch,
   RenameFolderInput,
@@ -67,7 +67,7 @@ const message: CanonicalMessageSummary = {
   flagged: false,
 };
 
-const messageDetail: MessageDetail = {
+const messageDetail: CanonicalMessageDetail = {
   ...message,
   text: "Untrusted email body",
   html: null,
@@ -180,7 +180,7 @@ class FakeServices implements WebMcpServices {
     return [message];
   }
 
-  async readMessages(_messages: readonly MessageRef[], signal: AbortSignal): Promise<readonly MessageDetail[]> {
+  async readMessages(_messages: readonly MessageRef[], signal: AbortSignal): Promise<readonly CanonicalMessageDetail[]> {
     this.lastSignal = signal;
     return [messageDetail];
   }
@@ -403,7 +403,7 @@ describe("Postreeve WebMCP", () => {
     expect(services.directActionCalls).toEqual([]);
   });
 
-  test("rejects list and search results without a canonical ID", async () => {
+  test("rejects message results without a canonical ID", async () => {
     class MissingCanonicalIdServices extends FakeServices {
       override async listMessages(
         input: WebMcpListMessagesInput,
@@ -427,14 +427,28 @@ describe("Postreeve WebMCP", () => {
         Reflect.deleteProperty(invalid, "canonicalId");
         return [invalid, ...results.slice(1)];
       }
+
+      override async readMessages(
+        messages: readonly MessageRef[],
+        signal: AbortSignal,
+      ): Promise<readonly CanonicalMessageDetail[]> {
+        const results = [...await super.readMessages(messages, signal)];
+        const result = results[0];
+        if (!result) return [];
+        const invalid = structuredClone(result);
+        Reflect.deleteProperty(invalid, "canonicalId");
+        return [invalid];
+      }
     }
 
     const tools = createPostreeveWebMcpTools(new MissingCanonicalIdServices());
     const list = tools.find(({ name }) => name === "list_messages");
+    const read = tools.find(({ name }) => name === "read_messages");
     const search = tools.find(({ name }) => name === "search_messages");
-    if (!list || !search) throw new Error("Missing message listing tools");
+    if (!list || !read || !search) throw new Error("Missing message tools");
 
     await expect(list.execute({ accountId: account.id, mailbox: "INBOX" }, executeOptions())).rejects.toThrow();
+    await expect(read.execute({ messages: [messageRef] }, executeOptions())).rejects.toThrow();
     await expect(search.execute({
       accountId: account.id,
       mailbox: "INBOX",

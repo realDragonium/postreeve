@@ -4,11 +4,11 @@ import { uniqueCanonicalMessages } from "../../shared/canonical-messages.ts";
 import {
   accountSchema,
   batchIdSchema,
+  canonicalMessageDetailSchema,
   createFolderInputSchema,
   deleteFolderInputSchema,
   folderSchema,
   listMessagesInputSchema,
-  messageDetailSchema,
   messageRefSchema,
   canonicalMessageSummarySchema,
   operationBatchSchema,
@@ -209,7 +209,7 @@ export function createPostreeveWebMcpTools(services: WebMcpServices): readonly W
       annotations: readOnlyAnnotations,
       execute: async (input, { signal }) => {
         const { messages } = readMessagesInputSchema.parse(input);
-        return z.array(messageDetailSchema).parse(await services.readMessages(messages, signal));
+        return z.array(canonicalMessageDetailSchema).parse(await services.readMessages(messages, signal));
       },
     },
     {

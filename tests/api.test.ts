@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { hc } from "hono/client";
-import { accountSchema, canonicalMessageSummarySchema, folderSchema, messageSummarySchema, proposalSchema } from "../src/shared/contracts";
+import {
+  accountSchema,
+  canonicalMessageDetailSchema,
+  canonicalMessageSummarySchema,
+  folderSchema,
+  messageSummarySchema,
+  proposalSchema,
+} from "../src/shared/contracts";
 import { createApi, oauthResultUrl, type AppType } from "../src/server/api";
 import { createEmptyTestHarness, createTestHarness, testAccountInput } from "./support/test-mail";
 
@@ -27,7 +34,11 @@ describe("Hono RPC API", () => {
       param: { accountId: account.id },
       query: { mailbox: "INBOX", limit: "20" },
     });
-    expect(canonicalMessageSummarySchema.array().parse(await messagesResponse.json()).length).toBeGreaterThan(0);
+    const messages = canonicalMessageSummarySchema.array().parse(await messagesResponse.json());
+    expect(messages.length).toBeGreaterThan(0);
+    const readResponse = await client.api.messages.read.$post({ json: { references: [messages[0]!.ref] } });
+    const details = canonicalMessageDetailSchema.array().parse(await readResponse.json());
+    expect(details[0]).toMatchObject({ canonicalId: messages[0]!.canonicalId, ref: messages[0]!.ref });
     store.close();
   });
 

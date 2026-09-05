@@ -5,8 +5,8 @@ import {
   accountSettingsSchema,
   connectionTestResultSchema,
   folderSchema,
+  canonicalMessageDetailSchema,
   canonicalMessageSummarySchema,
-  messageDetailSchema,
   operationBatchSchema,
   proposalSchema,
   sendReceiptSchema,
@@ -18,8 +18,8 @@ import {
   type DeleteFolderInput,
   type DirectActionInput,
   type Folder,
+  type CanonicalMessageDetail,
   type CanonicalMessageSummary,
-  type MessageDetail,
   type MessageRef,
   type OperationBatch,
   type Proposal,
@@ -130,8 +130,8 @@ export const api = {
       withSignal(signal),
     );
   },
-  readMessages: (references: readonly MessageRef[], signal?: AbortSignal): Promise<MessageDetail[]> =>
-    request("/messages/read", messageDetailSchema.array(), {
+  readMessages: (references: readonly MessageRef[], signal?: AbortSignal): Promise<CanonicalMessageDetail[]> =>
+    request("/messages/read", canonicalMessageDetailSchema.array(), {
       method: "POST",
       ...jsonBody({ references }),
       ...withSignal(signal),

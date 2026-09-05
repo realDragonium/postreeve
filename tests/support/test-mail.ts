@@ -52,7 +52,9 @@ interface TestHarnessOptions {
   imapFailure?: Error;
   smtpFailure?: Error;
   duplicateDelivery?: boolean;
+  archiveDelivery?: boolean;
   missingMessageId?: boolean;
+  readOverrides?: Partial<MessageDetail>;
 }
 
 export async function createTestHarness(options: TestHarnessOptions = {}) {
@@ -79,7 +81,9 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
         accountId,
         options.imapFailure,
         options.duplicateDelivery ?? false,
+        options.archiveDelivery ?? false,
         options.missingMessageId ?? false,
+        options.readOverrides ?? {},
       );
       providers.set(accountId, provider);
       return provider;
@@ -107,16 +111,20 @@ class TestMailProvider implements MailProvider {
   ]);
   readonly #verificationFailure: Error | undefined;
   readonly #moveChangesUid: boolean;
+  readonly #readOverrides: Partial<MessageDetail>;
 
   constructor(
     accountId: string,
     verificationFailure: Error | undefined,
     duplicateDelivery: boolean,
+    archiveDelivery: boolean,
     missingMessageId: boolean,
+    readOverrides: Partial<MessageDetail>,
   ) {
     this.#accountId = accountId;
-    this.#messages = testMessages(accountId, duplicateDelivery);
+    this.#messages = testMessages(accountId, duplicateDelivery, archiveDelivery);
     this.#moveChangesUid = missingMessageId;
+    this.#readOverrides = structuredClone(readOverrides);
     if (missingMessageId) {
       this.#messages[0]!.messageId = "missing-message-id";
       this.#messages[0]!.inReplyTo = "<parent@example.test>";
@@ -182,7 +190,7 @@ class TestMailProvider implements MailProvider {
     return references.map((reference) => {
       const message = this.#find(reference);
       if (!message) throw new Error(`Message UID ${reference.uid} is stale or missing`);
-      return toDetail(message);
+      return { ...toDetail(message), ...structuredClone(this.#readOverrides) };
     });
   }
 
@@ -324,7 +332,7 @@ function toDetail(message: TestMessage): MessageDetail {
   return structuredClone(detail);
 }
 
-function testMessages(accountId: string, duplicateDelivery: boolean): TestMessage[] {
+function testMessages(accountId: string, duplicateDelivery: boolean, archiveDelivery: boolean): TestMessage[] {
   const ref = (uid: number): MessageRef => ({ accountId, mailbox: "INBOX", uidValidity, uid, modseq: "1" });
   const recipient = [{ name: "Test user", address: "person@example.test" }];
   const messages: TestMessage[] = [
@@ -354,6 +362,17 @@ function testMessages(accountId: string, duplicateDelivery: boolean): TestMessag
       read: true,
       flagged: false,
       preview: "Duplicate provider delivery with different mutable flags.",
+    });
+  }
+  if (archiveDelivery) {
+    messages.push({
+      ...structuredClone(messages[0]!),
+      ref: { accountId, mailbox: "Archive", uidValidity, uid: 105, modseq: "3", providerId: "archive-copy-105" },
+      mailbox: "Archive",
+      text: "Archived full body.",
+      html: "<p>Archived full body.</p>",
+      read: true,
+      flagged: false,
     });
   }
   return messages;
