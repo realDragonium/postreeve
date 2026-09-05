@@ -31,7 +31,7 @@ import type {
   ProviderMessageDetail,
   ProviderMessageSummary,
 } from "./provider";
-import { normalizeMessageIdLists } from "./message-id";
+import { normalizeIdentificationFields } from "./message-id";
 
 export interface ImapAccountConfig {
   accountId: string;
@@ -601,13 +601,22 @@ function toSummary(
     ?.toISOString() ?? null;
   const deliveredTo = deliveryAddresses(parsed);
   const threading = threadingHeaders ?? parsed;
-  const rawMessageId = rawHeaderValues(threading, "message-id").join(" ");
-  const rawInReplyTo = rawHeaderValues(threading, "in-reply-to").join(" ");
+  const rawMessageIds = rawHeaderValues(threading, "message-id");
+  const rawInReplyTo = rawHeaderValues(threading, "in-reply-to");
+  const identification = normalizeIdentificationFields({
+    messageId: rawMessageIds.length > 0 || !message.envelope?.messageId
+      ? rawMessageIds
+      : [message.envelope.messageId],
+    inReplyTo: rawInReplyTo.length > 0 || !message.envelope?.inReplyTo
+      ? rawInReplyTo
+      : [message.envelope.inReplyTo],
+    references: rawHeaderValues(threading, "references"),
+  });
   return {
     ref: referenceFor(accountId, mailboxPath, mailbox, message),
-    messageId: rawMessageId || message.envelope?.messageId || "",
-    inReplyTo: rawInReplyTo || message.envelope?.inReplyTo || null,
-    references: normalizeMessageIdLists(rawHeaderValues(threading, "references")),
+    messageId: identification.messageId ?? "",
+    inReplyTo: identification.inReplyTo,
+    references: identification.references,
     subject: message.envelope?.subject ?? parsed?.subject ?? "(no subject)",
     from: message.envelope?.from?.map(toEnvelopeAddress) ?? parsedAddresses(parsed?.from?.value),
     to: message.envelope?.to?.map(toEnvelopeAddress) ?? parsedAddresses(flattenAddresses(parsed?.to)),

@@ -27,6 +27,7 @@ import { canonicalConversationSchema, type MessageRef } from "../src/shared/cont
 import { PostreeveService } from "../src/server/core/postreeve";
 import { CredentialVault } from "../src/server/security/credentials";
 import { createApi } from "../src/server/api";
+import { repeatedIdentification } from "./fixtures/repeated-identification";
 
 interface StoredMailbox {
   path: string;
@@ -193,26 +194,22 @@ describe("Bun IMAP compatibility", () => {
       .every(({ source }) => typeof source === "object" && source.maxLength === 64 * 1024)).toBe(true);
   });
 
-  test("returns every raw IMAP multi-parent conversation member through the public API", async () => {
+  test("keeps repeated raw IMAP fields stable through reread and the public conversation API", async () => {
     const state = fakeState();
     const inbox = state.mailboxes.get("INBOX");
     if (!inbox) throw new Error("Expected test inbox");
     inbox.messages.clear();
     for (const uid of [1, 2, 3]) {
       const message = fakeMessage(uid, BigInt(uid), "Thread", "Body", new Set());
-      const inReplyTo = uid === 3
-        ? "Your messages of Friday <message-1@example.test> and Saturday <message-2@example.test>"
-        : undefined;
+      const parentId = uid === 1 ? "parent-a" : "parent-b";
       const { inReplyTo: _existing, ...envelope } = message.envelope!;
       inbox.messages.set(uid, {
         ...message,
-        envelope: { ...envelope, ...(inReplyTo ? { inReplyTo } : {}) },
-        source: Buffer.from([
+        envelope,
+        source: Buffer.from(uid === 3 ? repeatedIdentification.raw : [
           "From: Sender <sender@example.test>",
           "To: Human <human@example.test>",
-          `Message-ID: <message-${uid}@example.test>`,
-          ...(inReplyTo ? [`In-Reply-To: ${inReplyTo}`] : []),
-          ...(inReplyTo ? [`References: First <message-1@example.test> then <message-2@example.test>`] : []),
+          `Message-ID: <${parentId}@example.test>`,
           "Subject: Thread",
           "Date: Fri, 29 Aug 2025 12:00:00 +0000",
           "Content-Type: text/plain; charset=utf-8",
@@ -222,6 +219,21 @@ describe("Bun IMAP compatibility", () => {
       });
     }
     const provider = new ImapMailProvider(config, fakeFactory(state));
+    const providerSummaries = await provider.listMessages(config.accountId, "INBOX", 50);
+    const childSummary = providerSummaries.find(({ ref }) => ref.uid === 3);
+    if (!childSummary) throw new Error("Expected IMAP child summary");
+    const [childDetail] = await provider.readMessages(config.accountId, [childSummary.ref]);
+    if (!childDetail) throw new Error("Expected IMAP child detail");
+    expect(toCanonicalObservation("tenant-a", "imap", childSummary)).toMatchObject({
+      messageId: repeatedIdentification.normalizedMessageId,
+      inReplyTo: repeatedIdentification.normalizedInReplyTo,
+      references: repeatedIdentification.normalizedReferences,
+    });
+    expect(toCanonicalObservation("tenant-a", "imap", childDetail)).toMatchObject({
+      messageId: repeatedIdentification.normalizedMessageId,
+      inReplyTo: repeatedIdentification.normalizedInReplyTo,
+      references: repeatedIdentification.normalizedReferences,
+    });
     const providers = new MailProviderRegistry();
     providers.register(config.accountId, provider);
     const store = new Store(":memory:");
@@ -247,11 +259,11 @@ describe("Bun IMAP compatibility", () => {
 
       expect(response.status).toBe(200);
       expect(conversation.messages.map(({ messageId }) => messageId)).toEqual([
-        "<message-1@example.test>", "<message-2@example.test>", "<message-3@example.test>",
+        "<parent-a@example.test>", "<parent-b@example.test>", repeatedIdentification.normalizedMessageId,
       ]);
       expect(conversation.messages[2]).toMatchObject({
-        inReplyTo: "<message-1@example.test> <message-2@example.test>",
-        references: ["<message-1@example.test>", "<message-2@example.test>"],
+        inReplyTo: repeatedIdentification.normalizedInReplyTo,
+        references: repeatedIdentification.normalizedReferences,
       });
     } finally {
       store.close();
@@ -903,7 +915,7 @@ function selectedHeaders(source: Buffer, names: readonly string[]): Buffer {
       continue;
     }
     const separator = line.indexOf(":");
-    currentSelected = separator >= 0 && selected.has(line.slice(0, separator).toLowerCase());
+    currentSelected = separator >= 0 && selected.has(line.slice(0, separator).trim().toLowerCase());
     if (currentSelected) headers.push(line);
   }
   return Buffer.from(`${headers.join("\r\n")}\r\n\r\n`);

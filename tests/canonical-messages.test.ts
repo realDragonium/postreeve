@@ -2,7 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { CanonicalMessageObservation, CanonicalMessageSummary, MessageSummary } from "../src/shared/contracts";
 import { uniqueCanonicalMessages } from "../src/shared/canonical-messages";
 import { Store } from "../src/server/db/store";
-import { normalizeMessageId, normalizeMessageIdList } from "../src/server/mail/message-id";
+import {
+  normalizeIdentificationFields,
+  normalizeMessageId,
+  normalizeMessageIdList,
+} from "../src/server/mail/message-id";
 import { toCanonicalObservation, type ProviderMessageSummary } from "../src/server/mail/provider";
 
 const stores: Store[] = [];
@@ -1069,6 +1073,81 @@ test("normalizes surrounding RFC 5322 CFWS without accepting malformed or multip
   }
 });
 
+test("normalizes modern and obsolete RFC 5322 Message-ID lexical forms", () => {
+  const control = String.fromCharCode(1);
+  expect(normalizeMessageId("<foo . bar@example.test>")).toBe("<foo.bar@example.test>");
+  expect(normalizeMessageId("<foo@(comment) example.test>")).toBe("<foo@example.test>");
+  expect(normalizeMessageId('<"foo".bar@example.test>')).toBe('<"foo".bar@example.test>');
+  expect(normalizeMessageId("(outer (nested\\) comment)) <foo(comment).bar@(domain)Example.(part)Test>"))
+    .toBe("<foo.bar@example.test>");
+  expect(normalizeMessageId('<"folded\r\n local"@[IPv6:ABCD\r\n ::1]>'))
+    .toBe('<"folded local"@[ipv6:abcd ::1]>');
+  expect(normalizeMessageId('<"obsolete \r\n \r\n folding"@Example.Test>'))
+    .toBe('<"obsolete   folding"@example.test>');
+  expect(normalizeMessageId(`<"quoted\\${control}pair"@[literal${control}text]>`))
+    .toBe(`<"quoted\\${control}pair"@[literal${control}text]>`);
+
+  for (const malformed of [
+    "<foo..bar@example.test>",
+    "<foo@exam ple.test>",
+    "<foo@@example.test>",
+    "<foo@example.test",
+    "foo@example.test>",
+    '<"unterminated@example.test>',
+    "<foo@[unterminated>",
+    "<foo@example.test> trailing",
+    "<foo@éxample.test>",
+    "<foo\n@example.test>",
+    '<"two\r\n \r\n folds"@example.test>',
+    "<foo@(unterminated example.test>",
+    `<foo@exam${String.fromCharCode(0)}ple.test>`,
+    '<foo@"quoted">',
+    '<foo@example."quoted">',
+    '<foo@"quoted".example>',
+  ]) {
+    expect(normalizeMessageId(malformed)).toBeNull();
+  }
+});
+
+test("parses deeply nested comments without recursion", () => {
+  const depth = 100_000;
+  const balanced = `${"(".repeat(depth)}${")".repeat(depth)}<foo@example.test>`;
+  const malformed = `${"(".repeat(depth)}${")".repeat(depth - 1)}<foo@example.test>`;
+
+  expect(normalizeMessageId(balanced)).toBe("<foo@example.test>");
+  expect(normalizeMessageId(malformed)).toBeNull();
+  expect(normalizeMessageIdList(balanced)).toEqual(["<foo@example.test>"]);
+  expect(normalizeMessageIdList(malformed)).toEqual([]);
+});
+
+test("applies one deterministic policy to repeated identification fields", () => {
+  expect(normalizeIdentificationFields({
+    messageId: ["<same@example.test>", "<same@example.test>"],
+    inReplyTo: ["First <parent-a@example.test>", "bad, <discarded@example.test>", "", "<parent-b@example.test>"],
+    references: ["<root@example.test>", "bad, <discarded@example.test>", "", "<root@example.test> <parent-a@example.test>"],
+  })).toEqual({
+    messageId: null,
+    messageIdPresent: true,
+    inReplyTo: "First <parent-a@example.test> <parent-b@example.test>",
+    references: ["<root@example.test>", "<parent-a@example.test>"],
+  });
+  expect(normalizeIdentificationFields({
+    messageId: ["malformed", "<valid@example.test>"],
+    inReplyTo: [],
+    references: [],
+  }).messageId).toBeNull();
+  expect(normalizeIdentificationFields({
+    messageId: ["", ""],
+    inReplyTo: [],
+    references: [],
+  })).toMatchObject({ messageId: null, messageIdPresent: true });
+  expect(normalizeIdentificationFields({
+    messageId: [],
+    inReplyTo: [],
+    references: [],
+  })).toEqual({ messageId: null, messageIdPresent: false, inReplyTo: null, references: [] });
+});
+
 test("normalizes complete RFC 5322 Message-ID lists without extracting from malformed input", () => {
   expect(normalizeMessageIdList(
     '(first) <"quoted local"@Example.Test>\r\n\t(second) <local@[IPv6:2001:DB8::1]> <"quoted local"@Example.Test>',
@@ -1088,6 +1167,9 @@ test("normalizes complete RFC 5322 Message-ID lists without extracting from malf
     "<one@example.test> (unterminated <fake@example.test>",
     "<one@example.test> illegal @ phrase",
     "<one@example.test> unbalanced <fragment",
+    '<one@"quoted">',
+    '<one@example."quoted">',
+    '<one@"quoted".example>',
   ]) {
     expect(normalizeMessageIdList(malformed)).toEqual([]);
   }

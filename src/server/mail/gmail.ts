@@ -18,7 +18,7 @@ import type {
   ProviderMessageDetail,
   ProviderMessageSummary,
 } from "./provider";
-import { normalizeMessageIdList, normalizeMessageIdLists } from "./message-id";
+import { normalizeIdentificationFields } from "./message-id";
 import type { MailSender } from "./sender";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -401,14 +401,20 @@ function folderOrder(left: Folder, right: Folder): number {
 }
 
 function toSummary(accountId: string, mailbox: string, message: z.infer<typeof gmailMessageSchema>): ProviderMessageSummary {
-  const headers = new Map((message.payload?.headers ?? []).map(({ name, value }) => [name.toLocaleLowerCase(), value]));
+  const headerList = message.payload?.headers ?? [];
+  const headers = new Map(headerList.map(({ name, value }) => [name.trim().toLocaleLowerCase(), value]));
+  const identification = normalizeIdentificationFields({
+    messageId: headerValues(headerList, "message-id"),
+    inReplyTo: headerValues(headerList, "in-reply-to"),
+    references: headerValues(headerList, "references"),
+  });
   const canonicalReceivedAt = receivedAt(message, headers.get("date"));
   return {
     ...(message.threadId ? { providerConversationId: message.threadId } : {}),
     ref: toReference(accountId, mailbox, message),
-    messageId: headers.get("message-id") ?? message.id,
-    inReplyTo: headers.get("in-reply-to") ?? null,
-    references: parseReferences(headers.get("references")),
+    messageId: identification.messageId ?? (identification.messageIdPresent ? "" : message.id),
+    inReplyTo: identification.inReplyTo,
+    references: identification.references,
     subject: headers.get("subject") ?? "(no subject)",
     from: parseAddresses(headers.get("from")),
     to: parseAddresses(headers.get("to")),
@@ -432,30 +438,24 @@ function toDetail(
     ...message,
     payload: {
       headers: [
-        ["Subject", parsed.subject],
-        ["From", parsed.from?.text],
-        ["To", addressText(parsed.to)],
-        ["Cc", addressText(parsed.cc)],
-        ["Delivered-To", headerString(parsed, "delivered-to")],
-        ["Message-ID", rawHeaderValues(parsed, "message-id").join(" ")],
-        ["In-Reply-To", rawHeaderValues(parsed, "in-reply-to").join(" ")],
-        ["Date", rawHeaderValue(parsed, "date")],
-      ].flatMap(([name, value]) => value ? [{ name: name!, value }] : []),
+        ...optionalHeader("Subject", parsed.subject),
+        ...optionalHeader("From", parsed.from?.text),
+        ...optionalHeader("To", addressText(parsed.to)),
+        ...optionalHeader("Cc", addressText(parsed.cc)),
+        ...optionalHeader("Delivered-To", headerString(parsed, "delivered-to")),
+        ...optionalHeader("Date", rawHeaderValue(parsed, "date")),
+        ...identificationHeaderEntries(parsed),
+      ],
     },
   });
   return {
     ...summary,
-    references: parsedReferences(parsed),
     from: flattenAddresses(parsed.from).map(toAddress),
     to: flattenAddresses(parsed.to).map(toAddress),
     cc: flattenAddresses(parsed.cc).map(toAddress),
     text: parsed.text ?? "",
     html: typeof parsed.html === "string" ? parsed.html : null,
   };
-}
-
-function parseReferences(value?: string): string[] {
-  return normalizeMessageIdList(value);
 }
 
 function toReference(accountId: string, mailbox: string, message: z.infer<typeof gmailMessageSchema>): MessageRef {
@@ -533,8 +533,23 @@ function rawHeaderValues(parsed: ParsedMail, name: string): string[] {
     });
 }
 
-function parsedReferences(parsed: ParsedMail): string[] {
-  return normalizeMessageIdLists(rawHeaderValues(parsed, "references"));
+function headerValues(headers: readonly { name: string; value: string }[], name: string): string[] {
+  return headers
+    .filter((header) => header.name.trim().toLowerCase() === name)
+    .map(({ value }) => value);
+}
+
+function identificationHeaderEntries(parsed: ParsedMail): Array<{ name: string; value: string }> {
+  const names: ReadonlyArray<readonly [string, string]> = [
+    ["Message-ID", "message-id"],
+    ["In-Reply-To", "in-reply-to"],
+    ["References", "references"],
+  ];
+  return names.flatMap(([name, key]) => rawHeaderValues(parsed, key).map((value) => ({ name, value })));
+}
+
+function optionalHeader(name: string, value: string | undefined): Array<{ name: string; value: string }> {
+  return value ? [{ name, value }] : [];
 }
 
 function isEmail(value: string): boolean {
