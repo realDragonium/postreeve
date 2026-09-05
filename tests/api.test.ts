@@ -4,6 +4,7 @@ import {
   accountSchema,
   canonicalMessageDetailSchema,
   canonicalMessageSummarySchema,
+  canonicalConversationSchema,
   folderSchema,
   messageSummarySchema,
   proposalSchema,
@@ -39,6 +40,11 @@ describe("Hono RPC API", () => {
     const readResponse = await client.api.messages.read.$post({ json: { references: [messages[0]!.ref] } });
     const details = canonicalMessageDetailSchema.array().parse(await readResponse.json());
     expect(details[0]).toMatchObject({ canonicalId: messages[0]!.canonicalId, ref: messages[0]!.ref });
+    const conversationResponse = await client.api.conversations[":conversationId"].$get({
+      param: { conversationId: messages[0]!.conversationId },
+    });
+    const conversation = canonicalConversationSchema.parse(await conversationResponse.json());
+    expect(conversation.messages.map(({ id }) => id)).toContain(messages[0]!.canonicalId);
     store.close();
   });
 

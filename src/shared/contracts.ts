@@ -80,12 +80,14 @@ export const messageSummarySchema = z.object({
 
 export const canonicalMessageSummarySchema = messageSummarySchema.required({ canonicalId: true }).extend({
   canonicalAliases: z.array(z.string().min(1)).default([]),
+  conversationId: z.string().min(1),
 });
 
 export const mailProviderKindSchema = z.enum(["imap", "gmail"]);
 
 export const canonicalMessageObservationSchema = z.object({
   tenantId: z.string().min(1),
+  receivedAt: z.iso.datetime().nullable().default(null),
   messageId: z.string().nullable(),
   inReplyTo: z.string().nullable(),
   references: z.array(z.string()),
@@ -105,10 +107,12 @@ export const canonicalMessageObservationSchema = z.object({
 export const canonicalMessageSchema = z.object({
   id: z.string().min(1),
   aliases: z.array(z.string().min(1)),
+  conversationId: z.string().min(1),
   tenantId: z.string().min(1),
   messageId: z.string().nullable(),
   inReplyTo: z.string().nullable(),
   references: z.array(z.string()),
+  receivedAt: z.iso.datetime().nullable(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
 });
@@ -120,6 +124,16 @@ export const messageDetailSchema = messageSummarySchema.extend({
 
 export const canonicalMessageDetailSchema = messageDetailSchema.required({ canonicalId: true }).extend({
   canonicalAliases: z.array(z.string().min(1)).default([]),
+  conversationId: z.string().min(1),
+});
+
+export const canonicalConversationSchema = z.object({
+  id: z.string().min(1),
+  aliases: z.array(z.string().min(1)),
+  tenantId: z.string().min(1),
+  messages: z.array(canonicalMessageSchema),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
 });
 
 export const triageActionSchema = z.discriminatedUnion("type", [
@@ -275,8 +289,9 @@ export type CanonicalMessageSummary = z.infer<typeof canonicalMessageSummarySche
 export type MessageDetail = z.infer<typeof messageDetailSchema>;
 export type CanonicalMessageDetail = z.infer<typeof canonicalMessageDetailSchema>;
 export type MailProviderKind = z.infer<typeof mailProviderKindSchema>;
-export type CanonicalMessageObservation = z.infer<typeof canonicalMessageObservationSchema>;
+export type CanonicalMessageObservation = z.input<typeof canonicalMessageObservationSchema>;
 export type CanonicalMessage = z.infer<typeof canonicalMessageSchema>;
+export type CanonicalConversation = z.infer<typeof canonicalConversationSchema>;
 export type TriageAction = z.infer<typeof triageActionSchema>;
 export type ProposalItem = z.infer<typeof proposalItemSchema>;
 export type Proposal = z.infer<typeof proposalSchema>;

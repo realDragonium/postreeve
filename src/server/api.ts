@@ -23,6 +23,7 @@ import type { GoogleOAuth } from "./google/oauth";
 const accountParamsSchema = z.object({ accountId: accountIdSchema });
 const proposalParamsSchema = z.object({ proposalId: proposalIdSchema });
 const batchParamsSchema = z.object({ batchId: batchIdSchema });
+const conversationParamsSchema = z.object({ conversationId: z.string().min(1) });
 const messageQuerySchema = z.object({
   mailbox: z.string().min(1),
   query: z.string().max(200).optional(),
@@ -130,6 +131,8 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
     )
     .post("/messages/read", zValidator("json", readMessagesSchema), async (context) =>
       context.json(await service.readMessages(context.req.valid("json").references)))
+    .get("/conversations/:conversationId", zValidator("param", conversationParamsSchema), async (context) =>
+      context.json(await service.getConversation(context.req.valid("param").conversationId)))
     .post("/messages/send", zValidator("json", sendMessageInputSchema), async (context) =>
       context.json(await service.sendMessage(context.req.valid("json")), 201))
     .post("/messages/actions", zValidator("json", directActionInputSchema), async (context) =>

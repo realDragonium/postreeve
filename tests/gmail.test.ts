@@ -105,10 +105,12 @@ describe("Gmail compatibility", () => {
     expect(page.complete).toBe(false);
     expect(summaries[0]?.subject).toBe("Gmail test");
     expect(summaries[0]?.ref.providerId).toBe("18fabc123");
+    expect(summaries[0]?.providerConversationId).toBe("thread-1");
     expect(summaries[0]?.inReplyTo).toBe("<parent@example.test>");
     expect(summaries[0]?.references).toEqual(["<root@example.test>", "<parent@example.test>"]);
     const details = await client.readMessages(account.id, [summaries[0]!.ref]);
     expect(details[0]?.text.trim()).toBe("Hello from Gmail.");
+    expect(details[0]?.providerConversationId).toBe("thread-1");
     expect(details[0]?.html).toContain("data:image/png;base64,");
     const applied = await client.apply(summaries[0]!.ref, { type: "mark_read" });
     expect(applied.previousRead).toBe(false);
@@ -130,6 +132,7 @@ describe("Gmail compatibility", () => {
     function message(extra: Record<string, unknown> = {}) {
       return {
         id: "18fabc123",
+        threadId: "thread-1",
         labelIds,
         snippet: "Hello from Gmail.",
         historyId: String(historyId),
@@ -186,6 +189,7 @@ describe("Gmail compatibility", () => {
 
     expect(detail?.inReplyTo).toBe("<parent@example.test>");
     expect(detail?.references).toEqual(["<root@example.test>", "<parent@example.test>"]);
+    expect(detail?.providerConversationId).toBeUndefined();
   });
 
   test("uses a state-bound PKCE desktop authorization flow", async () => {

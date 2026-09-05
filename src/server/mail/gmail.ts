@@ -3,16 +3,21 @@ import { z, type ZodType } from "zod";
 import type {
   Account,
   Folder,
-  MessageDetail,
   MessageRef,
-  MessageSummary,
   OutboundAddress,
   SendMessageInput,
   SendReceipt,
   TriageAction,
 } from "../../shared/contracts";
 import type { GmailAccountCredentials } from "../security/credentials";
-import type { AppliedMailAction, MailboxPage, MailProvider, ProviderLocationMove } from "./provider";
+import type {
+  AppliedMailAction,
+  MailboxPage,
+  MailProvider,
+  ProviderLocationMove,
+  ProviderMessageDetail,
+  ProviderMessageSummary,
+} from "./provider";
 import type { MailSender } from "./sender";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -38,7 +43,7 @@ const messageListSchema = z.object({
 });
 const gmailMessageSchema = z.object({
   id: z.string().min(1),
-  threadId: z.string().optional(),
+  threadId: z.string().min(1).optional(),
   labelIds: z.array(z.string()).default([]),
   snippet: z.string().default(""),
   historyId: z.string().min(1).optional(),
@@ -133,7 +138,7 @@ export class GmailMailClient implements MailProvider, MailSender {
     await this.#request(`/labels/${encodeURIComponent(path)}`, z.null(), { method: "DELETE" });
   }
 
-  async listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]> {
+  async listMessages(accountId: string, mailbox: string, limit: number): Promise<ProviderMessageSummary[]> {
     return (await this.listMessagePage(accountId, mailbox, limit)).messages;
   }
 
@@ -142,12 +147,12 @@ export class GmailMailClient implements MailProvider, MailSender {
     return this.#listPage(mailbox, "", limit);
   }
 
-  async searchMessages(accountId: string, mailbox: string, query: string, limit: number): Promise<MessageSummary[]> {
+  async searchMessages(accountId: string, mailbox: string, query: string, limit: number): Promise<ProviderMessageSummary[]> {
     this.#assertAccount(accountId);
     return (await this.#listPage(mailbox, query.trim(), limit)).messages;
   }
 
-  async readMessages(accountId: string, references: MessageRef[]): Promise<MessageDetail[]> {
+  async readMessages(accountId: string, references: MessageRef[]): Promise<ProviderMessageDetail[]> {
     this.#assertAccount(accountId);
     return Promise.all(references.map(async (reference) => {
       this.#assertReference(reference);
@@ -394,9 +399,10 @@ function folderOrder(left: Folder, right: Folder): number {
   return order.indexOf(left.specialUse) - order.indexOf(right.specialUse) || left.name.localeCompare(right.name);
 }
 
-function toSummary(accountId: string, mailbox: string, message: z.infer<typeof gmailMessageSchema>): MessageSummary {
+function toSummary(accountId: string, mailbox: string, message: z.infer<typeof gmailMessageSchema>): ProviderMessageSummary {
   const headers = new Map((message.payload?.headers ?? []).map(({ name, value }) => [name.toLocaleLowerCase(), value]));
   return {
+    ...(message.threadId ? { providerConversationId: message.threadId } : {}),
     ref: toReference(accountId, mailbox, message),
     messageId: headers.get("message-id") ?? message.id,
     inReplyTo: headers.get("in-reply-to") ?? null,
@@ -418,7 +424,7 @@ function toDetail(
   mailbox: string,
   message: z.infer<typeof gmailMessageSchema>,
   parsed: ParsedMail,
-): MessageDetail {
+): ProviderMessageDetail {
   const summary = toSummary(accountId, mailbox, {
     ...message,
     payload: {

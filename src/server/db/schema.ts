@@ -57,11 +57,82 @@ export const messages = sqliteTable("messages", {
   messageId: text("message_id"),
   inReplyTo: text("in_reply_to"),
   references: text("references", { mode: "json" }).$type<string[]>().notNull(),
+  receivedAt: text("received_at"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 }, (table) => [
   uniqueIndex("messages_tenant_id_id_unique").on(table.tenantId, table.id),
   uniqueIndex("messages_tenant_id_identity_key_unique").on(table.tenantId, table.identityKey),
+]);
+
+export const conversations = sqliteTable("conversations", {
+  id: text("id").primaryKey(),
+  tenantId: text("tenant_id").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [
+  uniqueIndex("conversations_tenant_id_id_unique").on(table.tenantId, table.id),
+]);
+
+export const conversationMessages = sqliteTable("conversation_messages", {
+  tenantId: text("tenant_id").notNull(),
+  conversationId: text("conversation_id").notNull(),
+  messageId: text("message_id").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.tenantId, table.messageId] }),
+  foreignKey({
+    columns: [table.tenantId, table.conversationId],
+    foreignColumns: [conversations.tenantId, conversations.id],
+  }),
+  foreignKey({
+    columns: [table.tenantId, table.messageId],
+    foreignColumns: [messages.tenantId, messages.id],
+  }),
+  index("conversation_messages_conversation_id_idx").on(table.conversationId),
+]);
+
+export const conversationAliases = sqliteTable("conversation_aliases", {
+  aliasId: text("alias_id").notNull(),
+  tenantId: text("tenant_id").notNull(),
+  conversationId: text("conversation_id").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.tenantId, table.aliasId] }),
+  foreignKey({
+    columns: [table.tenantId, table.conversationId],
+    foreignColumns: [conversations.tenantId, conversations.id],
+  }),
+  index("conversation_aliases_conversation_id_idx").on(table.conversationId),
+]);
+
+export const messageProviderConversations = sqliteTable("message_provider_conversations", {
+  tenantId: text("tenant_id").notNull(),
+  accountId: text("account_id").notNull().references(() => accounts.id),
+  provider: text("provider", { enum: ["imap", "gmail"] }).notNull(),
+  providerConversationId: text("provider_conversation_id").notNull(),
+  messageId: text("message_id").notNull(),
+}, (table) => [
+  primaryKey({ columns: [
+    table.tenantId, table.accountId, table.provider, table.providerConversationId, table.messageId,
+  ] }),
+  foreignKey({
+    columns: [table.tenantId, table.messageId],
+    foreignColumns: [messages.tenantId, messages.id],
+  }),
+  index("message_provider_conversations_message_id_idx").on(table.messageId),
+]);
+
+export const messageThreadEdges = sqliteTable("message_thread_edges", {
+  tenantId: text("tenant_id").notNull(),
+  messageId: text("message_id").notNull(),
+  referencedMessageId: text("referenced_message_id").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.tenantId, table.messageId, table.referencedMessageId] }),
+  foreignKey({
+    columns: [table.tenantId, table.messageId],
+    foreignColumns: [messages.tenantId, messages.id],
+  }),
+  index("message_thread_edges_reference_idx").on(table.tenantId, table.referencedMessageId),
 ]);
 
 export const messageAliases = sqliteTable("message_aliases", {

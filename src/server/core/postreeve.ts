@@ -1,6 +1,7 @@
 import type {
   Account,
   AccountSettings,
+  CanonicalConversation,
   CanonicalMessageDetail,
   CanonicalMessageSummary,
   CreateAccountInput,
@@ -11,7 +12,6 @@ import type {
   Folder,
   ListMessagesInput,
   MessageRef,
-  MessageSummary,
   OperationBatch,
   OperationResult,
   Proposal,
@@ -38,6 +38,7 @@ import {
   toCanonicalObservation,
   type MailProvider,
   type ProviderLocationMove,
+  type ProviderMessageSummary,
 } from "../mail/provider";
 import { MailSenderRegistry, type MailSender } from "../mail/sender";
 import {
@@ -264,6 +265,12 @@ export class PostreeveService {
     return this.#persistObservedMessages(account, input.mailbox, messages, false);
   }
 
+  async getConversation(id: string): Promise<CanonicalConversation> {
+    const conversation = await this.#store.getConversation(this.#context.tenantId, id);
+    if (!conversation) throw new Error("Conversation not found");
+    return conversation;
+  }
+
   async readMessages(references: MessageRef[]): Promise<CanonicalMessageDetail[]> {
     if (references.length === 0) return [];
     const accountId = references[0]!.accountId;
@@ -302,7 +309,13 @@ export class PostreeveService {
       if (!observedId) throw new Error("Canonical read result is missing");
       const canonical = await this.#store.getMessage(this.#context.tenantId, observedId);
       if (!canonical) throw new Error("Canonical read message is missing");
-      return { ...detail, canonicalId: canonical.id, canonicalAliases: canonical.aliases };
+      const { providerConversationId: _providerConversationId, ...publicDetail } = detail;
+      return {
+        ...publicDetail,
+        canonicalId: canonical.id,
+        canonicalAliases: canonical.aliases,
+        conversationId: canonical.conversationId,
+      };
     }));
   }
 
@@ -523,7 +536,7 @@ export class PostreeveService {
   async #persistObservedMessages(
     account: StoredAccount,
     mailbox: string,
-    messages: MessageSummary[],
+    messages: ProviderMessageSummary[],
     authoritative: boolean,
   ): Promise<CanonicalMessageSummary[]> {
     const canonical = await this.#store.reconcileMailbox({
@@ -535,11 +548,15 @@ export class PostreeveService {
       authoritative,
     });
     if (canonical.length !== messages.length) throw new Error("Canonical reconciliation result count does not match observations");
-    return uniqueCanonicalMessages(messages.map((message, index) => ({
-      ...message,
-      canonicalId: canonical[index]!.id,
-      canonicalAliases: canonical[index]!.aliases,
-    })));
+    return uniqueCanonicalMessages(messages.map((message, index) => {
+      const { providerConversationId: _providerConversationId, ...publicMessage } = message;
+      return {
+        ...publicMessage,
+        canonicalId: canonical[index]!.id,
+        canonicalAliases: canonical[index]!.aliases,
+        conversationId: canonical[index]!.conversationId,
+      };
+    }));
   }
 
   #credentialsFor(account: StoredAccount): AccountCredentials {

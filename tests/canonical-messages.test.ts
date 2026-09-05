@@ -3,7 +3,7 @@ import type { CanonicalMessageObservation, CanonicalMessageSummary, MessageSumma
 import { uniqueCanonicalMessages } from "../src/shared/canonical-messages";
 import { Store } from "../src/server/db/store";
 import { normalizeMessageId } from "../src/server/mail/message-id";
-import { toCanonicalObservation } from "../src/server/mail/provider";
+import { toCanonicalObservation, type ProviderMessageSummary } from "../src/server/mail/provider";
 
 const stores: Store[] = [];
 
@@ -73,6 +73,22 @@ describe("canonical message persistence", () => {
     expect(repeated!.id).toBe(created!.id);
     expect(await store.listMessageLocations("tenant-a", created!.id)).toHaveLength(2);
     expect(repeated!.references).toEqual(first.references);
+  });
+
+  test("keeps the earliest valid canonical delivery timestamp", async () => {
+    const store = await createStore();
+    const later = observation({ receivedAt: "2026-09-03T12:00:00.000Z" });
+    await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [later], authoritative: false,
+    });
+    const [merged] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
+      observations: [{ ...later, receivedAt: "2026-09-02T12:00:00.000Z", location: {
+        ...later.location, accountId: "gmail-account", provider: "gmail", providerId: "gmail-timestamp",
+      } }], authoritative: false,
+    });
+    expect(merged?.receivedAt).toBe("2026-09-02T12:00:00.000Z");
   });
 
   test("deduplicates commented Message-IDs and retains commented threading identifiers", async () => {
@@ -311,6 +327,7 @@ describe("canonical message persistence", () => {
     expect(moved).toMatchObject({
       id: sourceCanonical!.id,
       aliases: [destinationFallback!.id],
+      conversationId: sourceCanonical!.conversationId,
       inReplyTo: "<parent@example.test>",
       references: ["<root@example.test>", "<parent@example.test>"],
     });
@@ -336,6 +353,7 @@ describe("canonical message persistence", () => {
       observations: [reversed], authoritative: true,
     });
     expect(restored!.id).toBe(sourceCanonical!.id);
+    expect(restored!.conversationId).toBe(sourceCanonical!.conversationId);
   });
 
   test("rejects known moves across boundaries or conflicting valid canonical IDs", async () => {
@@ -705,16 +723,205 @@ describe("canonical message persistence", () => {
     });
     expect(await store.listMessageLocations("tenant-a", reconciled[0]!.id)).toHaveLength(1);
   });
+
+  test("repairs a late IMAP parent into the child's stable conversation and orders the parent first", async () => {
+    const store = await createStore();
+    const child = observation({
+      messageId: "<child@example.test>",
+      inReplyTo: "<parent@example.test>",
+      references: ["<parent@example.test>"],
+    });
+    const [storedChild] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [child], authoritative: false,
+    });
+    const originalConversationId = storedChild!.conversationId;
+    const parent = observation({
+      messageId: "<parent@example.test>", inReplyTo: null, references: [],
+      location: { ...child.location, uid: 41 },
+    });
+    const [storedParent] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [parent], authoritative: false,
+    });
+
+    expect(storedParent!.conversationId).toBe(originalConversationId);
+    expect((await store.getMessage("tenant-a", storedChild!.id))!.conversationId).toBe(originalConversationId);
+    expect((await store.getConversation("tenant-a", originalConversationId))?.messages.map(({ messageId }) => messageId))
+      .toEqual(["<parent@example.test>", "<child@example.test>"]);
+  });
+
+  test("groups siblings through a shared unresolved RFC parent without crossing tenants", async () => {
+    const store = await createStore();
+    const sibling = (tenantId: string, uid: number, messageId: string): CanonicalMessageObservation => observation({
+      tenantId, messageId, inReplyTo: "<missing-parent@example.test>", references: [],
+      location: { ...observation().location, uid },
+    });
+    const [first] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [sibling("tenant-a", 51, "<sibling-a@example.test>")], authoritative: false,
+    });
+    const [second] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [sibling("tenant-a", 52, "<sibling-b@example.test>")], authoritative: false,
+    });
+    const [otherTenant] = await store.reconcileMailbox({
+      tenantId: "tenant-b", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [sibling("tenant-b", 53, "<sibling-c@example.test>")], authoritative: false,
+    });
+    expect(second!.conversationId).toBe(first!.conversationId);
+    expect(otherTenant!.conversationId).not.toBe(first!.conversationId);
+    const [parent] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [observation({ messageId: "<missing-parent@example.test>", inReplyTo: null, references: [],
+        location: { ...observation().location, uid: 54 } })], authoritative: false,
+    });
+    expect(parent!.conversationId).toBe(first!.conversationId);
+    expect((await store.getConversation("tenant-a", first!.conversationId))?.messages).toHaveLength(3);
+  });
+
+  test("keeps every conflicting observed parent as a durable conversation edge", async () => {
+    const store = await createStore();
+    const child = observation({ messageId: "<child-conflict@example.test>", inReplyTo: "<parent-b@example.test>", references: [] });
+    const [storedChild] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [child], authoritative: false,
+    });
+    await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [{ ...child, inReplyTo: "<parent-a@example.test>" }], authoritative: false,
+    });
+    const parents = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [
+        observation({ messageId: "<parent-a@example.test>", inReplyTo: null, references: [], location: { ...child.location, uid: 81 } }),
+        observation({ messageId: "<parent-b@example.test>", inReplyTo: null, references: [], location: { ...child.location, uid: 82 } }),
+      ], authoritative: false,
+    });
+    expect(new Set(parents.map(({ conversationId }) => conversationId)).size).toBe(1);
+    expect(parents[0]!.conversationId).toBe(storedChild!.conversationId);
+    expect((await store.getMessage("tenant-a", storedChild!.id))?.inReplyTo).toBe("<parent-a@example.test>");
+  });
+
+  test("retains conflicting parent edges and whole conversation membership through a move and account deletion", async () => {
+    const store = await createStore();
+    const member = (uid: number, token: string, mailbox = "INBOX"): CanonicalMessageObservation => observation({
+      messageId: null, inReplyTo: token, references: [],
+      location: { ...observation().location, mailbox, uid },
+    });
+    const [source, sourceSibling] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [member(61, "<thread-a@example.test>"), member(62, "<thread-a@example.test>")], authoritative: false,
+    });
+    const [destination, destinationSibling] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "Archive",
+      observations: [member(71, "<thread-b@example.test>", "Archive"), member(72, "<thread-b@example.test>", "Archive")],
+      authoritative: false,
+    });
+    const oldConversationIds = [source!.conversationId, destination!.conversationId];
+    await store.recordProviderMove("tenant-a", "imap", sourceLocation(61), {
+      ...sourceLocation(71), mailbox: "Archive",
+    });
+    const merged = await store.getConversation("tenant-a", source!.conversationId);
+    expect(new Set(merged?.messages.map(({ id }) => id))).toEqual(new Set([
+      source!.id, sourceSibling!.id, destinationSibling!.id,
+    ]));
+    expect((await store.getMessage("tenant-a", destination!.id))?.id).toBe(source!.id);
+    for (const id of oldConversationIds) expect((await store.getConversation("tenant-a", id))?.id).toBe(merged?.id);
+    await store.deleteAccount("imap-account");
+    expect((await store.getConversation("tenant-a", merged!.id))?.messages).toHaveLength(3);
+
+    function sourceLocation(uid: number) {
+      return { accountId: "imap-account", mailbox: "INBOX", uidValidity: "10", uid, modseq: "1" };
+    }
+  });
+
+  test("merges initially disconnected IMAP messages when threading headers arrive later", async () => {
+    const store = await createStore();
+    const first = observation({ messageId: "<first@example.test>", inReplyTo: null, references: [] });
+    const second = observation({
+      messageId: "<second@example.test>", inReplyTo: null, references: [],
+      location: { ...first.location, uid: 43 },
+    });
+    const [storedFirst, storedSecond] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [first, second], authoritative: false,
+    });
+    expect(storedFirst!.conversationId).not.toBe(storedSecond!.conversationId);
+    const disconnectedConversationId = storedSecond!.conversationId;
+
+    const [repaired] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [{ ...second, inReplyTo: "<first@example.test>", references: ["malformed", "<first@example.test>"] }],
+      authoritative: false,
+    });
+    const conversation = await store.getConversation("tenant-a", repaired!.conversationId);
+    expect(conversation?.messages.map(({ id }) => id)).toEqual([storedFirst!.id, storedSecond!.id]);
+    expect(conversation?.messages[1]?.references).toEqual(["<first@example.test>"]);
+    expect(await store.getConversation("tenant-a", disconnectedConversationId)).toEqual(conversation);
+    expect(await store.getConversation("tenant-b", disconnectedConversationId)).toBeNull();
+    const mergedAlias = [storedFirst!.conversationId, disconnectedConversationId]
+      .find((id) => id !== conversation?.id);
+    expect(conversation?.aliases).toContain(mergedAlias!);
+  });
+
+  test("maps opaque Gmail threads directly without crossing account or tenant boundaries", async () => {
+    const store = await createStore();
+    const gmail = (accountId: string, uid: number, providerId: string): CanonicalMessageObservation & {
+      providerConversationId: string;
+    } => ({
+      tenantId: "tenant-a", messageId: null, inReplyTo: null, references: [], providerConversationId: "thread-7",
+      location: { accountId, provider: "gmail", mailbox: "INBOX", uidValidity: "gmail", uid,
+        modseq: null, providerId, read: false, flagged: false },
+    });
+    const [first, duplicate] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
+      observations: [gmail("gmail-account", 1, "gmail-1"), gmail("gmail-account", 2, "gmail-2")],
+      authoritative: false,
+    });
+    const [otherAccount] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-other", provider: "gmail", mailbox: "INBOX",
+      observations: [gmail("gmail-other", 1, "gmail-3")], authoritative: false,
+    });
+
+    expect(duplicate!.conversationId).toBe(first!.conversationId);
+    expect((await store.getConversation("tenant-a", first!.conversationId))?.messages).toHaveLength(2);
+    expect(otherAccount!.conversationId).not.toBe(first!.conversationId);
+  });
+
+  test("keeps duplicate delivery singular and malformed or missing threading deterministic", async () => {
+    const store = await createStore();
+    const malformed = observation({ messageId: null, inReplyTo: "not-an-id", references: ["also invalid"] });
+    const [first] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [malformed], authoritative: false,
+    });
+    const [repeat] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [malformed], authoritative: false,
+    });
+    const [separate] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "Archive",
+      observations: [{ ...malformed, location: { ...malformed.location, mailbox: "Archive" } }], authoritative: false,
+    });
+
+    expect(repeat!.conversationId).toBe(first!.conversationId);
+    expect((await store.getConversation("tenant-a", first!.conversationId))?.messages).toHaveLength(1);
+    expect(separate!.conversationId).not.toBe(first!.conversationId);
+  });
 });
 
 test("provider summaries map identifiers, threading, location, and flags into the shared observation", () => {
-  const summary: MessageSummary = {
+  const summary: ProviderMessageSummary = {
     ref: { accountId: "gmail-account", mailbox: "INBOX", uidValidity: "gmail", uid: 7, modseq: "3", providerId: "gmail-id" },
     messageId: " <MESSAGE@Example.Test> ", inReplyTo: "<PARENT@Example.Test>", references: ["<ROOT@Example.Test>"],
     subject: "Subject", from: [], to: [], receivedAt: "2026-09-03T00:00:00.000Z", preview: "", read: true, flagged: false,
+    providerConversationId: "gmail-thread",
   };
   expect(toCanonicalObservation("tenant-a", "gmail", summary)).toEqual({
     tenantId: "tenant-a", messageId: "<MESSAGE@example.test>", inReplyTo: "<PARENT@example.test>", references: ["<ROOT@example.test>"],
+    receivedAt: "2026-09-03T00:00:00.000Z",
+    providerConversationId: "gmail-thread",
     location: { accountId: "gmail-account", provider: "gmail", mailbox: "INBOX", uidValidity: "gmail", uid: 7,
       modseq: "3", providerId: "gmail-id", read: true, flagged: false },
   });
@@ -762,6 +969,7 @@ test("canonical deduplication retains added aliases when invalid aliases keep th
   const summary = (canonicalAliases: string[]): CanonicalMessageSummary => ({
     canonicalId: "canonical",
     canonicalAliases,
+    conversationId: "conversation",
     ref: { accountId: "account", mailbox: "INBOX", uidValidity: "1", uid: 1, modseq: null },
     messageId: "<message@example.test>",
     subject: "Subject",

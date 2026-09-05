@@ -1,28 +1,34 @@
 import type {
   Folder,
-  MessageDetail,
   MessageRef,
   MessageSummary,
+  MessageDetail,
   CanonicalMessageObservation,
   MailProviderKind,
   TriageAction,
 } from "../../shared/contracts";
 import { normalizeMessageId } from "./message-id";
 
+export type ProviderMessageSummary = MessageSummary & { providerConversationId?: string };
+export type ProviderMessageDetail = MessageDetail & { providerConversationId?: string };
+export type ProviderMessageObservation = CanonicalMessageObservation & { providerConversationId?: string };
+
 export function toCanonicalObservation(
   tenantId: string,
   provider: MailProviderKind,
-  message: MessageSummary,
-): CanonicalMessageObservation {
+  message: ProviderMessageSummary,
+): ProviderMessageObservation {
   const messageId = normalizeMessageId(message.messageId);
   return {
     tenantId,
+    receivedAt: message.receivedAt,
     messageId,
     inReplyTo: normalizeMessageId(message.inReplyTo),
     references: (message.references ?? []).flatMap((reference) => {
       const normalized = normalizeMessageId(reference);
       return normalized ? [normalized] : [];
     }),
+    ...(message.providerConversationId ? { providerConversationId: message.providerConversationId } : {}),
     location: {
       accountId: message.ref.accountId,
       provider,
@@ -50,7 +56,7 @@ export interface ProviderLocationMove {
 }
 
 export interface MailboxPage {
-  messages: MessageSummary[];
+  messages: ProviderMessageSummary[];
   complete: boolean;
 }
 
@@ -61,9 +67,9 @@ export interface MailProvider {
   renameFolder(accountId: string, path: string, name: string): Promise<void>;
   deleteFolder(accountId: string, path: string): Promise<void>;
   listMessagePage(accountId: string, mailbox: string, limit: number): Promise<MailboxPage>;
-  listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]>;
-  readMessages(accountId: string, references: MessageRef[]): Promise<MessageDetail[]>;
-  searchMessages(accountId: string, mailbox: string, query: string, limit: number): Promise<MessageSummary[]>;
+  listMessages(accountId: string, mailbox: string, limit: number): Promise<ProviderMessageSummary[]>;
+  readMessages(accountId: string, references: MessageRef[]): Promise<ProviderMessageDetail[]>;
+  searchMessages(accountId: string, mailbox: string, query: string, limit: number): Promise<ProviderMessageSummary[]>;
   revalidate(reference: MessageRef): Promise<boolean>;
   apply(reference: MessageRef, action: TriageAction): Promise<AppliedMailAction>;
   undo(applied: AppliedMailAction): Promise<ProviderLocationMove | null>;

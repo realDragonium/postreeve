@@ -10,7 +10,7 @@ import {
   sendMessageInputSchema,
   type Account,
   type Folder,
-  type MessageDetail,
+  type CanonicalMessageDetail,
   type OperationBatch,
   type SendMessageInput,
 } from "../../src/shared/contracts";
@@ -28,7 +28,7 @@ const folders: Folder[] = [
   { path: "Trash", name: "Trash", specialUse: "trash", unread: 0, total: 0 },
 ];
 
-const messageRef: MessageDetail["ref"] = {
+const messageRef: CanonicalMessageDetail["ref"] = {
   accountId: account.id,
   mailbox: "INBOX",
   uidValidity: "22",
@@ -36,8 +36,10 @@ const messageRef: MessageDetail["ref"] = {
   modseq: "8",
 };
 
-const message: MessageDetail = {
+const message: CanonicalMessageDetail = {
   canonicalId: "canonical-message",
+  canonicalAliases: [],
+  conversationId: "conversation-message",
   ref: messageRef,
   messageId: "message@example.com",
   subject: "Quarterly planning notes",
@@ -352,7 +354,7 @@ test("reads a message and returns to the list on a narrow screen", async ({ page
 });
 
 test("keyboard shortcuts open, move through and archive mail", async ({ page }) => {
-  const second: MessageDetail = {
+  const second: CanonicalMessageDetail = {
     ...message,
     canonicalId: "canonical-second",
     ref: { ...messageRef, uid: 42 },
@@ -422,7 +424,7 @@ test("keyboard shortcuts open, move through and archive mail", async ({ page }) 
 
 test("refreshes an open canonical message when its provider representative changes", async ({ page }) => {
   const secondAccount: Account = { id: "account-second", name: "Second", email: "second@example.com", kind: "imap" };
-  const oldMessage: MessageDetail = {
+  const oldMessage: CanonicalMessageDetail = {
     ...message,
     canonicalId: "fallback-canonical",
     canonicalAliases: [],
@@ -430,7 +432,7 @@ test("refreshes an open canonical message when its provider representative chang
     text: "Detail from the old representative",
     html: null,
   };
-  const newMessage: MessageDetail = {
+  const newMessage: CanonicalMessageDetail = {
     ...oldMessage,
     canonicalId: "surviving-canonical",
     canonicalAliases: ["fallback-canonical"],
@@ -504,8 +506,8 @@ test("refreshes an open canonical message when its provider representative chang
 
 test("keeps a selected fallback identity attached to its surviving canonical summary", async ({ page }) => {
   const secondAccount: Account = { id: "account-selected-second", name: "Selected second", email: "selected@example.com", kind: "imap" };
-  const fallback: MessageDetail = { ...message, canonicalId: "selected-fallback", canonicalAliases: [], subject: "Selected fallback", html: null };
-  const survivor: MessageDetail = {
+  const fallback: CanonicalMessageDetail = { ...message, canonicalId: "selected-fallback", canonicalAliases: [], subject: "Selected fallback", html: null };
+  const survivor: CanonicalMessageDetail = {
     ...fallback,
     canonicalId: "selected-survivor",
     canonicalAliases: ["selected-fallback"],

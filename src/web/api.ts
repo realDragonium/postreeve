@@ -7,6 +7,7 @@ import {
   folderSchema,
   canonicalMessageDetailSchema,
   canonicalMessageSummarySchema,
+  canonicalConversationSchema,
   operationBatchSchema,
   proposalSchema,
   sendReceiptSchema,
@@ -20,6 +21,7 @@ import {
   type Folder,
   type CanonicalMessageDetail,
   type CanonicalMessageSummary,
+  type CanonicalConversation,
   type MessageRef,
   type OperationBatch,
   type Proposal,
@@ -136,6 +138,8 @@ export const api = {
       ...jsonBody({ references }),
       ...withSignal(signal),
     }),
+  conversation: (id: string, signal?: AbortSignal): Promise<CanonicalConversation> =>
+    request(`/conversations/${encodeURIComponent(id)}`, canonicalConversationSchema, withSignal(signal)),
   sendMessage: (input: SendMessageInput, signal?: AbortSignal): Promise<SendReceipt> =>
     request("/messages/send", sendReceiptSchema, {
       method: "POST",

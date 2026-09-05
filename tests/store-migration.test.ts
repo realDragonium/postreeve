@@ -16,6 +16,72 @@ afterEach(() => {
 });
 
 describe("Store migrations", () => {
+  test("atomically backfills a genuine pre-477 store and preserves it across reopen", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const old = new Database(path, { create: true });
+    old.exec(`
+      CREATE TABLE messages (
+        id TEXT PRIMARY KEY NOT NULL, tenant_id TEXT NOT NULL, identity_key TEXT NOT NULL,
+        message_id TEXT, in_reply_to TEXT, "references" TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (tenant_id, identity_key)
+      );
+      INSERT INTO messages VALUES
+        ('parent', 'tenant-a', 'message-id:<parent@example.test>', '<parent@example.test>', NULL, '[]',
+          '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z'),
+        ('child', 'tenant-a', 'message-id:<child@example.test>', '<child@example.test>', '<parent@example.test>',
+          '["<parent@example.test>"]', '2026-09-01T00:01:00.000Z', '2026-09-01T00:01:00.000Z');
+    `);
+    old.close();
+
+    const migrated = new Store(path);
+    const parent = await migrated.getMessage("tenant-a", "parent");
+    expect(parent?.receivedAt).toBeNull();
+    expect((await migrated.getConversation("tenant-a", parent!.conversationId))?.messages.map(({ messageId }) => messageId))
+      .toEqual(["<parent@example.test>", "<child@example.test>"]);
+    migrated.close();
+
+    const inspected = new Database(path);
+    expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 477").get()).toEqual({ version: 477 });
+    expect(inspected.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    inspected.close();
+
+    const reopened = new Store(path);
+    expect((await reopened.getConversation("tenant-a", parent!.conversationId))?.messages.map(({ id }) => id))
+      .toEqual(["parent", "child"]);
+    reopened.close();
+  });
+
+  test("rolls back every DRA-477 schema and backfill change after a later tenant fails", () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const old = new Database(path, { create: true });
+    old.exec(`
+      CREATE TABLE messages (
+        id TEXT PRIMARY KEY NOT NULL, tenant_id TEXT NOT NULL, identity_key TEXT NOT NULL,
+        message_id TEXT, in_reply_to TEXT, "references" TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (tenant_id, identity_key)
+      );
+      INSERT INTO messages VALUES
+        ('valid', 'tenant-a', 'message-id:<valid@example.test>', '<valid@example.test>', NULL, '[]',
+          '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z'),
+        ('broken', 'tenant-z', 'message-id:<broken@example.test>', '<broken@example.test>', NULL, '{bad json',
+          '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z');
+    `);
+    old.close();
+
+    expect(() => new Store(path)).toThrow();
+    const rolledBack = new Database(path);
+    expect((rolledBack.query("PRAGMA table_info('messages')").all() as Array<{ name: string }>)
+      .some(({ name }) => name === "received_at")).toBe(false);
+    for (const table of ["conversations", "conversation_messages", "conversation_aliases",
+      "message_provider_conversations", "message_thread_edges"]) {
+      expect(rolledBack.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)).toBeNull();
+    }
+    expect(rolledBack.query("SELECT 1 FROM schema_migrations WHERE version = 477").get()).toBeNull();
+    rolledBack.close();
+  });
+
   test("removes legacy synthetic accounts while preserving real accounts", async () => {
     const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
     paths.push(path);

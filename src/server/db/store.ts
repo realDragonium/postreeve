@@ -5,6 +5,7 @@ import { and, desc, eq } from "drizzle-orm";
 import { drizzle, type BunSQLiteDatabase } from "drizzle-orm/bun-sqlite";
 import type {
   Account,
+  CanonicalConversation,
   CanonicalMessage,
   CanonicalMessageObservation,
   MailProviderKind,
@@ -14,6 +15,12 @@ import type {
 } from "../../shared/contracts";
 import { accounts, batches, proposals, type StoredOperation } from "./schema";
 import { normalizeMessageId } from "../mail/message-id";
+import type { ProviderMessageObservation } from "../mail/provider";
+import {
+  mergeThreadingMetadata,
+  orderConversationMessages,
+  type ThreadingMetadata,
+} from "../mail/conversation";
 
 export type StoredAccount = Account & { encryptedCredentials: string | null };
 
@@ -26,7 +33,7 @@ export interface MailboxSnapshot {
   accountId: string;
   provider: MailProviderKind;
   mailbox: string;
-  observations: CanonicalMessageObservation[];
+  observations: ProviderMessageObservation[];
   authoritative: boolean;
 }
 
@@ -97,6 +104,7 @@ export class Store {
     const account = await this.getAccount(id);
     if (!account) return false;
     const remove = this.#sqlite.transaction((accountId: string) => {
+      this.#sqlite.query("DELETE FROM message_provider_conversations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_locations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_provider_associations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM operation_batches WHERE account_id = ?").run(accountId);
@@ -169,6 +177,9 @@ export class Store {
   async reconcileMailbox(snapshot: MailboxSnapshot): Promise<CanonicalMessage[]> {
     for (const observation of snapshot.observations) {
       if (observation.location.providerId === "") throw new Error("Provider ID must be non-empty when present");
+      if (observation.providerConversationId === "") {
+        throw new Error("Provider conversation ID must be non-empty when present");
+      }
       if (observation.tenantId !== snapshot.tenantId
         || observation.location.accountId !== snapshot.accountId
         || observation.location.provider !== snapshot.provider
@@ -177,9 +188,12 @@ export class Store {
       }
     }
     const reconcile = this.#sqlite.transaction((value: MailboxSnapshot) => {
+      const newConversationIds = new Set<string>();
       const now = new Date().toISOString();
       const observedLocationIds: string[] = [];
+      let graphChanged = false;
       for (const observation of value.observations) {
+        const observedReceivedAt = observation.receivedAt ?? null;
         const normalizedMessageId = normalizeMessageId(observation.messageId);
         const normalizedInReplyTo = normalizeMessageId(observation.inReplyTo);
         const normalizedReferences = observation.references.flatMap((reference) => {
@@ -193,6 +207,7 @@ export class Store {
         const providerCanonical = findProviderCanonical(this.#sqlite, observation);
         let canonical: MessageRow | null = null;
         let fallbackRows: MessageRow[] = [];
+        let canonicalCreated = false;
 
         if (normalizedMessageId) {
           const identityKey = `message-id:${normalizedMessageId}`;
@@ -237,25 +252,30 @@ export class Store {
             const id = crypto.randomUUID();
             this.#sqlite.query(`
               INSERT INTO messages
-                (id, tenant_id, identity_key, message_id, in_reply_to, "references", created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (id, tenant_id, identity_key, message_id, in_reply_to, "references", received_at, created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             `).run(id, value.tenantId, identityKey, normalizedMessageId, normalizedInReplyTo,
-              JSON.stringify(normalizedReferences), now, now);
+              JSON.stringify(normalizedReferences), observedReceivedAt, now, now);
             canonical = this.#sqlite.query("SELECT * FROM messages WHERE tenant_id = ? AND id = ?")
               .get(value.tenantId, id) as MessageRow;
+            canonicalCreated = true;
           }
 
           const mergedMetadata = mergeThreadingMetadata(
-            normalizedInReplyTo, normalizedReferences, canonical, fallbackRows,
+            normalizedInReplyTo, normalizedReferences, toThreadingMetadata(canonical),
+            fallbackRows.map(toThreadingMetadata),
           );
+          const receivedAt = earliestReceivedAt(observedReceivedAt, canonical, fallbackRows);
           this.#sqlite.query(`
-            UPDATE messages
-            SET identity_key = ?, message_id = ?, in_reply_to = ?, "references" = ?, updated_at = ?
+            UPDATE messages SET identity_key = ?, message_id = ?, in_reply_to = ?, "references" = ?,
+              received_at = ?, updated_at = ?
             WHERE tenant_id = ? AND id = ?
           `).run(identityKey, normalizedMessageId, mergedMetadata.inReplyTo,
-            JSON.stringify(mergedMetadata.references), now, value.tenantId, canonical.id);
+            JSON.stringify(mergedMetadata.references), receivedAt, now, value.tenantId, canonical.id);
           for (const fallback of fallbackRows) {
             if (fallback.id === canonical.id) continue;
+            graphChanged = true;
+            mergeMessageConversationRelations(this.#sqlite, value.tenantId, canonical.id, fallback.id);
             this.#sqlite.query(
               "UPDATE message_locations SET message_id = ? WHERE tenant_id = ? AND message_id = ?",
             ).run(canonical.id, value.tenantId, fallback.id);
@@ -293,25 +313,37 @@ export class Store {
             const id = crypto.randomUUID();
             this.#sqlite.query(`
               INSERT INTO messages
-                (id, tenant_id, identity_key, message_id, in_reply_to, "references", created_at, updated_at)
-              VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+                (id, tenant_id, identity_key, message_id, in_reply_to, "references", received_at, created_at, updated_at)
+              VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)
               ON CONFLICT (tenant_id, identity_key) DO NOTHING
             `).run(id, value.tenantId, fallbackIdentityKey, normalizedInReplyTo,
-              JSON.stringify(normalizedReferences), now, now);
+              JSON.stringify(normalizedReferences), observedReceivedAt, now, now);
             canonical = this.#sqlite.query(
               "SELECT * FROM messages WHERE tenant_id = ? AND identity_key = ?",
             ).get(value.tenantId, fallbackIdentityKey) as MessageRow;
+            canonicalCreated = canonical.id === id;
           }
-          const mergedMetadata = mergeThreadingMetadata(normalizedInReplyTo, normalizedReferences, canonical, []);
+          const mergedMetadata = mergeThreadingMetadata(
+            normalizedInReplyTo, normalizedReferences, toThreadingMetadata(canonical), [],
+          );
+          const receivedAt = earliestReceivedAt(observedReceivedAt, canonical, []);
           this.#sqlite.query(`
-            UPDATE messages SET in_reply_to = ?, "references" = ?, updated_at = ?
+            UPDATE messages SET in_reply_to = ?, "references" = ?, received_at = ?, updated_at = ?
             WHERE tenant_id = ? AND id = ?
-          `).run(mergedMetadata.inReplyTo, JSON.stringify(mergedMetadata.references), now,
+          `).run(mergedMetadata.inReplyTo, JSON.stringify(mergedMetadata.references), receivedAt, now,
             value.tenantId, canonical.id);
         }
 
         const canonicalId = canonical.id;
+        ensureMessageConversation(this.#sqlite, canonical);
+        if (canonicalCreated) newConversationIds.add(canonical.id);
+        graphChanged = associateThreadEdges(this.#sqlite, value.tenantId, canonicalId,
+          [normalizedInReplyTo, ...normalizedReferences]) || graphChanged;
+        if (canonicalCreated && normalizedMessageId) graphChanged = true;
         associateProviderObservation(this.#sqlite, observation, canonicalId);
+        if (observation.providerConversationId) {
+          graphChanged = associateProviderConversation(this.#sqlite, observation, canonicalId) || graphChanged;
+        }
         const existingLocation = this.#sqlite.query(`
           SELECT id FROM message_locations
           WHERE tenant_id = ? AND account_id = ? AND provider = ? AND mailbox = ?
@@ -352,6 +384,7 @@ export class Store {
         const remove = this.#sqlite.query("DELETE FROM message_locations WHERE id = ?");
         for (const location of locations) if (!retained.has(location.id)) remove.run(location.id);
       }
+      if (graphChanged) this.#repairConversations(value.tenantId, newConversationIds);
       return observedLocationIds.map((id) => {
         const location = this.#sqlite.query(
           "SELECT message_id FROM message_locations WHERE tenant_id = ? AND id = ?",
@@ -394,11 +427,15 @@ export class Store {
         const merged = destination.message_id && !source.message_id ? source : destination;
         canonical = merged.id === source.id ? destination : source;
         const now = new Date().toISOString();
-        const metadata = mergeThreadingMetadata(null, [], canonical, [merged]);
+        const metadata = mergeThreadingMetadata(
+          null, [], toThreadingMetadata(canonical), [toThreadingMetadata(merged)],
+        );
+        const receivedAt = earliestReceivedAt(null, canonical, [merged]);
+        mergeMessageConversationRelations(this.#sqlite, tenantId, canonical.id, merged.id);
         this.#sqlite.query(`
-          UPDATE messages SET in_reply_to = ?, "references" = ?, updated_at = ?
+          UPDATE messages SET in_reply_to = ?, "references" = ?, received_at = ?, updated_at = ?
           WHERE tenant_id = ? AND id = ?
-        `).run(metadata.inReplyTo, JSON.stringify(metadata.references), now, tenantId, canonical.id);
+        `).run(metadata.inReplyTo, JSON.stringify(metadata.references), receivedAt, now, tenantId, canonical.id);
         this.#sqlite.query("UPDATE message_locations SET message_id = ? WHERE tenant_id = ? AND message_id = ?")
           .run(canonical.id, tenantId, merged.id);
         this.#sqlite.query("UPDATE message_aliases SET message_id = ? WHERE tenant_id = ? AND message_id = ?")
@@ -413,6 +450,7 @@ export class Store {
 
       associateProviderReference(this.#sqlite, tenantId, provider, previous, canonical.id);
       associateProviderReference(this.#sqlite, tenantId, provider, current, canonical.id);
+      this.#repairConversations(tenantId);
       return true;
     });
     return record();
@@ -420,6 +458,54 @@ export class Store {
 
   async getMessage(tenantId: string, id: string): Promise<CanonicalMessage | null> {
     return this.#getMessage(tenantId, id);
+  }
+
+  async getConversation(tenantId: string, id: string): Promise<CanonicalConversation | null> {
+    const conversation = this.#sqlite.query(`
+      SELECT conversation.* FROM conversations conversation
+      LEFT JOIN conversation_aliases alias
+        ON alias.tenant_id = conversation.tenant_id AND alias.conversation_id = conversation.id
+      WHERE conversation.tenant_id = ? AND (conversation.id = ? OR alias.alias_id = ?)
+      ORDER BY CASE WHEN conversation.id = ? THEN 0 ELSE 1 END
+      LIMIT 1
+    `).get(tenantId, id, id, id) as ConversationRow | null;
+    if (!conversation) return null;
+    const rows = this.#sqlite.query(`
+      SELECT message.* FROM conversation_messages membership
+      INNER JOIN messages message
+        ON message.tenant_id = membership.tenant_id AND message.id = membership.message_id
+      WHERE membership.tenant_id = ? AND membership.conversation_id = ?
+    `).all(tenantId, conversation.id) as MessageRow[];
+    const edgeRows = this.#sqlite.query(`
+      SELECT edge.message_id, edge.referenced_message_id FROM message_thread_edges edge
+      INNER JOIN conversation_messages membership
+        ON membership.tenant_id = edge.tenant_id AND membership.message_id = edge.message_id
+      WHERE membership.tenant_id = ? AND membership.conversation_id = ?
+    `).all(tenantId, conversation.id) as Array<{ message_id: string; referenced_message_id: string }>;
+    const edgesByMessage = new Map<string, string[]>();
+    for (const edge of edgeRows) {
+      const edges = edgesByMessage.get(edge.message_id) ?? [];
+      edges.push(edge.referenced_message_id);
+      edgesByMessage.set(edge.message_id, edges);
+    }
+    const orderedIds = orderConversationMessages(rows.map((row) =>
+      toConversationMessageForOrder(row, edgesByMessage.get(row.id)))).map(({ id }) => id);
+    const aliases = this.#sqlite.query(`
+      SELECT alias_id FROM conversation_aliases
+      WHERE tenant_id = ? AND conversation_id = ? ORDER BY created_at, alias_id
+    `).all(tenantId, conversation.id) as Array<{ alias_id: string }>;
+    return {
+      id: conversation.id,
+      aliases: aliases.map(({ alias_id }) => alias_id),
+      tenantId: conversation.tenant_id,
+      messages: orderedIds.map((messageId) => {
+        const message = this.#getMessage(tenantId, messageId);
+        if (!message) throw new Error("Conversation contains a missing canonical message");
+        return message;
+      }),
+      createdAt: conversation.created_at,
+      updatedAt: conversation.updated_at,
+    };
   }
 
   async listMessageLocations(tenantId: string, messageId: string): Promise<StoredMessageLocation[]> {
@@ -443,10 +529,16 @@ export class Store {
       ? this.#sqlite.query("SELECT alias_id FROM message_aliases WHERE tenant_id = ? AND message_id = ? ORDER BY created_at, alias_id")
         .all(tenantId, row.id) as Array<{ alias_id: string }>
       : [];
+    const membership = row ? this.#sqlite.query(`
+      SELECT conversation_id FROM conversation_messages WHERE tenant_id = ? AND message_id = ?
+    `).get(tenantId, row.id) as { conversation_id: string } | null : null;
+    if (row && !membership) throw new Error("Canonical message conversation is missing");
     return row ? {
       id: row.id, aliases: aliases.map(({ alias_id }) => alias_id), tenantId: row.tenant_id,
+      conversationId: membership!.conversation_id,
       messageId: row.message_id, inReplyTo: row.in_reply_to,
-      references: JSON.parse(row.references) as string[], createdAt: row.created_at, updatedAt: row.updated_at,
+      references: parseStoredReferences(row.references), receivedAt: row.received_at,
+      createdAt: row.created_at, updatedAt: row.updated_at,
     } : null;
   }
 
@@ -461,6 +553,10 @@ export class Store {
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     };
+  }
+
+  #repairConversations(tenantId: string, newConversationIds: ReadonlySet<string> = new Set()): void {
+    repairConversations(this.#sqlite, tenantId, newConversationIds);
   }
 
   #migrate(): void {
@@ -543,6 +639,7 @@ export class Store {
     `);
     this.#migrateMessageLocationTenantForeignKey();
     this.#migrateMessageProviderAssociations();
+    this.#migrateConversations();
     const accountsTable = this.#sqlite.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
       .get() as { sql: string } | null;
     if (accountsTable && !accountsTable.sql.includes("'gmail'")) {
@@ -711,10 +808,405 @@ export class Store {
     });
     migrate();
   }
+
+  #migrateConversations(): void {
+    if (this.#sqlite.query("SELECT 1 FROM schema_migrations WHERE version = 477").get()) {
+      const recover = this.#sqlite.transaction(() => this.#recoverConversations());
+      recover();
+      return;
+    }
+    const migrate = this.#sqlite.transaction(() => {
+      const messageColumns = this.#sqlite.query("PRAGMA table_info('messages')").all() as Array<{ name: string }>;
+      if (!messageColumns.some(({ name }) => name === "received_at")) {
+        this.#sqlite.exec("ALTER TABLE messages ADD COLUMN received_at TEXT");
+      }
+      this.#sqlite.exec(`
+        CREATE TABLE conversations (
+          id TEXT PRIMARY KEY NOT NULL,
+          tenant_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE (tenant_id, id)
+        );
+        CREATE TABLE conversation_messages (
+          tenant_id TEXT NOT NULL,
+          conversation_id TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, message_id),
+          FOREIGN KEY (tenant_id, conversation_id) REFERENCES conversations(tenant_id, id),
+          FOREIGN KEY (tenant_id, message_id) REFERENCES messages(tenant_id, id)
+        );
+        CREATE TABLE conversation_aliases (
+          alias_id TEXT NOT NULL,
+          tenant_id TEXT NOT NULL,
+          conversation_id TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, alias_id),
+          FOREIGN KEY (tenant_id, conversation_id) REFERENCES conversations(tenant_id, id)
+        );
+        CREATE TABLE message_provider_conversations (
+          tenant_id TEXT NOT NULL,
+          account_id TEXT NOT NULL REFERENCES accounts(id),
+          provider TEXT NOT NULL CHECK (provider IN ('imap', 'gmail')),
+          provider_conversation_id TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, account_id, provider, provider_conversation_id, message_id),
+          FOREIGN KEY (tenant_id, message_id) REFERENCES messages(tenant_id, id)
+        );
+        CREATE TABLE message_thread_edges (
+          tenant_id TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          referenced_message_id TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, message_id, referenced_message_id),
+          FOREIGN KEY (tenant_id, message_id) REFERENCES messages(tenant_id, id)
+        );
+        CREATE INDEX conversation_messages_conversation_id_idx ON conversation_messages(conversation_id);
+        CREATE INDEX conversation_aliases_conversation_id_idx ON conversation_aliases(conversation_id);
+        CREATE INDEX message_provider_conversations_message_id_idx ON message_provider_conversations(message_id);
+        CREATE INDEX message_thread_edges_reference_idx
+          ON message_thread_edges(tenant_id, referenced_message_id);
+      `);
+      const messages = this.#sqlite.query("SELECT * FROM messages ORDER BY tenant_id, identity_key")
+        .all() as MessageRow[];
+      for (const message of messages) {
+        ensureMessageConversation(this.#sqlite, message);
+        associateThreadEdges(this.#sqlite, message.tenant_id, message.id,
+          [message.in_reply_to, ...parseStoredReferences(message.references)]);
+      }
+      const tenants = [...new Set(messages.map(({ tenant_id }) => tenant_id))];
+      for (const tenantId of tenants) repairConversations(this.#sqlite, tenantId, new Set());
+      const missingMembership = this.#sqlite.query(`
+        SELECT 1 FROM messages message
+        WHERE NOT EXISTS (
+          SELECT 1 FROM conversation_messages membership
+          WHERE membership.tenant_id = message.tenant_id AND membership.message_id = message.id
+        ) LIMIT 1
+      `).get();
+      const liveAlias = this.#sqlite.query(`
+        SELECT 1 FROM conversation_aliases alias
+        INNER JOIN conversations conversation
+          ON conversation.tenant_id = alias.tenant_id AND conversation.id = alias.alias_id
+        LIMIT 1
+      `).get();
+      const violations = ["conversation_messages", "conversation_aliases", "message_provider_conversations", "message_thread_edges"]
+        .flatMap((table) => this.#sqlite.query(`PRAGMA foreign_key_check('${table}')`).all());
+      if (missingMembership || liveAlias || violations.length > 0) {
+        throw new Error("Conversation migration failed integrity validation");
+      }
+      this.#sqlite.query("INSERT INTO schema_migrations (version, applied_at) VALUES (477, ?)")
+        .run(new Date().toISOString());
+    });
+    migrate();
+  }
+
+  #recoverConversations(): void {
+    const messages = this.#sqlite.query("SELECT * FROM messages ORDER BY tenant_id, identity_key")
+      .all() as MessageRow[];
+    for (const message of messages) {
+      ensureMessageConversation(this.#sqlite, message);
+      associateThreadEdges(this.#sqlite, message.tenant_id, message.id,
+        [message.in_reply_to, ...parseStoredReferences(message.references)]);
+    }
+    for (const tenantId of new Set(messages.map(({ tenant_id }) => tenant_id))) {
+      repairConversations(this.#sqlite, tenantId, new Set());
+    }
+  }
 }
 
-interface MessageRow { id: string; tenant_id: string; identity_key: string; message_id: string | null; in_reply_to: string | null; references: string; created_at: string; updated_at: string }
+interface MessageRow { id: string; tenant_id: string; identity_key: string; message_id: string | null; in_reply_to: string | null; references: string; received_at: string | null; created_at: string; updated_at: string }
 interface LocationRow { id: string; message_id: string; tenant_id: string; account_id: string; provider: MailProviderKind; mailbox: string; uid_validity: string; uid: number; modseq: string | null; provider_id: string | null; read: number; flagged: number; observed_at: string }
+interface ConversationRow { id: string; tenant_id: string; created_at: string; updated_at: string }
+
+function associateProviderConversation(
+  sqlite: Database,
+  observation: ProviderMessageObservation,
+  messageId: string,
+): boolean {
+  if (!observation.providerConversationId) return false;
+  const location = observation.location;
+  const result = sqlite.query(`
+    INSERT OR IGNORE INTO message_provider_conversations
+      (tenant_id, account_id, provider, provider_conversation_id, message_id)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(observation.tenantId, location.accountId, location.provider,
+    observation.providerConversationId, messageId);
+  return result.changes > 0;
+}
+
+function associateThreadEdges(
+  sqlite: Database,
+  tenantId: string,
+  messageId: string,
+  references: readonly (string | null)[],
+): boolean {
+  const insert = sqlite.query(`
+    INSERT OR IGNORE INTO message_thread_edges (tenant_id, message_id, referenced_message_id)
+    VALUES (?, ?, ?)
+  `);
+  let changed = false;
+  for (const reference of new Set(references)) {
+    if (reference && insert.run(tenantId, messageId, reference).changes > 0) changed = true;
+  }
+  return changed;
+}
+
+function ensureMessageConversation(sqlite: Database, message: MessageRow): void {
+  sqlite.query(`
+    INSERT OR IGNORE INTO conversations (id, tenant_id, created_at, updated_at) VALUES (?, ?, ?, ?)
+  `).run(message.id, message.tenant_id, message.created_at, message.updated_at);
+  sqlite.query(`
+    INSERT OR IGNORE INTO conversation_messages (tenant_id, conversation_id, message_id) VALUES (?, ?, ?)
+  `).run(message.tenant_id, message.id, message.id);
+}
+
+function mergeMessageConversationRelations(
+  sqlite: Database,
+  tenantId: string,
+  retainedMessageId: string,
+  removedMessageId: string,
+): void {
+  sqlite.query(`
+    INSERT OR IGNORE INTO message_thread_edges (tenant_id, message_id, referenced_message_id)
+    SELECT tenant_id, ?, referenced_message_id FROM message_thread_edges
+    WHERE tenant_id = ? AND message_id = ?
+  `).run(retainedMessageId, tenantId, removedMessageId);
+  sqlite.query("DELETE FROM message_thread_edges WHERE tenant_id = ? AND message_id = ?")
+    .run(tenantId, removedMessageId);
+  sqlite.query(`
+    INSERT OR IGNORE INTO message_provider_conversations
+      (tenant_id, account_id, provider, provider_conversation_id, message_id)
+    SELECT tenant_id, account_id, provider, provider_conversation_id, ?
+    FROM message_provider_conversations
+    WHERE tenant_id = ? AND message_id = ?
+  `).run(retainedMessageId, tenantId, removedMessageId);
+  sqlite.query("DELETE FROM message_provider_conversations WHERE tenant_id = ? AND message_id = ?")
+    .run(tenantId, removedMessageId);
+
+  const memberships = sqlite.query(`
+    SELECT conversation.*, membership.message_id AS membership_message_id
+    FROM conversation_messages membership
+    INNER JOIN conversations conversation
+      ON conversation.tenant_id = membership.tenant_id AND conversation.id = membership.conversation_id
+    WHERE membership.tenant_id = ? AND membership.message_id IN (?, ?)
+    ORDER BY CASE WHEN membership.message_id = ? THEN 0 ELSE 1 END,
+      conversation.created_at, conversation.id
+  `).all(tenantId, retainedMessageId, removedMessageId, retainedMessageId) as Array<ConversationRow & {
+    membership_message_id: string;
+  }>;
+  if (memberships.length === 0) return;
+  const winner = memberships[0]!;
+  const now = new Date().toISOString();
+  for (const mergedId of new Set(memberships.map(({ id }) => id))) {
+    if (mergedId === winner.id) continue;
+    sqlite.query(`
+      UPDATE conversation_messages SET conversation_id = ?
+      WHERE tenant_id = ? AND conversation_id = ?
+    `).run(winner.id, tenantId, mergedId);
+    const remaining = sqlite.query(`
+      SELECT 1 FROM conversation_messages WHERE tenant_id = ? AND conversation_id = ? LIMIT 1
+    `).get(tenantId, mergedId);
+    if (remaining) throw new Error("Cannot alias a conversation that still owns messages");
+    sqlite.query(`
+      UPDATE conversation_aliases SET conversation_id = ?
+      WHERE tenant_id = ? AND conversation_id = ?
+    `).run(winner.id, tenantId, mergedId);
+    sqlite.query(`
+      INSERT INTO conversation_aliases (alias_id, tenant_id, conversation_id, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run(mergedId, tenantId, winner.id, now);
+  }
+  sqlite.query("DELETE FROM conversation_messages WHERE tenant_id = ? AND message_id = ?")
+    .run(tenantId, removedMessageId);
+  sqlite.query(`
+    INSERT OR IGNORE INTO conversation_messages (tenant_id, conversation_id, message_id) VALUES (?, ?, ?)
+  `).run(tenantId, winner.id, retainedMessageId);
+}
+
+function repairConversations(
+  sqlite: Database,
+  tenantId: string,
+  newConversationIds: ReadonlySet<string>,
+): void {
+  sqlite.query(`
+    INSERT OR IGNORE INTO conversations (id, tenant_id, created_at, updated_at)
+    SELECT id, tenant_id, created_at, updated_at FROM messages WHERE tenant_id = ?
+  `).run(tenantId);
+  sqlite.query(`
+    INSERT OR IGNORE INTO conversation_messages (tenant_id, conversation_id, message_id)
+    SELECT tenant_id, id, id FROM messages WHERE tenant_id = ?
+  `).run(tenantId);
+
+  const messages = sqlite.query("SELECT * FROM messages WHERE tenant_id = ?")
+    .all(tenantId) as MessageRow[];
+  const memberships = sqlite.query(`
+    SELECT membership.message_id, membership.conversation_id,
+      conversation.created_at AS conversation_created_at
+    FROM conversation_messages membership
+    INNER JOIN conversations conversation
+      ON conversation.tenant_id = membership.tenant_id AND conversation.id = membership.conversation_id
+    WHERE membership.tenant_id = ?
+  `).all(tenantId) as Array<{
+    message_id: string;
+    conversation_id: string;
+    conversation_created_at: string;
+  }>;
+  const membershipByMessage = new Map(memberships.map((membership) => [membership.message_id, membership]));
+  const parent = new Map(messages.map(({ id }) => [id, id]));
+  const find = (id: string): string => {
+    const direct = parent.get(id);
+    if (!direct) throw new Error("Conversation resolver found an unknown message");
+    if (direct === id) return id;
+    const root = find(direct);
+    parent.set(id, root);
+    return root;
+  };
+  const union = (left: string, right: string): void => {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot === rightRoot) return;
+    if (leftRoot < rightRoot) parent.set(rightRoot, leftRoot);
+    else parent.set(leftRoot, rightRoot);
+  };
+
+  const existingConversationRoots = new Map<string, string>();
+  for (const membership of memberships) {
+    const first = existingConversationRoots.get(membership.conversation_id);
+    if (first) union(first, membership.message_id);
+    else existingConversationRoots.set(membership.conversation_id, membership.message_id);
+  }
+
+  const byMessageId = new Map(messages.flatMap((message) =>
+    message.message_id ? [[message.message_id, message.id] as const] : []));
+  const threadEdges = sqlite.query(`
+    SELECT message_id, referenced_message_id FROM message_thread_edges
+    WHERE tenant_id = ? ORDER BY referenced_message_id, message_id
+  `).all(tenantId) as Array<{ message_id: string; referenced_message_id: string }>;
+  const unresolvedRoots = new Map<string, string>();
+  for (const edge of threadEdges) {
+    const linked = byMessageId.get(edge.referenced_message_id);
+    if (linked && linked !== edge.message_id) union(edge.message_id, linked);
+    const first = unresolvedRoots.get(edge.referenced_message_id);
+    if (first) union(first, edge.message_id);
+    else unresolvedRoots.set(edge.referenced_message_id, edge.message_id);
+  }
+
+  const providerLinks = sqlite.query(`
+    SELECT account_id, provider, provider_conversation_id, message_id
+    FROM message_provider_conversations
+    WHERE tenant_id = ?
+    ORDER BY account_id, provider, provider_conversation_id, message_id
+  `).all(tenantId) as Array<{
+    account_id: string;
+    provider: MailProviderKind;
+    provider_conversation_id: string;
+    message_id: string;
+  }>;
+  const providerRoots = new Map<string, string>();
+  for (const link of providerLinks) {
+    const key = JSON.stringify([link.account_id, link.provider, link.provider_conversation_id]);
+    const first = providerRoots.get(key);
+    if (first) union(first, link.message_id);
+    else providerRoots.set(key, link.message_id);
+  }
+
+  const components = new Map<string, string[]>();
+  for (const message of messages) {
+    const root = find(message.id);
+    const members = components.get(root) ?? [];
+    members.push(message.id);
+    components.set(root, members);
+  }
+  const now = new Date().toISOString();
+  const messageById = new Map(messages.map((message) => [message.id, message]));
+  for (const members of components.values()) {
+    const candidateIds = [...new Set(members.map((messageId) => membershipByMessage.get(messageId)!.conversation_id))];
+    const existing = candidateIds.filter((id) => !newConversationIds.has(id));
+    const eligible = existing.length > 0 ? existing : candidateIds;
+    const candidates = eligible.map((id) => ({
+      id,
+      createdAt: memberships.find(({ conversation_id }) => conversation_id === id)!.conversation_created_at,
+      semanticKey: members.filter((messageId) => membershipByMessage.get(messageId)!.conversation_id === id)
+        .map((messageId) => messageById.get(messageId)!.identity_key).sort()[0]!,
+    })).sort((left, right) => left.semanticKey.localeCompare(right.semanticKey)
+      || left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+    const winner = candidates[0];
+    if (!winner) throw new Error("Conversation resolver could not assign a conversation");
+    const mergedConversationIds = candidateIds;
+    for (const messageId of members) {
+      if (membershipByMessage.get(messageId)!.conversation_id === winner.id) continue;
+      sqlite.query(`
+        UPDATE conversation_messages SET conversation_id = ? WHERE tenant_id = ? AND message_id = ?
+      `).run(winner.id, tenantId, messageId);
+    }
+    if (mergedConversationIds.length > 1) {
+      sqlite.query("UPDATE conversations SET updated_at = ? WHERE tenant_id = ? AND id = ?")
+        .run(now, tenantId, winner.id);
+      for (const mergedId of mergedConversationIds) {
+        if (mergedId === winner.id) continue;
+        const remaining = sqlite.query(`
+          SELECT 1 FROM conversation_messages WHERE tenant_id = ? AND conversation_id = ? LIMIT 1
+        `).get(tenantId, mergedId);
+        if (remaining) throw new Error("Cannot alias a conversation that still owns messages");
+        sqlite.query(`
+          UPDATE conversation_aliases SET conversation_id = ?
+          WHERE tenant_id = ? AND conversation_id = ?
+        `).run(winner.id, tenantId, mergedId);
+        sqlite.query(`
+          INSERT INTO conversation_aliases (alias_id, tenant_id, conversation_id, created_at)
+          VALUES (?, ?, ?, ?)
+        `).run(mergedId, tenantId, winner.id, now);
+      }
+    }
+  }
+  sqlite.query(`
+    DELETE FROM conversations
+    WHERE tenant_id = ? AND NOT EXISTS (
+      SELECT 1 FROM conversation_messages membership
+      WHERE membership.tenant_id = conversations.tenant_id
+        AND membership.conversation_id = conversations.id
+    )
+  `).run(tenantId);
+  const liveAlias = sqlite.query(`
+    SELECT 1 FROM conversation_aliases alias
+    INNER JOIN conversations conversation
+      ON conversation.tenant_id = alias.tenant_id AND conversation.id = alias.alias_id
+    WHERE alias.tenant_id = ? LIMIT 1
+  `).get(tenantId);
+  if (liveAlias) throw new Error("Conversation ID cannot be both live and aliased");
+}
+
+function parseStoredReferences(value: string): string[] {
+  const parsed: unknown = JSON.parse(value);
+  if (!Array.isArray(parsed) || !parsed.every((entry): entry is string => typeof entry === "string")) {
+    throw new Error("Stored message references are invalid");
+  }
+  return parsed;
+}
+
+function toThreadingMetadata(message: MessageRow): ThreadingMetadata {
+  return { inReplyTo: message.in_reply_to, references: parseStoredReferences(message.references) };
+}
+
+function earliestReceivedAt(
+  observed: string | null,
+  canonical: MessageRow,
+  merged: readonly MessageRow[],
+): string | null {
+  return [observed, canonical.received_at, ...merged.map(({ received_at }) => received_at)]
+    .filter((value): value is string => value !== null)
+    .sort()[0] ?? null;
+}
+
+function toConversationMessageForOrder(message: MessageRow, threadingEdges?: readonly string[]) {
+  return {
+    id: message.id,
+    identityKey: message.identity_key,
+    messageId: message.message_id,
+    inReplyTo: message.in_reply_to,
+    references: threadingEdges ?? parseStoredReferences(message.references),
+    receivedAt: message.received_at,
+  };
+}
 
 function fallbackIdentityKeyFor(observation: CanonicalMessageObservation): string {
   const location = observation.location;
@@ -851,19 +1343,4 @@ function toStoredLocation(row: LocationRow): StoredMessageLocation {
   return { id: row.id, messageId: row.message_id, tenantId: row.tenant_id, accountId: row.account_id,
     provider: row.provider, mailbox: row.mailbox, uidValidity: row.uid_validity, uid: row.uid, modseq: row.modseq,
     providerId: row.provider_id, read: row.read === 1, flagged: row.flagged === 1, observedAt: row.observed_at };
-}
-
-function mergeThreadingMetadata(
-  observedInReplyTo: string | null,
-  observedReferences: string[],
-  canonical: MessageRow,
-  merged: MessageRow[],
-): { inReplyTo: string | null; references: string[] } {
-  const rows = [canonical, ...merged.filter(({ id }) => id !== canonical.id)];
-  const retainedInReplyTo = rows.find(({ in_reply_to }) => in_reply_to !== null)?.in_reply_to ?? null;
-  const references = rows.flatMap((row) => JSON.parse(row.references) as string[]);
-  return {
-    inReplyTo: observedInReplyTo ?? retainedInReplyTo,
-    references: [...new Set([...references, ...observedReferences])],
-  };
 }
