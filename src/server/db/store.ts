@@ -176,7 +176,6 @@ export class Store {
     const reconcile = this.#sqlite.transaction((value: MailboxSnapshot) => {
       const now = new Date().toISOString();
       const observedLocationIds: string[] = [];
-      const canonicalIds: string[] = [];
       for (const observation of value.observations) {
         const normalizedMessageId = normalizeMessageId(observation.messageId);
         const normalizedInReplyTo = normalizeMessageId(observation.inReplyTo);
@@ -184,20 +183,91 @@ export class Store {
           const normalized = normalizeMessageId(reference);
           return normalized ? [normalized] : [];
         });
-        const identityKey = identityKeyFor(observation);
-        const canonical = this.#sqlite.query(`
-          INSERT INTO messages (id, tenant_id, identity_key, message_id, in_reply_to, "references", created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT (tenant_id, identity_key) DO UPDATE SET
-            message_id = excluded.message_id,
-            in_reply_to = excluded.in_reply_to,
-            "references" = excluded."references",
-            updated_at = excluded.updated_at
-          RETURNING id
-        `).get(crypto.randomUUID(), value.tenantId, identityKey, normalizedMessageId, normalizedInReplyTo,
-          JSON.stringify(normalizedReferences), now, now) as { id: string };
-        const canonicalId = canonical.id;
         const locationKey = locationKeyFor(observation);
+        const fallbackIdentityKey = fallbackIdentityKeyFor(observation);
+        const providerCanonical = this.#sqlite.query(`
+          SELECT message.*
+          FROM message_locations location
+          INNER JOIN messages message
+            ON message.tenant_id = location.tenant_id AND message.id = location.message_id
+          WHERE location.tenant_id = ? AND location.account_id = ? AND location.provider = ?
+            AND location.location_key = ?
+          ORDER BY CASE WHEN location.mailbox = ? THEN 0 ELSE 1 END, location.id
+          LIMIT 1
+        `).get(value.tenantId, value.accountId, value.provider, locationKey, value.mailbox) as MessageRow | null;
+        let canonical: MessageRow | null = null;
+        let fallbackRows: MessageRow[] = [];
+
+        if (normalizedMessageId) {
+          const identityKey = `message-id:${normalizedMessageId}`;
+          canonical = this.#sqlite.query(
+            "SELECT * FROM messages WHERE tenant_id = ? AND identity_key = ?",
+          ).get(value.tenantId, identityKey) as MessageRow | null;
+          fallbackRows = this.#sqlite.query(`
+            SELECT DISTINCT message.*
+            FROM messages message
+            LEFT JOIN message_locations location
+              ON location.tenant_id = message.tenant_id AND location.message_id = message.id
+            WHERE message.tenant_id = ? AND message.message_id IS NULL
+              AND (message.identity_key = ? OR (
+                location.account_id = ? AND location.provider = ? AND location.location_key = ?
+              ))
+            ORDER BY message.created_at, message.id
+          `).all(value.tenantId, fallbackIdentityKey, value.accountId, value.provider, locationKey) as MessageRow[];
+          canonical ??= fallbackRows[0] ?? null;
+          if (!canonical) {
+            const id = crypto.randomUUID();
+            this.#sqlite.query(`
+              INSERT INTO messages
+                (id, tenant_id, identity_key, message_id, in_reply_to, "references", created_at, updated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(id, value.tenantId, identityKey, normalizedMessageId, normalizedInReplyTo,
+              JSON.stringify(normalizedReferences), now, now);
+            canonical = this.#sqlite.query("SELECT * FROM messages WHERE tenant_id = ? AND id = ?")
+              .get(value.tenantId, id) as MessageRow;
+          }
+
+          const mergedMetadata = mergeThreadingMetadata(
+            normalizedInReplyTo, normalizedReferences, canonical, fallbackRows,
+          );
+          this.#sqlite.query(`
+            UPDATE messages
+            SET identity_key = ?, message_id = ?, in_reply_to = ?, "references" = ?, updated_at = ?
+            WHERE tenant_id = ? AND id = ?
+          `).run(identityKey, normalizedMessageId, mergedMetadata.inReplyTo,
+            JSON.stringify(mergedMetadata.references), now, value.tenantId, canonical.id);
+          for (const fallback of fallbackRows) {
+            if (fallback.id === canonical.id) continue;
+            this.#sqlite.query(
+              "UPDATE message_locations SET message_id = ? WHERE tenant_id = ? AND message_id = ?",
+            ).run(canonical.id, value.tenantId, fallback.id);
+            this.#sqlite.query("DELETE FROM messages WHERE tenant_id = ? AND id = ?")
+              .run(value.tenantId, fallback.id);
+          }
+        } else {
+          canonical = providerCanonical;
+          if (!canonical) {
+            const id = crypto.randomUUID();
+            this.#sqlite.query(`
+              INSERT INTO messages
+                (id, tenant_id, identity_key, message_id, in_reply_to, "references", created_at, updated_at)
+              VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
+              ON CONFLICT (tenant_id, identity_key) DO NOTHING
+            `).run(id, value.tenantId, fallbackIdentityKey, normalizedInReplyTo,
+              JSON.stringify(normalizedReferences), now, now);
+            canonical = this.#sqlite.query(
+              "SELECT * FROM messages WHERE tenant_id = ? AND identity_key = ?",
+            ).get(value.tenantId, fallbackIdentityKey) as MessageRow;
+          }
+          const mergedMetadata = mergeThreadingMetadata(normalizedInReplyTo, normalizedReferences, canonical, []);
+          this.#sqlite.query(`
+            UPDATE messages SET in_reply_to = ?, "references" = ?, updated_at = ?
+            WHERE tenant_id = ? AND id = ?
+          `).run(mergedMetadata.inReplyTo, JSON.stringify(mergedMetadata.references), now,
+            value.tenantId, canonical.id);
+        }
+
+        const canonicalId = canonical.id;
         const location = this.#sqlite.query(`
           INSERT INTO message_locations
             (id, message_id, tenant_id, account_id, provider, mailbox, location_key, uid_validity, uid, modseq, provider_id, read, flagged, observed_at)
@@ -217,7 +287,6 @@ export class Store {
           observation.location.providerId, observation.location.read ? 1 : 0, observation.location.flagged ? 1 : 0, now) as { id: string };
         const locationId = location.id;
         observedLocationIds.push(locationId);
-        canonicalIds.push(canonicalId);
       }
       if (value.authoritative) {
         const locations = this.#sqlite.query(
@@ -227,7 +296,16 @@ export class Store {
         const remove = this.#sqlite.query("DELETE FROM message_locations WHERE id = ?");
         for (const location of locations) if (!retained.has(location.id)) remove.run(location.id);
       }
-      return [...new Set(canonicalIds)].map((id) => this.#getMessage(value.tenantId, id)!);
+      const canonicalIds = observedLocationIds.flatMap((id) => {
+        const location = this.#sqlite.query(
+          "SELECT message_id FROM message_locations WHERE tenant_id = ? AND id = ?",
+        ).get(value.tenantId, id) as { message_id: string } | null;
+        return location ? [location.message_id] : [];
+      });
+      return [...new Set(canonicalIds)].flatMap((id) => {
+        const message = this.#getMessage(value.tenantId, id);
+        return message ? [message] : [];
+      });
     });
     return reconcile(snapshot);
   }
@@ -435,14 +513,11 @@ export class Store {
   }
 }
 
-interface MessageRow { id: string; tenant_id: string; message_id: string | null; in_reply_to: string | null; references: string; created_at: string; updated_at: string }
+interface MessageRow { id: string; tenant_id: string; identity_key: string; message_id: string | null; in_reply_to: string | null; references: string; created_at: string; updated_at: string }
 interface LocationRow { id: string; message_id: string; tenant_id: string; account_id: string; provider: MailProviderKind; mailbox: string; uid_validity: string; uid: number; modseq: string | null; provider_id: string | null; read: number; flagged: number; observed_at: string }
 
-function identityKeyFor(observation: CanonicalMessageObservation): string {
-  const normalizedMessageId = normalizeMessageId(observation.messageId);
-  return normalizedMessageId
-    ? `message-id:${normalizedMessageId}`
-    : `provider:${observation.location.provider}:${observation.location.accountId}:${locationKeyFor(observation)}`;
+function fallbackIdentityKeyFor(observation: CanonicalMessageObservation): string {
+  return `provider:${observation.location.provider}:${observation.location.accountId}:${locationKeyFor(observation)}`;
 }
 
 function locationKeyFor(observation: CanonicalMessageObservation): string {
@@ -455,4 +530,20 @@ function toStoredLocation(row: LocationRow): StoredMessageLocation {
   return { id: row.id, messageId: row.message_id, tenantId: row.tenant_id, accountId: row.account_id,
     provider: row.provider, mailbox: row.mailbox, uidValidity: row.uid_validity, uid: row.uid, modseq: row.modseq,
     providerId: row.provider_id, read: row.read === 1, flagged: row.flagged === 1, observedAt: row.observed_at };
+}
+
+function mergeThreadingMetadata(
+  observedInReplyTo: string | null,
+  observedReferences: string[],
+  canonical: MessageRow,
+  merged: MessageRow[],
+): { inReplyTo: string | null; references: string[] } {
+  const rows = [canonical, ...merged.filter(({ id }) => id !== canonical.id)];
+  const retainedInReplyTo = rows.find(({ in_reply_to }) => in_reply_to !== null)?.in_reply_to ?? null;
+  const retainedReferences = rows.map(({ references }) => JSON.parse(references) as string[])
+    .find((references) => references.length > 0) ?? [];
+  return {
+    inReplyTo: observedInReplyTo ?? retainedInReplyTo,
+    references: observedReferences.length > 0 ? observedReferences : retainedReferences,
+  };
 }

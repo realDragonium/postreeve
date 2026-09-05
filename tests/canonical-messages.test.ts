@@ -170,6 +170,175 @@ describe("canonical message persistence", () => {
     const [second] = await store.reconcileMailbox({ tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "Archive", observations: [archive], authoritative: true });
     expect(second!.id).not.toBe(first!.id);
   });
+
+  test("promotes a fallback message when its Message-ID becomes available", async () => {
+    const store = await createStore();
+    const missing = observation({ messageId: null });
+    const [fallback] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [missing], authoritative: true,
+    });
+    const identified = observation({ inReplyTo: null, references: [] });
+    const [promoted] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [identified], authoritative: true,
+    });
+
+    expect(promoted).toMatchObject({
+      id: fallback!.id,
+      messageId: "<message@example.test>",
+      inReplyTo: "<parent@example.test>",
+      references: ["<root@example.test>", "<parent@example.test>"],
+    });
+  });
+
+  test("merges a provider fallback from another label into an existing canonical message", async () => {
+    const store = await createStore();
+    const existing = observation({ inReplyTo: null, references: [] });
+    const [canonical] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [existing], authoritative: true,
+    });
+    const gmailFallback = observation({
+      messageId: null,
+      inReplyTo: "<fallback-parent@example.test>",
+      references: ["<fallback-root@example.test>", "<fallback-parent@example.test>"],
+      location: {
+        ...existing.location, accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
+        uidValidity: "gmail", uid: 7, providerId: "gmail-shared",
+      },
+    });
+    const [fallback] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
+      observations: [gmailFallback], authoritative: true,
+    });
+    const identifiedInArchive = observation({
+      inReplyTo: null,
+      references: [],
+      location: { ...gmailFallback.location, mailbox: "Archive", uid: 8 },
+    });
+    const [merged] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "Archive",
+      observations: [identifiedInArchive], authoritative: true,
+    });
+
+    expect(merged!.id).toBe(canonical!.id);
+    expect(await store.getMessage("tenant-a", fallback!.id)).toBeNull();
+    expect((await store.listMessageLocations("tenant-a", canonical!.id)).map(({ mailbox }) => mailbox))
+      .toEqual(["Archive", "INBOX", "INBOX"]);
+    expect(merged!.inReplyTo).toBe(gmailFallback.inReplyTo);
+    expect(merged!.references).toEqual(gmailFallback.references);
+  });
+
+  test("retains threading metadata when an ordinary duplicate omits it", async () => {
+    const store = await createStore();
+    const first = observation();
+    const [canonical] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [first], authoritative: true,
+    });
+    const [duplicate] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [{ ...first, inReplyTo: null, references: [] }], authoritative: true,
+    });
+
+    expect(duplicate).toMatchObject({
+      id: canonical!.id,
+      inReplyTo: "<parent@example.test>",
+      references: ["<root@example.test>", "<parent@example.test>"],
+    });
+  });
+
+  test("does not let another tenant's canonical message intercept fallback promotion", async () => {
+    const store = await createStore();
+    const missing = observation({ tenantId: "tenant-a", messageId: null });
+    const [fallback] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [missing], authoritative: true,
+    });
+    const otherTenant = observation({ tenantId: "tenant-b" });
+    const [otherCanonical] = await store.reconcileMailbox({
+      tenantId: "tenant-b", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [otherTenant], authoritative: true,
+    });
+    const [promoted] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [observation()], authoritative: true,
+    });
+
+    expect(promoted!.id).toBe(fallback!.id);
+    expect(promoted!.id).not.toBe(otherCanonical!.id);
+    expect(await store.listMessageLocations("tenant-b", otherCanonical!.id)).toHaveLength(1);
+  });
+
+  test("keeps an identified canonical when a later location observation omits Message-ID", async () => {
+    const store = await createStore();
+    const identified = observation({
+      location: {
+        ...observation().location, accountId: "gmail-account", provider: "gmail",
+        uidValidity: "gmail", uid: 7, providerId: "gmail-stable",
+      },
+    });
+    const [canonical] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
+      observations: [identified], authoritative: true,
+    });
+    const missingInArchive = observation({
+      messageId: null,
+      inReplyTo: null,
+      references: [],
+      location: { ...identified.location, mailbox: "Archive", uid: 8 },
+    });
+    const [sameCanonical] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "Archive",
+      observations: [missingInArchive], authoritative: true,
+    });
+
+    expect(sameCanonical).toMatchObject({
+      id: canonical!.id,
+      messageId: "<message@example.test>",
+      inReplyTo: "<parent@example.test>",
+      references: ["<root@example.test>", "<parent@example.test>"],
+    });
+    expect(await store.listMessageLocations("tenant-a", canonical!.id)).toHaveLength(2);
+  });
+
+  test("does not conflate different valid identities observed at the same location", async () => {
+    const store = await createStore();
+    const first = observation();
+    const [firstCanonical] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [first], authoritative: true,
+    });
+    const replacement = observation({ messageId: "<replacement@example.test>" });
+    const [replacementCanonical] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [replacement], authoritative: true,
+    });
+
+    expect(replacementCanonical!.id).not.toBe(firstCanonical!.id);
+    expect(await store.getMessage("tenant-a", firstCanonical!.id)).not.toBeNull();
+    expect(await store.listMessageLocations("tenant-a", firstCanonical!.id)).toEqual([]);
+    expect(await store.listMessageLocations("tenant-a", replacementCanonical!.id)).toHaveLength(1);
+  });
+
+  test("returns only the surviving canonical for ordered fallback and valid observations", async () => {
+    const store = await createStore();
+    const missing = observation({ messageId: null, inReplyTo: null, references: [] });
+    const valid = observation();
+    const reconciled = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [missing, valid, missing], authoritative: true,
+    });
+
+    expect(reconciled).toHaveLength(1);
+    expect(reconciled[0]).toMatchObject({
+      messageId: "<message@example.test>",
+      inReplyTo: "<parent@example.test>",
+      references: ["<root@example.test>", "<parent@example.test>"],
+    });
+    expect(await store.listMessageLocations("tenant-a", reconciled[0]!.id)).toHaveLength(1);
+  });
 });
 
 test("provider summaries map identifiers, threading, location, and flags into the shared observation", () => {
