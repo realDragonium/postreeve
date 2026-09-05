@@ -13,12 +13,19 @@ afterEach(() => {
 async function createStore(): Promise<Store> {
   const store = new Store(":memory:");
   stores.push(store);
-  for (const id of ["imap-account", "gmail-account"]) {
+  const accounts = [
+    { id: "imap-account", kind: "imap" },
+    { id: "gmail-account", kind: "gmail" },
+    { id: "gmail-other", kind: "gmail" },
+    { id: "scope", kind: "gmail" },
+    { id: "scope:provider-id:shared", kind: "gmail" },
+  ] as const;
+  for (const { id, kind } of accounts) {
     await store.insertAccount({
       id,
       name: id,
       email: `${id}@example.test`,
-      kind: id.startsWith("gmail") ? "gmail" : "imap",
+      kind,
       encryptedCredentials: null,
     });
   }
@@ -104,6 +111,74 @@ describe("canonical message persistence", () => {
     expect(a!.id).not.toBe(b!.id);
     expect(await store.getMessage("tenant-b", a!.id)).toBeNull();
     expect(await store.listMessageLocations("tenant-b", a!.id)).toEqual([]);
+  });
+
+  test("keeps durable provider associations tenant-scoped", async () => {
+    const store = await createStore();
+    const first = observation({
+      messageId: null,
+      location: {
+        ...observation().location,
+        accountId: "gmail-account",
+        provider: "gmail",
+        providerId: "shared-provider-id",
+      },
+    });
+    const second = { ...first, tenantId: "tenant-b" };
+    const [tenantA] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
+      observations: [first], authoritative: true,
+    });
+    const [tenantB] = await store.reconcileMailbox({
+      tenantId: "tenant-b", accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
+      observations: [second], authoritative: true,
+    });
+
+    expect(tenantA!.id).not.toBe(tenantB!.id);
+  });
+
+  test("keeps delimiter-bearing provider associations account-scoped", async () => {
+    const store = await createStore();
+    const first = observation({
+      messageId: null,
+      location: {
+        ...observation().location,
+        accountId: "scope:provider-id:shared",
+        provider: "gmail",
+        providerId: "tail",
+      },
+    });
+    const second = observation({
+      messageId: null,
+      location: {
+        ...first.location,
+        accountId: "scope",
+        providerId: "shared:provider-id:tail",
+      },
+    });
+    const [firstCanonical] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: first.location.accountId, provider: "gmail", mailbox: "INBOX",
+      observations: [first], authoritative: true,
+    });
+    const [secondCanonical] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: second.location.accountId, provider: "gmail", mailbox: "INBOX",
+      observations: [second], authoritative: true,
+    });
+
+    expect(firstCanonical!.id).not.toBe(secondCanonical!.id);
+  });
+
+  test("rejects an empty provider ID consistently with the shared contract", async () => {
+    const store = await createStore();
+    const invalid = observation({
+      messageId: null,
+      location: { ...observation().location, providerId: "" },
+    });
+
+    await expect(store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [invalid], authoritative: true,
+    })).rejects.toThrow("Provider ID must be non-empty when present");
   });
 
   test("retains overlapping folders and reconciles moves without changing identity", async () => {
@@ -221,6 +296,60 @@ describe("canonical message persistence", () => {
     });
   });
 
+  test("retains a promoted provider association after every source location is removed", async () => {
+    const store = await createStore();
+    const missing = observation({
+      messageId: null,
+      location: {
+        ...observation().location,
+        accountId: "gmail-account",
+        provider: "gmail",
+        uidValidity: "gmail",
+        providerId: "gmail-promoted",
+      },
+    });
+    const [fallback] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
+      observations: [missing], authoritative: true,
+    });
+    const [promoted] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
+      observations: [{ ...missing, messageId: "<promoted@example.test>", inReplyTo: null, references: [] }],
+      authoritative: true,
+    });
+    await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
+      observations: [], authoritative: true,
+    });
+    const moved = {
+      ...missing,
+      inReplyTo: null,
+      references: [],
+      location: { ...missing.location, mailbox: "Archive", uid: 99 },
+    };
+    const [reappeared] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "Archive",
+      observations: [moved], authoritative: true,
+    });
+
+    expect(reappeared).toMatchObject({
+      id: fallback!.id,
+      messageId: "<promoted@example.test>",
+      inReplyTo: "<parent@example.test>",
+      references: ["<root@example.test>", "<parent@example.test>"],
+    });
+    expect(promoted!.id).toBe(fallback!.id);
+    expect((await store.listMessageLocations("tenant-a", fallback!.id)).map(({ mailbox }) => mailbox))
+      .toEqual(["Archive"]);
+
+    const isolated = { ...moved, tenantId: "tenant-b", location: { ...moved.location, accountId: "gmail-other" } };
+    const [other] = await store.reconcileMailbox({
+      tenantId: "tenant-b", accountId: "gmail-other", provider: "gmail", mailbox: "Archive",
+      observations: [isolated], authoritative: true,
+    });
+    expect(other!.id).not.toBe(reappeared!.id);
+  });
+
   test("merges a provider fallback from another label into an existing canonical message", async () => {
     const store = await createStore();
     const existing = observation({ inReplyTo: null, references: [] });
@@ -294,6 +423,68 @@ describe("canonical message persistence", () => {
     expect(new Set(survivor!.aliases)).toEqual(new Set(fallbacks.map(({ id }) => id)));
     for (const fallback of fallbacks) expect(await store.getMessage("tenant-a", fallback.id)).toEqual(survivor);
     expect(await store.listMessageLocations("tenant-a", canonical!.id)).toHaveLength(3);
+  });
+
+  test("retains every merged provider association after all source locations are removed", async () => {
+    const store = await createStore();
+    const base = observation({ inReplyTo: null, references: [] });
+    const [canonical] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [base], authoritative: true,
+    });
+    const providerFallbacks = ["gmail-first", "gmail-second"].map((providerId, index) => observation({
+      messageId: null,
+      inReplyTo: index === 0 ? "<provider-parent@example.test>" : null,
+      references: index === 0 ? ["<provider-root@example.test>"] : [],
+      location: {
+        ...base.location,
+        accountId: "gmail-account",
+        provider: "gmail",
+        uidValidity: "gmail",
+        uid: 70 + index,
+        providerId,
+      },
+    }));
+    const fallbackMessages = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
+      observations: providerFallbacks, authoritative: true,
+    });
+    for (const fallback of providerFallbacks) {
+      await store.reconcileMailbox({
+        tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
+        observations: [{ ...fallback, messageId: base.messageId, inReplyTo: null, references: [] }],
+        authoritative: false,
+      });
+    }
+    await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
+      observations: [], authoritative: true,
+    });
+    await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [], authoritative: true,
+    });
+
+    const reappeared = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "Archive",
+      observations: providerFallbacks.map((fallback, index) => ({
+        ...fallback,
+        inReplyTo: null,
+        references: [],
+        location: { ...fallback.location, mailbox: "Archive", uid: 90 + index },
+      })),
+      authoritative: true,
+    });
+
+    expect(new Set(reappeared.map(({ id }) => id))).toEqual(new Set([canonical!.id]));
+    expect(new Set(reappeared[0]!.aliases)).toEqual(new Set(fallbackMessages.map(({ id }) => id)));
+    expect(reappeared[0]).toMatchObject({
+      inReplyTo: "<provider-parent@example.test>",
+      references: ["<provider-root@example.test>"],
+    });
+    for (const fallback of fallbackMessages) {
+      expect(await store.getMessage("tenant-a", fallback.id)).toEqual(reappeared[0]!);
+    }
   });
 
   test("retains threading metadata when an ordinary duplicate omits it", async () => {

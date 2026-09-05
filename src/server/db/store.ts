@@ -97,6 +97,7 @@ export class Store {
     if (!account) return false;
     const remove = this.#sqlite.transaction((accountId: string) => {
       this.#sqlite.query("DELETE FROM message_locations WHERE account_id = ?").run(accountId);
+      this.#sqlite.query("DELETE FROM message_provider_associations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM operation_batches WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM proposals WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM accounts WHERE id = ?").run(accountId);
@@ -166,6 +167,7 @@ export class Store {
 
   async reconcileMailbox(snapshot: MailboxSnapshot): Promise<CanonicalMessage[]> {
     for (const observation of snapshot.observations) {
+      if (observation.location.providerId === "") throw new Error("Provider ID must be non-empty when present");
       if (observation.tenantId !== snapshot.tenantId
         || observation.location.accountId !== snapshot.accountId
         || observation.location.provider !== snapshot.provider
@@ -184,17 +186,10 @@ export class Store {
           return normalized ? [normalized] : [];
         });
         const locationKey = locationKeyFor(observation);
+        const legacyLocationKey = legacyLocationKeyFor(observation);
         const fallbackIdentityKey = fallbackIdentityKeyFor(observation);
-        const providerCanonical = this.#sqlite.query(`
-          SELECT message.*
-          FROM message_locations location
-          INNER JOIN messages message
-            ON message.tenant_id = location.tenant_id AND message.id = location.message_id
-          WHERE location.tenant_id = ? AND location.account_id = ? AND location.provider = ?
-            AND location.location_key = ?
-          ORDER BY CASE WHEN location.mailbox = ? THEN 0 ELSE 1 END, location.id
-          LIMIT 1
-        `).get(value.tenantId, value.accountId, value.provider, locationKey, value.mailbox) as MessageRow | null;
+        const legacyFallbackIdentityKey = legacyFallbackIdentityKeyFor(observation);
+        const providerCanonical = findProviderCanonical(this.#sqlite, observation);
         let canonical: MessageRow | null = null;
         let fallbackRows: MessageRow[] = [];
 
@@ -209,11 +204,33 @@ export class Store {
             LEFT JOIN message_locations location
               ON location.tenant_id = message.tenant_id AND location.message_id = message.id
             WHERE message.tenant_id = ? AND message.message_id IS NULL
-              AND (message.identity_key = ? OR (
-                location.account_id = ? AND location.provider = ? AND location.location_key = ?
+              AND (message.identity_key = ? OR (message.identity_key = ?
+                AND NOT EXISTS (
+                  SELECT 1 FROM message_provider_associations known_association
+                  WHERE known_association.tenant_id = message.tenant_id
+                    AND known_association.message_id = message.id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM message_locations known_location
+                  WHERE known_location.tenant_id = message.tenant_id
+                    AND known_location.message_id = message.id
+                )
+              ) OR (
+                location.account_id = ? AND location.provider = ? AND location.location_key IN (?, ?)
+              ) OR EXISTS (
+                SELECT 1 FROM message_provider_associations association
+                WHERE association.tenant_id = message.tenant_id AND association.message_id = message.id
+                  AND association.account_id = ? AND association.provider = ?
+                  AND ((? IS NOT NULL AND association.provider_id = ?)
+                    OR (? IS NULL AND association.provider_id IS NULL AND association.mailbox = ?
+                      AND association.uid_validity = ? AND association.uid = ?))
               ))
             ORDER BY message.created_at, message.id
-          `).all(value.tenantId, fallbackIdentityKey, value.accountId, value.provider, locationKey) as MessageRow[];
+          `).all(value.tenantId, fallbackIdentityKey, legacyFallbackIdentityKey,
+            value.accountId, value.provider, locationKey, legacyLocationKey,
+            value.accountId, value.provider, observation.location.providerId, observation.location.providerId,
+            observation.location.providerId, observation.location.mailbox, observation.location.uidValidity,
+            observation.location.uid) as MessageRow[];
           canonical ??= fallbackRows[0] ?? null;
           if (!canonical) {
             const id = crypto.randomUUID();
@@ -244,6 +261,9 @@ export class Store {
             this.#sqlite.query(
               "UPDATE message_aliases SET message_id = ? WHERE tenant_id = ? AND message_id = ?",
             ).run(canonical.id, value.tenantId, fallback.id);
+            this.#sqlite.query(
+              "UPDATE message_provider_associations SET message_id = ? WHERE tenant_id = ? AND message_id = ?",
+            ).run(canonical.id, value.tenantId, fallback.id);
             this.#sqlite.query(`
               INSERT INTO message_aliases (alias_id, tenant_id, message_id, created_at)
               VALUES (?, ?, ?, ?)
@@ -253,6 +273,21 @@ export class Store {
           }
         } else {
           canonical = providerCanonical;
+          canonical ??= this.#sqlite.query(`
+            SELECT * FROM messages
+            WHERE tenant_id = ? AND message_id IS NULL AND (identity_key = ? OR (identity_key = ?
+              AND NOT EXISTS (
+                SELECT 1 FROM message_provider_associations association
+                WHERE association.tenant_id = messages.tenant_id AND association.message_id = messages.id
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM message_locations location
+                WHERE location.tenant_id = messages.tenant_id AND location.message_id = messages.id
+              )
+            ))
+            ORDER BY CASE WHEN identity_key = ? THEN 0 ELSE 1 END, created_at, id
+            LIMIT 1
+          `).get(value.tenantId, fallbackIdentityKey, legacyFallbackIdentityKey, fallbackIdentityKey) as MessageRow | null;
           if (!canonical) {
             const id = crypto.randomUUID();
             this.#sqlite.query(`
@@ -275,23 +310,36 @@ export class Store {
         }
 
         const canonicalId = canonical.id;
-        const location = this.#sqlite.query(`
-          INSERT INTO message_locations
-            (id, message_id, tenant_id, account_id, provider, mailbox, location_key, uid_validity, uid, modseq, provider_id, read, flagged, observed_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT (tenant_id, account_id, provider, mailbox, location_key) DO UPDATE SET
-            message_id = excluded.message_id,
-            uid_validity = excluded.uid_validity,
-            uid = excluded.uid,
-            modseq = excluded.modseq,
-            provider_id = excluded.provider_id,
-            read = excluded.read,
-            flagged = excluded.flagged,
-            observed_at = excluded.observed_at
-          RETURNING id
-        `).get(crypto.randomUUID(), canonicalId, value.tenantId, value.accountId, value.provider, value.mailbox, locationKey,
-          observation.location.uidValidity, observation.location.uid, observation.location.modseq,
-          observation.location.providerId, observation.location.read ? 1 : 0, observation.location.flagged ? 1 : 0, now) as { id: string };
+        associateProviderObservation(this.#sqlite, observation, canonicalId);
+        const existingLocation = this.#sqlite.query(`
+          SELECT id FROM message_locations
+          WHERE tenant_id = ? AND account_id = ? AND provider = ? AND mailbox = ?
+            AND location_key IN (?, ?)
+          ORDER BY CASE WHEN location_key = ? THEN 0 ELSE 1 END, id
+          LIMIT 1
+        `).get(value.tenantId, value.accountId, value.provider, value.mailbox,
+          locationKey, legacyLocationKey, locationKey) as { id: string } | null;
+        const location = existingLocation
+          ? this.#sqlite.query(`
+              UPDATE message_locations SET
+                message_id = ?, uid_validity = ?, uid = ?, modseq = ?, provider_id = ?,
+                read = ?, flagged = ?, observed_at = ?
+              WHERE id = ?
+              RETURNING id
+            `).get(canonicalId, observation.location.uidValidity, observation.location.uid,
+              observation.location.modseq, observation.location.providerId,
+              observation.location.read ? 1 : 0, observation.location.flagged ? 1 : 0,
+              now, existingLocation.id) as { id: string }
+          : this.#sqlite.query(`
+              INSERT INTO message_locations
+                (id, message_id, tenant_id, account_id, provider, mailbox, location_key, uid_validity, uid,
+                  modseq, provider_id, read, flagged, observed_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              RETURNING id
+            `).get(crypto.randomUUID(), canonicalId, value.tenantId, value.accountId, value.provider,
+              value.mailbox, locationKey, observation.location.uidValidity, observation.location.uid,
+              observation.location.modseq, observation.location.providerId,
+              observation.location.read ? 1 : 0, observation.location.flagged ? 1 : 0, now) as { id: string };
         const locationId = location.id;
         observedLocationIds.push(locationId);
       }
@@ -440,6 +488,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS message_aliases_message_id_idx ON message_aliases(message_id);
     `);
     this.#migrateMessageLocationTenantForeignKey();
+    this.#migrateMessageProviderAssociations();
     const accountsTable = this.#sqlite.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
       .get() as { sql: string } | null;
     if (accountsTable && !accountsTable.sql.includes("'gmail'")) {
@@ -542,19 +591,135 @@ export class Store {
     }
     this.#sqlite.exec("CREATE INDEX IF NOT EXISTS message_locations_message_id_idx ON message_locations(message_id)");
   }
+
+  #migrateMessageProviderAssociations(): void {
+    const applied = this.#sqlite.query("SELECT 1 FROM schema_migrations WHERE version = 476001").get();
+    if (applied) return;
+    const migrate = this.#sqlite.transaction(() => {
+      this.#sqlite.exec(`
+        CREATE TABLE message_provider_associations (
+          tenant_id TEXT NOT NULL,
+          account_id TEXT NOT NULL REFERENCES accounts(id),
+          provider TEXT NOT NULL CHECK (provider IN ('imap', 'gmail')),
+          provider_id TEXT,
+          mailbox TEXT,
+          uid_validity TEXT,
+          uid INTEGER,
+          message_id TEXT NOT NULL,
+          FOREIGN KEY (tenant_id, message_id) REFERENCES messages(tenant_id, id),
+          CHECK ((provider_id IS NOT NULL AND provider_id <> ''
+              AND mailbox IS NULL AND uid_validity IS NULL AND uid IS NULL)
+            OR (provider_id IS NULL AND mailbox IS NOT NULL AND uid_validity IS NOT NULL AND uid IS NOT NULL))
+        );
+        CREATE UNIQUE INDEX message_provider_associations_provider_id_unique
+          ON message_provider_associations(tenant_id, account_id, provider, provider_id)
+          WHERE provider_id IS NOT NULL;
+        CREATE UNIQUE INDEX message_provider_associations_location_unique
+          ON message_provider_associations(tenant_id, account_id, provider, mailbox, uid_validity, uid)
+          WHERE provider_id IS NULL;
+        CREATE INDEX message_provider_associations_message_id_idx
+          ON message_provider_associations(message_id);
+      `);
+      const providerConflict = this.#sqlite.query(`
+        SELECT 1 FROM message_locations
+        WHERE provider_id IS NOT NULL AND provider_id <> ''
+        GROUP BY tenant_id, account_id, provider, provider_id
+        HAVING COUNT(DISTINCT message_id) > 1
+        LIMIT 1
+      `).get();
+      const locationConflict = this.#sqlite.query(`
+        SELECT 1 FROM message_locations
+        WHERE provider_id IS NULL OR provider_id = ''
+        GROUP BY tenant_id, account_id, provider, mailbox, uid_validity, uid
+        HAVING COUNT(DISTINCT message_id) > 1
+        LIMIT 1
+      `).get();
+      if (providerConflict || locationConflict) {
+        throw new Error("Canonical provider association migration found conflicting messages");
+      }
+      this.#sqlite.exec(`
+        INSERT INTO message_provider_associations
+          (tenant_id, account_id, provider, provider_id, mailbox, uid_validity, uid, message_id)
+        SELECT tenant_id, account_id, provider, NULLIF(provider_id, ''),
+          CASE WHEN NULLIF(provider_id, '') IS NULL THEN mailbox ELSE NULL END,
+          CASE WHEN NULLIF(provider_id, '') IS NULL THEN uid_validity ELSE NULL END,
+          CASE WHEN NULLIF(provider_id, '') IS NULL THEN uid ELSE NULL END,
+          MIN(message_id)
+        FROM message_locations
+        GROUP BY tenant_id, account_id, provider, NULLIF(provider_id, ''),
+          CASE WHEN NULLIF(provider_id, '') IS NULL THEN mailbox ELSE NULL END,
+          CASE WHEN NULLIF(provider_id, '') IS NULL THEN uid_validity ELSE NULL END,
+          CASE WHEN NULLIF(provider_id, '') IS NULL THEN uid ELSE NULL END;
+        INSERT INTO schema_migrations (version, applied_at) VALUES (476001, CURRENT_TIMESTAMP);
+      `);
+      const violations = this.#sqlite.query("PRAGMA foreign_key_check('message_provider_associations')").all();
+      if (violations.length > 0) throw new Error("Canonical provider association migration left invalid foreign keys");
+    });
+    migrate();
+  }
 }
 
 interface MessageRow { id: string; tenant_id: string; identity_key: string; message_id: string | null; in_reply_to: string | null; references: string; created_at: string; updated_at: string }
 interface LocationRow { id: string; message_id: string; tenant_id: string; account_id: string; provider: MailProviderKind; mailbox: string; uid_validity: string; uid: number; modseq: string | null; provider_id: string | null; read: number; flagged: number; observed_at: string }
 
 function fallbackIdentityKeyFor(observation: CanonicalMessageObservation): string {
-  return `provider:${observation.location.provider}:${observation.location.accountId}:${locationKeyFor(observation)}`;
+  const location = observation.location;
+  return `provider:${JSON.stringify(location.providerId
+    ? [location.provider, location.accountId, location.providerId]
+    : [location.provider, location.accountId, location.mailbox, location.uidValidity, location.uid])}`;
+}
+
+function legacyFallbackIdentityKeyFor(observation: CanonicalMessageObservation): string {
+  const location = observation.location;
+  return `provider:${location.provider}:${location.accountId}:${legacyLocationKeyFor(observation)}`;
 }
 
 function locationKeyFor(observation: CanonicalMessageObservation): string {
-  return observation.location.providerId
-    ? `provider-id:${observation.location.providerId}`
-    : `imap:${observation.location.mailbox}:${observation.location.uidValidity}:${observation.location.uid}`;
+  const location = observation.location;
+  return JSON.stringify(location.providerId
+    ? ["provider-id", location.providerId]
+    : ["imap", location.mailbox, location.uidValidity, location.uid]);
+}
+
+function legacyLocationKeyFor(observation: CanonicalMessageObservation): string {
+  const location = observation.location;
+  return location.providerId
+    ? `provider-id:${location.providerId}`
+    : `imap:${location.mailbox}:${location.uidValidity}:${location.uid}`;
+}
+
+function findProviderCanonical(sqlite: Database, observation: CanonicalMessageObservation): MessageRow | null {
+  const location = observation.location;
+  const identity = location.providerId
+    ? "association.provider_id = ?"
+    : "association.provider_id IS NULL AND association.mailbox = ? AND association.uid_validity = ? AND association.uid = ?";
+  const values = location.providerId ? [location.providerId] : [location.mailbox, location.uidValidity, location.uid];
+  return sqlite.query(`
+    SELECT message.*
+    FROM message_provider_associations association
+    INNER JOIN messages message
+      ON message.tenant_id = association.tenant_id AND message.id = association.message_id
+    WHERE association.tenant_id = ? AND association.account_id = ? AND association.provider = ? AND ${identity}
+    LIMIT 1
+  `).get(observation.tenantId, location.accountId, location.provider, ...values) as MessageRow | null;
+}
+
+function associateProviderObservation(
+  sqlite: Database,
+  observation: CanonicalMessageObservation,
+  messageId: string,
+): void {
+  const location = observation.location;
+  sqlite.query(`
+    INSERT INTO message_provider_associations
+      (tenant_id, account_id, provider, provider_id, mailbox, uid_validity, uid, message_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT DO UPDATE SET message_id = excluded.message_id
+  `).run(observation.tenantId, location.accountId, location.provider, location.providerId,
+    location.providerId ? null : location.mailbox,
+    location.providerId ? null : location.uidValidity,
+    location.providerId ? null : location.uid,
+    messageId);
 }
 
 function toStoredLocation(row: LocationRow): StoredMessageLocation {

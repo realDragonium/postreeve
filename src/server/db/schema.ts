@@ -1,4 +1,5 @@
-import { foreignKey, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
+import { check, foreignKey, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import type {
   OperationResult,
   ProposalItem,
@@ -75,6 +76,35 @@ export const messageAliases = sqliteTable("message_aliases", {
     foreignColumns: [messages.tenantId, messages.id],
   }),
   index("message_aliases_message_id_idx").on(table.messageId),
+]);
+
+export const messageProviderAssociations = sqliteTable("message_provider_associations", {
+  tenantId: text("tenant_id").notNull(),
+  accountId: text("account_id").notNull().references(() => accounts.id),
+  provider: text("provider", { enum: ["imap", "gmail"] }).notNull(),
+  providerId: text("provider_id"),
+  mailbox: text("mailbox"),
+  uidValidity: text("uid_validity"),
+  uid: integer("uid"),
+  messageId: text("message_id").notNull(),
+}, (table) => [
+  foreignKey({
+    columns: [table.tenantId, table.messageId],
+    foreignColumns: [messages.tenantId, messages.id],
+    name: "message_provider_associations_tenant_message_fk",
+  }),
+  uniqueIndex("message_provider_associations_provider_id_unique")
+    .on(table.tenantId, table.accountId, table.provider, table.providerId)
+    .where(sql`${table.providerId} IS NOT NULL`),
+  uniqueIndex("message_provider_associations_location_unique")
+    .on(table.tenantId, table.accountId, table.provider, table.mailbox, table.uidValidity, table.uid)
+    .where(sql`${table.providerId} IS NULL`),
+  index("message_provider_associations_message_id_idx").on(table.messageId),
+  check("message_provider_associations_identity_check", sql`
+    (${table.providerId} IS NOT NULL AND ${table.providerId} <> ''
+      AND ${table.mailbox} IS NULL AND ${table.uidValidity} IS NULL AND ${table.uid} IS NULL)
+    OR (${table.providerId} IS NULL AND ${table.mailbox} IS NOT NULL AND ${table.uidValidity} IS NOT NULL AND ${table.uid} IS NOT NULL)
+  `),
 ]);
 
 export const messageLocations = sqliteTable("message_locations", {
