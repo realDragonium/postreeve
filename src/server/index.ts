@@ -39,6 +39,7 @@ const googleOAuth = googleClientId && googleClientSecret
 
 const service = new PostreeveService(
   store,
+  { tenantId: "local" },
   providers,
   senders,
   vault,

@@ -5,8 +5,8 @@ import {
   accountSettingsSchema,
   connectionTestResultSchema,
   folderSchema,
-  messageDetailSchema,
-  messageSummarySchema,
+  canonicalMessageDetailSchema,
+  canonicalMessageSummarySchema,
   operationBatchSchema,
   proposalSchema,
   sendReceiptSchema,
@@ -18,9 +18,9 @@ import {
   type DeleteFolderInput,
   type DirectActionInput,
   type Folder,
-  type MessageDetail,
+  type CanonicalMessageDetail,
+  type CanonicalMessageSummary,
   type MessageRef,
-  type MessageSummary,
   type OperationBatch,
   type Proposal,
   type RenameFolderInput,
@@ -120,18 +120,18 @@ export const api = {
       ...jsonBody({ path: input.path }),
       ...withSignal(signal),
     }),
-  messages: (accountId: string, mailbox: string, query: string, limit = 50, signal?: AbortSignal): Promise<MessageSummary[]> => {
+  messages: (accountId: string, mailbox: string, query: string, limit = 50, signal?: AbortSignal): Promise<CanonicalMessageSummary[]> => {
     const params = new URLSearchParams({ mailbox });
     if (query.trim()) params.set("query", query.trim());
     params.set("limit", String(limit));
     return request(
       `/accounts/${encodeURIComponent(accountId)}/messages?${params.toString()}`,
-      messageSummarySchema.array(),
+      canonicalMessageSummarySchema.array(),
       withSignal(signal),
     );
   },
-  readMessages: (references: readonly MessageRef[], signal?: AbortSignal): Promise<MessageDetail[]> =>
-    request("/messages/read", messageDetailSchema.array(), {
+  readMessages: (references: readonly MessageRef[], signal?: AbortSignal): Promise<CanonicalMessageDetail[]> =>
+    request("/messages/read", canonicalMessageDetailSchema.array(), {
       method: "POST",
       ...jsonBody({ references }),
       ...withSignal(signal),

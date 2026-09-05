@@ -40,8 +40,205 @@ describe("Postreeve core workflow", () => {
 
     expect(secondMessages[0]?.ref.accountId).toBe(second.id);
     expect(messages[0]?.ref.accountId).toBe(account.id);
+    expect(secondMessages[0]?.canonicalId).toBe(messages[0]?.canonicalId);
     await expect(service.readMessages([messages[0]!.ref, secondMessages[0]!.ref]))
       .rejects.toThrow("different accounts");
+    store.close();
+  });
+
+  test("persists provider listings in the tenant without treating truncated results as authoritative", async () => {
+    const { store, service } = await createEmptyTestHarness();
+    const account = await service.createAccount(testAccountInput());
+    const stale = (uid: number, read: boolean) => ({
+      tenantId: "test-tenant",
+      messageId: null,
+      inReplyTo: null,
+      references: [],
+      location: {
+        accountId: account.id,
+        provider: "imap" as const,
+        mailbox: "INBOX",
+        uidValidity: "1723371481",
+        uid,
+        modseq: "1",
+        providerId: null,
+        read,
+        flagged: false,
+      },
+    });
+    const [listed, unseen] = await store.reconcileMailbox({
+      tenantId: "test-tenant",
+      accountId: account.id,
+      provider: "imap",
+      mailbox: "INBOX",
+      observations: [stale(103, true), stale(101, true)],
+      authoritative: true,
+    });
+
+    const messages = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 1 });
+
+    expect(messages.map(({ ref }) => ref.uid)).toEqual([103]);
+    expect(messages[0]?.canonicalId).toBe(listed!.id);
+    expect((await service.listMessages({ accountId: account.id, mailbox: "INBOX", query: "planning", limit: 1 }))[0]?.canonicalId)
+      .toBe(listed!.id);
+    expect((await service.searchMessages({ accountId: account.id, mailbox: "INBOX", query: "planning", limit: 1 }))[0]?.canonicalId)
+      .toBe(listed!.id);
+    expect(await store.listMessageLocations("test-tenant", listed!.id)).toMatchObject([{ read: false, flagged: true }]);
+    expect(await store.listMessageLocations("test-tenant", unseen!.id)).toHaveLength(1);
+    store.close();
+  });
+
+  test("reconciles read observations without removing unseen locations and promotes fallback identities", async () => {
+    const { store, service } = await createEmptyTestHarness({
+      duplicateDelivery: true,
+      missingMessageId: true,
+      readOverrides: {
+        messageId: " <READ-103@Example.Test> ",
+        inReplyTo: "<parent@example.test>",
+        references: ["<root@example.test>", "<parent@example.test>"],
+        read: false,
+        flagged: true,
+        text: "Complete read body.",
+        html: "<p>Complete read body.</p>",
+      },
+    });
+    const account = await service.createAccount(testAccountInput());
+    const fallback = (uid: number, providerId: string | null) => ({
+      tenantId: "test-tenant",
+      messageId: null,
+      inReplyTo: null,
+      references: [],
+      location: {
+        accountId: account.id,
+        provider: "imap" as const,
+        mailbox: "INBOX",
+        uidValidity: "1723371481",
+        uid,
+        modseq: "1",
+        providerId,
+        read: true,
+        flagged: false,
+      },
+    });
+    const [firstFallback, secondFallback, unseen] = await store.reconcileMailbox({
+      tenantId: "test-tenant",
+      accountId: account.id,
+      provider: "imap",
+      mailbox: "INBOX",
+      observations: [fallback(103, null), fallback(104, "provider-copy-104"), fallback(999, null)],
+      authoritative: true,
+    });
+    const references = [
+      { accountId: account.id, mailbox: "INBOX", uidValidity: "1723371481", uid: 103, modseq: "1" },
+      {
+        accountId: account.id,
+        mailbox: "INBOX",
+        uidValidity: "1723371481",
+        uid: 104,
+        modseq: "1",
+        providerId: "provider-copy-104",
+      },
+    ];
+
+    const details = await service.readMessages(references);
+
+    expect(details.map(({ ref }) => ref)).toEqual(references);
+    expect(details.map(({ text, html }) => ({ text, html }))).toEqual([
+      { text: "Complete read body.", html: "<p>Complete read body.</p>" },
+      { text: "Complete read body.", html: "<p>Complete read body.</p>" },
+    ]);
+    expect(new Set(details.map(({ canonicalId }) => canonicalId)).size).toBe(1);
+    expect(details[0]?.canonicalId).toBe(firstFallback!.id);
+    expect(details[0]?.canonicalAliases).toContain(secondFallback!.id);
+    expect(details[1]?.canonicalAliases).toEqual(details[0]?.canonicalAliases);
+    expect(await store.getMessage("test-tenant", firstFallback!.id)).toMatchObject({
+      id: firstFallback!.id,
+      messageId: "<READ-103@example.test>",
+      inReplyTo: "<parent@example.test>",
+      references: ["<root@example.test>", "<parent@example.test>"],
+    });
+    const locations = await store.listMessageLocations("test-tenant", firstFallback!.id);
+    expect(locations.toSorted((left, right) => left.uid - right.uid)).toMatchObject([
+      { uid: 103, read: false, flagged: true },
+      { uid: 104, read: false, flagged: true },
+    ]);
+    expect(await store.listMessageLocations("test-tenant", unseen!.id)).toHaveLength(1);
+    expect(await store.getMessage("another-tenant", firstFallback!.id)).toBeNull();
+    store.close();
+  });
+
+  test("retains provider-result order across same-account mailboxes without collapsing repeated references", async () => {
+    const { store, service } = await createEmptyTestHarness({ archiveDelivery: true });
+    const account = await service.createAccount(testAccountInput());
+    const archive = {
+      accountId: account.id,
+      mailbox: "Archive",
+      uidValidity: "1723371481",
+      uid: 105,
+      modseq: "3",
+      providerId: "archive-copy-105",
+    };
+    const inbox = {
+      accountId: account.id,
+      mailbox: "INBOX",
+      uidValidity: "1723371481",
+      uid: 103,
+      modseq: "1",
+    };
+
+    const details = await service.readMessages([archive, inbox, archive]);
+
+    expect(details.map(({ ref }) => ref)).toEqual([archive, inbox, archive]);
+    expect(details.map(({ text }) => text)).toEqual([
+      "Archived full body.",
+      "Here are the decisions and follow-ups.",
+      "Archived full body.",
+    ]);
+    expect(new Set(details.map(({ canonicalId }) => canonicalId)).size).toBe(1);
+    expect(await store.listMessageLocations("test-tenant", details[0]!.canonicalId)).toHaveLength(2);
+    store.close();
+  });
+
+  test("returns one canonical summary while retaining duplicate delivery locations", async () => {
+    const { store, service } = await createEmptyTestHarness({ duplicateDelivery: true });
+    const account = await service.createAccount(testAccountInput());
+
+    const listed = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 });
+    const searched = await service.searchMessages({
+      accountId: account.id,
+      mailbox: "INBOX",
+      query: "planning",
+      limit: 50,
+    });
+    const queried = await service.listMessages({
+      accountId: account.id,
+      mailbox: "INBOX",
+      query: "planning",
+      limit: 50,
+    });
+    const planning = listed.filter(({ messageId }) => messageId === "<message-103@example.test>");
+
+    expect(planning).toHaveLength(1);
+    expect(planning[0]).toMatchObject({ ref: { uid: 103 }, read: false, flagged: true });
+    expect(searched.map(({ canonicalId }) => canonicalId)).toEqual([planning[0]!.canonicalId]);
+    expect(queried.map(({ canonicalId }) => canonicalId)).toEqual([planning[0]!.canonicalId]);
+    const locations = await store.listMessageLocations("test-tenant", planning[0]!.canonicalId);
+    expect(locations.map(({ uid, providerId }) => ({ uid, providerId })).toSorted((left, right) => left.uid - right.uid))
+      .toEqual([
+      { uid: 103, providerId: null },
+      { uid: 104, providerId: "provider-copy-104" },
+      ]);
+    expect((await service.readMessages([
+      { accountId: account.id, mailbox: "INBOX", uidValidity: "1723371481", uid: 103, modseq: "1" },
+      {
+        accountId: account.id,
+        mailbox: "INBOX",
+        uidValidity: "1723371481",
+        uid: 104,
+        modseq: "1",
+        providerId: "provider-copy-104",
+      },
+    ])).map(({ ref }) => ref.uid)).toEqual([103, 104]);
     store.close();
   });
 
@@ -138,9 +335,92 @@ describe("Postreeve core workflow", () => {
     expect(batch.status).toBe("applied");
     expect((await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 }))
       .some(({ ref }) => ref.uid === message.ref.uid)).toBe(false);
-    expect((await service.listMessages({ accountId: account.id, mailbox: "Archive", limit: 50 }))
-      .some(({ ref }) => ref.uid === message.ref.uid)).toBe(true);
+    const [moved] = await service.listMessages({ accountId: account.id, mailbox: "Archive", limit: 50 });
+    expect(moved?.ref.uid).toBe(message.ref.uid);
+    expect(moved?.canonicalId).toBe(message.canonicalId);
     expect((await service.getProposal(batch.proposalId)).approvedAt).not.toBeNull();
+    store.close();
+  });
+
+  test("retains a missing-ID message through an applied move and its undo", async () => {
+    const { store, service, account, messages } = await createTestHarness({ missingMessageId: true });
+    const message = messages[0]!;
+    const batch = await service.applyDirectActions({
+      accountId: account.id,
+      items: [{
+        message: message.ref,
+        subject: message.subject,
+        action: { type: "move", destination: "Archive" },
+      }],
+    });
+
+    expect(batch.status).toBe("applied");
+    expect(batch.operations[0]?.error).toBeNull();
+    await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 });
+    const [moved] = await service.listMessages({ accountId: account.id, mailbox: "Archive", limit: 50 });
+    expect(moved?.canonicalId).toBe(message.canonicalId);
+    expect(await store.getMessage("test-tenant", message.canonicalId!)).toMatchObject({
+      inReplyTo: "<parent@example.test>",
+      references: ["<root@example.test>", "<parent@example.test>"],
+    });
+
+    const undone = await service.undoBatch(batch.id);
+    expect(undone.status).toBe("undone");
+    expect(undone.operations[0]?.error).toBeNull();
+    await service.listMessages({ accountId: account.id, mailbox: "Archive", limit: 50 });
+    const restored = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 });
+    expect(restored.find(({ subject }) => subject === message.subject)?.canonicalId).toBe(message.canonicalId);
+    store.close();
+  });
+
+  test("keeps provider success and undoability when local move identity persistence fails", async () => {
+    const { store, service, account, messages } = await createTestHarness({ missingMessageId: true });
+    store.recordProviderMove = async () => {
+      throw new Error("fixture identity persistence failure");
+    };
+    const message = messages[0]!;
+    const batch = await service.applyDirectActions({
+      accountId: account.id,
+      items: [{
+        message: message.ref,
+        subject: message.subject,
+        action: { type: "move", destination: "Archive" },
+      }],
+    });
+
+    expect(batch.status).toBe("applied");
+    expect(batch.operations[0]?.status).toBe("applied");
+    expect(batch.operations[0]?.error).toContain("local message identity");
+    const undone = await service.undoBatch(batch.id);
+    expect(undone.status).toBe("undone");
+    expect(undone.operations[0]?.error).toContain("local message identity");
+    const restored = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 });
+    expect(restored.some(({ subject }) => subject === message.subject)).toBe(true);
+    store.close();
+  });
+
+  test("warns without losing provider success or undoability when a move source is unknown", async () => {
+    const { store, service, account, messages } = await createTestHarness({ missingMessageId: true });
+    store.recordProviderMove = async () => false;
+    const message = messages[0]!;
+    const batch = await service.applyDirectActions({
+      accountId: account.id,
+      items: [{
+        message: message.ref,
+        subject: message.subject,
+        action: { type: "move", destination: "Archive" },
+      }],
+    });
+
+    expect(batch.status).toBe("applied");
+    expect(batch.operations[0]).toMatchObject({ status: "applied" });
+    expect(batch.operations[0]?.error).toContain("source identity is unknown");
+    const undone = await service.undoBatch(batch.id);
+    expect(undone.status).toBe("undone");
+    expect(undone.operations[0]).toMatchObject({ status: "undone" });
+    expect(undone.operations[0]?.error).toContain("source identity is unknown");
+    const restored = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 });
+    expect(restored.some(({ subject }) => subject === message.subject)).toBe(true);
     store.close();
   });
 

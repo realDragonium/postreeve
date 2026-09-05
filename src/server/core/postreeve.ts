@@ -1,6 +1,8 @@
 import type {
   Account,
   AccountSettings,
+  CanonicalMessageDetail,
+  CanonicalMessageSummary,
   CreateAccountInput,
   CreateFolderInput,
   CreateProposalInput,
@@ -8,7 +10,6 @@ import type {
   DirectActionInput,
   Folder,
   ListMessagesInput,
-  MessageDetail,
   MessageRef,
   MessageSummary,
   OperationBatch,
@@ -29,9 +30,15 @@ import {
   sendMessageInputSchema,
   updateProposalInputSchema,
 } from "../../shared/contracts";
+import { uniqueCanonicalMessages } from "../../shared/canonical-messages";
 import type { Store, StoredAccount, StoredBatch } from "../db/store";
 import type { StoredOperation } from "../db/schema";
-import { MailProviderRegistry, type MailProvider } from "../mail/provider";
+import {
+  MailProviderRegistry,
+  toCanonicalObservation,
+  type MailProvider,
+  type ProviderLocationMove,
+} from "../mail/provider";
 import { MailSenderRegistry, type MailSender } from "../mail/sender";
 import {
   CredentialVault,
@@ -48,8 +55,13 @@ export type GmailClientFactory = (
   credentials: GmailAccountCredentials,
 ) => { provider: MailProvider; sender: MailSender };
 
+export interface PostreeveContext {
+  tenantId: string;
+}
+
 export class PostreeveService {
   readonly #store: Store;
+  readonly #context: PostreeveContext;
   readonly #providers: MailProviderRegistry;
   readonly #senders: MailSenderRegistry;
   readonly #vault: CredentialVault;
@@ -59,6 +71,7 @@ export class PostreeveService {
 
   constructor(
     store: Store,
+    context: PostreeveContext,
     providers: MailProviderRegistry,
     senders: MailSenderRegistry,
     vault: CredentialVault,
@@ -68,7 +81,9 @@ export class PostreeveService {
       throw new Error("Google account support is not configured");
     },
   ) {
+    if (!context.tenantId.trim()) throw new Error("A tenant ID is required");
     this.#store = store;
+    this.#context = context;
     this.#providers = providers;
     this.#senders = senders;
     this.#vault = vault;
@@ -230,28 +245,65 @@ export class PostreeveService {
     return provider.listFolders(input.accountId);
   }
 
-  async listMessages(input: ListMessagesInput): Promise<MessageSummary[]> {
-    await this.#requireAccount(input.accountId);
+  async listMessages(input: ListMessagesInput): Promise<CanonicalMessageSummary[]> {
+    const account = await this.#requireAccount(input.accountId);
     const provider = this.#providers.forAccount(input.accountId);
-    return input.query
-      ? provider.searchMessages(input.accountId, input.mailbox, input.query, input.limit)
-      : provider.listMessages(input.accountId, input.mailbox, input.limit);
+    if (input.query) {
+      const messages = await provider.searchMessages(input.accountId, input.mailbox, input.query, input.limit);
+      return this.#persistObservedMessages(account, input.mailbox, messages, false);
+    }
+
+    const page = await provider.listMessagePage(input.accountId, input.mailbox, input.limit);
+    return this.#persistObservedMessages(account, input.mailbox, page.messages, page.complete);
   }
 
-  async searchMessages(input: ListMessagesInput & { query: string }): Promise<MessageSummary[]> {
-    await this.#requireAccount(input.accountId);
-    return this.#providers.forAccount(input.accountId)
+  async searchMessages(input: ListMessagesInput & { query: string }): Promise<CanonicalMessageSummary[]> {
+    const account = await this.#requireAccount(input.accountId);
+    const messages = await this.#providers.forAccount(input.accountId)
       .searchMessages(input.accountId, input.mailbox, input.query, input.limit);
+    return this.#persistObservedMessages(account, input.mailbox, messages, false);
   }
 
-  async readMessages(references: MessageRef[]): Promise<MessageDetail[]> {
+  async readMessages(references: MessageRef[]): Promise<CanonicalMessageDetail[]> {
     if (references.length === 0) return [];
     const accountId = references[0]!.accountId;
     if (references.some((reference) => reference.accountId !== accountId)) {
       throw new Error("Messages from different accounts cannot be read in one request");
     }
-    await this.#requireAccount(accountId);
-    return this.#providers.forAccount(accountId).readMessages(accountId, references);
+    const account = await this.#requireAccount(accountId);
+    const details = await this.#providers.forAccount(accountId).readMessages(accountId, references);
+    if (details.length !== references.length) {
+      throw new Error("Provider read result count does not match references");
+    }
+
+    const canonicalByIndex = new Map<number, string>();
+    const mailboxGroups = new Map<string, Array<{ detail: typeof details[number]; index: number }>>();
+    for (const [index, detail] of details.entries()) {
+      if (detail.ref.accountId !== accountId) throw new Error("Provider read returned a message from a different account");
+      const group = mailboxGroups.get(detail.ref.mailbox) ?? [];
+      group.push({ detail, index });
+      mailboxGroups.set(detail.ref.mailbox, group);
+    }
+    for (const [mailbox, group] of mailboxGroups) {
+      const canonical = await this.#store.reconcileMailbox({
+        tenantId: this.#context.tenantId,
+        accountId,
+        provider: account.kind,
+        mailbox,
+        observations: group.map(({ detail }) => toCanonicalObservation(this.#context.tenantId, account.kind, detail)),
+        authoritative: false,
+      });
+      if (canonical.length !== group.length) throw new Error("Canonical reconciliation result count does not match observations");
+      group.forEach(({ index }, groupIndex) => canonicalByIndex.set(index, canonical[groupIndex]!.id));
+    }
+
+    return Promise.all(details.map(async (detail, index) => {
+      const observedId = canonicalByIndex.get(index);
+      if (!observedId) throw new Error("Canonical read result is missing");
+      const canonical = await this.#store.getMessage(this.#context.tenantId, observedId);
+      if (!canonical) throw new Error("Canonical read message is missing");
+      return { ...detail, canonicalId: canonical.id, canonicalAliases: canonical.aliases };
+    }));
   }
 
   async sendMessage(rawInput: SendMessageInput): Promise<SendReceipt> {
@@ -366,7 +418,8 @@ export class PostreeveService {
           operation = { result: operationResult(item, "applied", null), applied: null };
         } else {
           const applied = await provider.apply(item.message, item.action);
-          operation = { result: operationResult(item, "applied", null), applied };
+          const identityError = await this.#recordProviderMove(proposal.accountId, applied);
+          operation = { result: operationResult(item, "applied", identityError), applied };
         }
       } catch (error) {
         operation = { result: operationResult(item, "failed", errorMessage(error)), applied: null };
@@ -416,10 +469,11 @@ export class PostreeveService {
         continue;
       }
       try {
-        await provider.undo(operation.applied);
+        const reversed = await provider.undo(operation.applied);
+        const identityError = reversed ? await this.#recordProviderMove(batch.accountId, reversed) : null;
         storedOperations.push({
           ...operation,
-          result: { ...operation.result, status: "undone", error: null },
+          result: { ...operation.result, status: "undone", error: identityError },
         });
       } catch (error) {
         storedOperations.push({
@@ -443,9 +497,49 @@ export class PostreeveService {
     return toPublicBatch(updated);
   }
 
+  async #recordProviderMove(accountId: string, move: ProviderLocationMove): Promise<string | null> {
+    try {
+      const account = await this.#requireAccount(accountId);
+      const retained = await this.#store.recordProviderMove(
+        this.#context.tenantId,
+        account.kind,
+        move.previous,
+        move.current,
+      );
+      if (!retained) {
+        return "Provider action succeeded, but local message identity could not be retained: source identity is unknown";
+      }
+      return null;
+    } catch (error) {
+      return `Provider action succeeded, but local message identity could not be retained: ${errorMessage(error)}`;
+    }
+  }
+
   #registerStoredAccount(account: StoredAccount): void {
     const credentials = this.#credentialsFor(account);
     this.#registerClients(account.id, this.#clientsFor(toPublicAccount(account), credentials));
+  }
+
+  async #persistObservedMessages(
+    account: StoredAccount,
+    mailbox: string,
+    messages: MessageSummary[],
+    authoritative: boolean,
+  ): Promise<CanonicalMessageSummary[]> {
+    const canonical = await this.#store.reconcileMailbox({
+      tenantId: this.#context.tenantId,
+      accountId: account.id,
+      provider: account.kind,
+      mailbox,
+      observations: messages.map((message) => toCanonicalObservation(this.#context.tenantId, account.kind, message)),
+      authoritative,
+    });
+    if (canonical.length !== messages.length) throw new Error("Canonical reconciliation result count does not match observations");
+    return uniqueCanonicalMessages(messages.map((message, index) => ({
+      ...message,
+      canonicalId: canonical[index]!.id,
+      canonicalAliases: canonical[index]!.aliases,
+    })));
   }
 
   #credentialsFor(account: StoredAccount): AccountCredentials {

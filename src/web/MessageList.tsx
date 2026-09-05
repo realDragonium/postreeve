@@ -1,7 +1,7 @@
 import type { Folder, MessageSummary, TriageAction } from "../shared/contracts";
 import type { MessageFilter, MessageSort } from "./mail-ui-state";
 import { formatListTime } from "./format";
-import { messageKey, senderName } from "./mail-view";
+import { messageIsSelected, messageKey, messageMatchesKey, senderName } from "./mail-view";
 import type { MessageProvenance } from "./provenance";
 import { provenanceKey } from "./provenance";
 import { railFor } from "./theme";
@@ -49,7 +49,7 @@ export function MessageList(props: MessageListProps) {
 
   const focused = props.messages[props.focus];
   const focusedProposal = focused ? props.provenance.get(provenanceKey(focused.ref)) : undefined;
-  const selectionCount = props.messages.filter((message) => props.selected.has(messageKey(message))).length;
+  const selectionCount = props.messages.filter((message) => messageIsSelected(message, props.selected)).length;
   const archive = props.folders.find((folder) => folder.specialUse === "archive");
   const destinations = props.folders.filter((folder) => folder.specialUse !== "trash");
   const hasTrash = props.folders.some((folder) => folder.specialUse === "trash");
@@ -113,8 +113,8 @@ export function MessageList(props: MessageListProps) {
         const proposed = entry?.kind === "proposed";
         return <button
           key={key}
-          className={`row ${message.read ? "" : "unread"} ${key === props.openKey ? "open" : index === props.focus ? "focus" : props.selected.has(key) ? "cosel" : ""}`}
-          aria-current={key === props.openKey ? "true" : undefined}
+          className={`row ${message.read ? "" : "unread"} ${messageMatchesKey(message, props.openKey) ? "open" : index === props.focus ? "focus" : messageIsSelected(message, props.selected) ? "cosel" : ""}`}
+          aria-current={messageMatchesKey(message, props.openKey) ? "true" : undefined}
           onClick={(event) => {
             if (event.metaKey || event.ctrlKey) props.onSelect(message, { toggle: true, range: false });
             else if (event.shiftKey) props.onSelect(message, { toggle: false, range: true });

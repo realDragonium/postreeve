@@ -61,8 +61,12 @@ export const messageAddressSchema = z.object({
 });
 
 export const messageSummarySchema = z.object({
+  canonicalId: z.string().min(1).optional(),
+  canonicalAliases: z.array(z.string().min(1)).optional(),
   ref: messageRefSchema,
   messageId: z.string(),
+  inReplyTo: z.string().nullable().optional(),
+  references: z.array(z.string()).optional(),
   subject: z.string(),
   from: z.array(messageAddressSchema),
   to: z.array(messageAddressSchema),
@@ -74,9 +78,48 @@ export const messageSummarySchema = z.object({
   flagged: z.boolean(),
 });
 
+export const canonicalMessageSummarySchema = messageSummarySchema.required({ canonicalId: true }).extend({
+  canonicalAliases: z.array(z.string().min(1)).default([]),
+});
+
+export const mailProviderKindSchema = z.enum(["imap", "gmail"]);
+
+export const canonicalMessageObservationSchema = z.object({
+  tenantId: z.string().min(1),
+  messageId: z.string().nullable(),
+  inReplyTo: z.string().nullable(),
+  references: z.array(z.string()),
+  location: z.object({
+    accountId: accountIdSchema,
+    provider: mailProviderKindSchema,
+    mailbox: z.string().min(1),
+    uidValidity: z.string().min(1),
+    uid: z.number().int().positive(),
+    modseq: z.string().min(1).nullable(),
+    providerId: z.string().min(1).nullable(),
+    read: z.boolean(),
+    flagged: z.boolean(),
+  }),
+});
+
+export const canonicalMessageSchema = z.object({
+  id: z.string().min(1),
+  aliases: z.array(z.string().min(1)),
+  tenantId: z.string().min(1),
+  messageId: z.string().nullable(),
+  inReplyTo: z.string().nullable(),
+  references: z.array(z.string()),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+});
+
 export const messageDetailSchema = messageSummarySchema.extend({
   text: z.string(),
   html: z.string().nullable(),
+});
+
+export const canonicalMessageDetailSchema = messageDetailSchema.required({ canonicalId: true }).extend({
+  canonicalAliases: z.array(z.string().min(1)).default([]),
 });
 
 export const triageActionSchema = z.discriminatedUnion("type", [
@@ -228,7 +271,12 @@ export type RenameFolderInput = z.infer<typeof renameFolderInputSchema>;
 export type DeleteFolderInput = z.infer<typeof deleteFolderInputSchema>;
 export type MessageRef = z.infer<typeof messageRefSchema>;
 export type MessageSummary = z.infer<typeof messageSummarySchema>;
+export type CanonicalMessageSummary = z.infer<typeof canonicalMessageSummarySchema>;
 export type MessageDetail = z.infer<typeof messageDetailSchema>;
+export type CanonicalMessageDetail = z.infer<typeof canonicalMessageDetailSchema>;
+export type MailProviderKind = z.infer<typeof mailProviderKindSchema>;
+export type CanonicalMessageObservation = z.infer<typeof canonicalMessageObservationSchema>;
+export type CanonicalMessage = z.infer<typeof canonicalMessageSchema>;
 export type TriageAction = z.infer<typeof triageActionSchema>;
 export type ProposalItem = z.infer<typeof proposalItemSchema>;
 export type Proposal = z.infer<typeof proposalSchema>;

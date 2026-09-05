@@ -1,15 +1,16 @@
 import { z } from "zod";
 
+import { uniqueCanonicalMessages } from "../../shared/canonical-messages.ts";
 import {
   accountSchema,
   batchIdSchema,
+  canonicalMessageDetailSchema,
   createFolderInputSchema,
   deleteFolderInputSchema,
   folderSchema,
   listMessagesInputSchema,
-  messageDetailSchema,
   messageRefSchema,
-  messageSummarySchema,
+  canonicalMessageSummarySchema,
   operationBatchSchema,
   renameFolderInputSchema,
   sendMessageInputSchema,
@@ -98,16 +99,16 @@ function inputJsonSchema(schema: z.ZodType): object {
   return z.toJSONSchema(schema, { io: "input", target: "draft-2020-12" });
 }
 
-function senderLabel(message: z.infer<typeof messageSummarySchema>): string {
+function senderLabel(message: z.infer<typeof canonicalMessageSummarySchema>): string {
   const first = message.from[0];
   return first?.name || first?.address || "";
 }
 
 function visibleMessages(
-  messages: readonly z.infer<typeof messageSummarySchema>[],
+  messages: readonly z.infer<typeof canonicalMessageSummarySchema>[],
   filter: WebMcpMessageFilter,
   sort: WebMcpMessageSort,
-): readonly z.infer<typeof messageSummarySchema>[] {
+): readonly z.infer<typeof canonicalMessageSummarySchema>[] {
   const filtered = messages.filter((message) => {
     if (filter === "unread") return !message.read;
     if (filter === "flagged") return message.flagged;
@@ -124,7 +125,7 @@ function visibleMessages(
 function showMailboxView(
   services: WebMcpServices,
   view: WebMcpMailboxView,
-): readonly z.infer<typeof messageSummarySchema>[] {
+): readonly z.infer<typeof canonicalMessageSummarySchema>[] {
   services.showMailboxView(view);
   return visibleMessages(view.messages, view.filter, view.sort);
 }
@@ -194,7 +195,9 @@ export function createPostreeveWebMcpTools(services: WebMcpServices): readonly W
       annotations: readOnlyAnnotations,
       execute: async (input, { signal }) => {
         const parsed = strictListMessagesInputSchema.parse(input);
-        const messages = z.array(messageSummarySchema).parse(await services.listMessages(parsed, signal));
+        const messages = uniqueCanonicalMessages(
+          z.array(canonicalMessageSummarySchema).parse(await services.listMessages(parsed, signal)),
+        );
         return showMailboxView(services, { ...parsed, query: "", messages });
       },
     },
@@ -206,7 +209,7 @@ export function createPostreeveWebMcpTools(services: WebMcpServices): readonly W
       annotations: readOnlyAnnotations,
       execute: async (input, { signal }) => {
         const { messages } = readMessagesInputSchema.parse(input);
-        return z.array(messageDetailSchema).parse(await services.readMessages(messages, signal));
+        return z.array(canonicalMessageDetailSchema).parse(await services.readMessages(messages, signal));
       },
     },
     {
@@ -217,7 +220,9 @@ export function createPostreeveWebMcpTools(services: WebMcpServices): readonly W
       annotations: readOnlyAnnotations,
       execute: async (input, { signal }) => {
         const parsed = searchMessagesInputSchema.parse(input);
-        const messages = z.array(messageSummarySchema).parse(await services.searchMessages(parsed, signal));
+        const messages = uniqueCanonicalMessages(
+          z.array(canonicalMessageSummarySchema).parse(await services.searchMessages(parsed, signal)),
+        );
         return showMailboxView(services, { ...parsed, messages });
       },
     },

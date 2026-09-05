@@ -23,7 +23,7 @@ import type {
   MessageSummary,
   TriageAction,
 } from "../../shared/contracts";
-import type { AppliedMailAction, MailProvider } from "./provider";
+import type { AppliedMailAction, MailboxPage, MailProvider, ProviderLocationMove } from "./provider";
 
 export interface ImapAccountConfig {
   accountId: string;
@@ -149,13 +149,19 @@ export class ImapMailProvider implements MailProvider {
   }
 
   async listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]> {
+    return (await this.listMessagePage(accountId, mailbox, limit)).messages;
+  }
+
+  async listMessagePage(accountId: string, mailbox: string, limit: number): Promise<MailboxPage> {
     this.#assertAccount(accountId);
     assertLimit(limit);
     return this.#withClient(async (client) => {
       const opened = await client.mailboxOpen(mailbox, { readOnly: true });
-      const selected = await searchUids(client, { all: true }, limit);
-      if (selected.length === 0) return [];
-      return this.#fetchSummaries(client, opened, selected);
+      const selected = await searchUids(client, { all: true }, limit + 1);
+      const messages = selected.length === 0
+        ? []
+        : await this.#fetchSummaries(client, opened, selected.slice(0, limit));
+      return { messages, complete: selected.length <= limit };
     });
   }
 
@@ -263,17 +269,17 @@ export class ImapMailProvider implements MailProvider {
     });
   }
 
-  async undo(applied: AppliedMailAction): Promise<void> {
+  async undo(applied: AppliedMailAction): Promise<ProviderLocationMove | null> {
     this.#assertReference(applied.current);
     this.#assertReference(applied.previous);
     if (applied.current.accountId !== applied.previous.accountId) {
       throw new Error("Cannot undo an action across accounts");
     }
 
-    await this.#withClient(async (client) => {
+    return this.#withClient(async (client) => {
       switch (applied.action.type) {
         case "leave":
-          return;
+          return null;
         case "mark_read":
         case "mark_unread": {
           const opened = await client.mailboxOpen(applied.current.mailbox);
@@ -281,7 +287,7 @@ export class ImapMailProvider implements MailProvider {
           const current = await client.fetchOne(applied.current.uid, { uid: true }, { uid: true });
           assertCurrentMessage(current, applied.current);
           await changeSeenFlag(client, applied.current, applied.previousRead);
-          return;
+          return null;
         }
         case "move":
         case "trash": {
@@ -293,9 +299,23 @@ export class ImapMailProvider implements MailProvider {
           assertUidValidity(opened, applied.current);
           const current = await client.fetchOne(applied.current.uid, { uid: true }, { uid: true });
           assertCurrentMessage(current, applied.current);
+          const previous = referenceFor(this.#config.accountId, applied.current.mailbox, opened, current);
           const moved = await client.messageMove(applied.current.uid, applied.previous.mailbox, { uid: true });
           if (!moved) throw new Error(`IMAP server refused to undo the move of UID ${applied.current.uid}`);
-          return;
+          const movedIdentity = movedIdentityFor(moved, applied.current.uid);
+          if (destination.uidValidity !== movedIdentity.uidValidity) {
+            throw new Error(`IMAP server returned inconsistent UIDVALIDITY for ${applied.previous.mailbox}`);
+          }
+          return {
+            previous,
+            current: {
+              accountId: this.#config.accountId,
+              mailbox: applied.previous.mailbox,
+              uidValidity: movedIdentity.uidValidity.toString(),
+              uid: movedIdentity.uid,
+              modseq: null,
+            },
+          };
         }
       }
     });
@@ -569,6 +589,8 @@ function toSummary(
   return {
     ref: referenceFor(accountId, mailboxPath, mailbox, message),
     messageId: message.envelope?.messageId ?? headerString(parsed, "message-id") ?? "",
+    inReplyTo: message.envelope?.inReplyTo ?? headerString(parsed, "in-reply-to") ?? null,
+    references: parseReferences(parsed),
     subject: message.envelope?.subject ?? parsed?.subject ?? "(no subject)",
     from: message.envelope?.from?.map(toEnvelopeAddress) ?? parsedAddresses(parsed?.from?.value),
     to: message.envelope?.to?.map(toEnvelopeAddress) ?? parsedAddresses(flattenAddresses(parsed?.to)),
@@ -649,7 +671,16 @@ function flattenAddresses(value: ParsedMail["to"]): EmailAddress[] {
 
 function headerString(parsed: ParsedMail | undefined, name: string): string | undefined {
   const value = parsed?.headers.get(name);
-  return typeof value === "string" ? value : undefined;
+  if (typeof value === "string") return value;
+  return Array.isArray(value) && value.every((entry): entry is string => typeof entry === "string")
+    ? value.join(" ")
+    : undefined;
+}
+
+function parseReferences(parsed: ParsedMail | undefined): string[] {
+  const references = parsed?.references;
+  const values = Array.isArray(references) ? references : references ? [references] : [];
+  return values.flatMap((reference) => reference.match(/<[^<>]+>/g) ?? []);
 }
 
 function previewFor(text: string | undefined): string {

@@ -1,8 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { hc } from "hono/client";
-import { accountSchema, folderSchema, messageSummarySchema, proposalSchema } from "../src/shared/contracts";
+import {
+  accountSchema,
+  canonicalMessageDetailSchema,
+  canonicalMessageSummarySchema,
+  folderSchema,
+  messageSummarySchema,
+  proposalSchema,
+} from "../src/shared/contracts";
 import { createApi, oauthResultUrl, type AppType } from "../src/server/api";
-import { createTestHarness } from "./support/test-mail";
+import { createEmptyTestHarness, createTestHarness, testAccountInput } from "./support/test-mail";
 
 describe("Hono RPC API", () => {
   test("returns OAuth results to the active web client", () => {
@@ -27,7 +34,34 @@ describe("Hono RPC API", () => {
       param: { accountId: account.id },
       query: { mailbox: "INBOX", limit: "20" },
     });
-    expect(messageSummarySchema.array().parse(await messagesResponse.json()).length).toBeGreaterThan(0);
+    const messages = canonicalMessageSummarySchema.array().parse(await messagesResponse.json());
+    expect(messages.length).toBeGreaterThan(0);
+    const readResponse = await client.api.messages.read.$post({ json: { references: [messages[0]!.ref] } });
+    const details = canonicalMessageDetailSchema.array().parse(await readResponse.json());
+    expect(details[0]).toMatchObject({ canonicalId: messages[0]!.canonicalId, ref: messages[0]!.ref });
+    store.close();
+  });
+
+  test("returns one canonical summary for duplicate deliveries in list and search responses", async () => {
+    const { store, service } = await createEmptyTestHarness({ duplicateDelivery: true });
+    const account = await service.createAccount(testAccountInput());
+    const app = createApi(service);
+    const client = hc<AppType>("http://postreeve.local", { fetch: app.request });
+
+    const listResponse = await client.api.accounts[":accountId"].messages.$get({
+      param: { accountId: account.id },
+      query: { mailbox: "INBOX", limit: "50" },
+    });
+    const searchResponse = await client.api.accounts[":accountId"].messages.$get({
+      param: { accountId: account.id },
+      query: { mailbox: "INBOX", query: "planning", limit: "50" },
+    });
+    const listed = canonicalMessageSummarySchema.array().parse(await listResponse.json());
+    const searched = canonicalMessageSummarySchema.array().parse(await searchResponse.json());
+
+    expect(listed.filter(({ messageId }) => messageId === "<message-103@example.test>")).toHaveLength(1);
+    expect(searched).toHaveLength(1);
+    expect(searched[0]?.canonicalId).toBe(listed[0]?.canonicalId);
     store.close();
   });
 

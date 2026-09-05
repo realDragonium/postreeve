@@ -63,9 +63,14 @@ describe("Bun IMAP compatibility", () => {
     const state = fakeState();
     const provider = new ImapMailProvider(config, fakeFactory(state));
 
-    const summaries = await provider.listMessages(config.accountId, "INBOX", 2);
+    const page = await provider.listMessagePage(config.accountId, "INBOX", 2);
+    const summaries = page.messages;
+    expect(page.complete).toBe(false);
+    expect((await provider.listMessagePage(config.accountId, "INBOX", 3)).complete).toBe(true);
     expect(summaries.map((message) => message.ref.uid)).toEqual([3, 2]);
     expect(summaries[0]?.preview).toBe("Newest plain text body");
+    expect(summaries[0]?.inReplyTo).toBe("<parent@example.test>");
+    expect(summaries[0]?.references).toEqual(["<root@example.test>", "<parent@example.test>"]);
     expect(summaries[0]?.ref).toEqual({
       accountId: config.accountId,
       mailbox: "INBOX",
@@ -233,9 +238,25 @@ describe("Bun IMAP compatibility", () => {
     expect(state.mailboxes.get("INBOX")?.messages.has(3)).toBe(false);
     expect(state.mailboxes.get("Bin")?.messages.has(30)).toBe(true);
 
-    await provider.undo(applied);
+    const reversed = await provider.undo(applied);
     expect(state.mailboxes.get("Bin")?.messages.has(30)).toBe(false);
     expect(state.mailboxes.get("INBOX")?.messages.size).toBe(3);
+    expect(reversed).toEqual({
+      previous: {
+        accountId: config.accountId,
+        mailbox: "Bin",
+        uidValidity: "303",
+        uid: 30,
+        modseq: "14",
+      },
+      current: {
+        accountId: config.accountId,
+        mailbox: "INBOX",
+        uidValidity: "101",
+        uid: 4,
+        modseq: null,
+      },
+    });
   });
 
   test("refuses an untraceable move before changing server state", async () => {
@@ -536,6 +557,8 @@ function fakeRelatedMessage(
       "From: Sender <sender@example.test>",
       "To: Human <human@example.test>",
       `Message-ID: <message-${uid}@example.test>`,
+      "In-Reply-To: <parent@example.test>",
+      "References: <root@example.test> <parent@example.test>",
       `Subject: ${subject}`,
       "Date: Fri, 29 Aug 2025 12:00:00 +0000",
       "MIME-Version: 1.0",
@@ -582,7 +605,7 @@ function fakeMessage(
     : "Content-Type: multipart/alternative; boundary=boundary\r\n\r\n--boundary\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n";
   const ending = html === undefined ? "" : "--boundary--\r\n";
   const source = Buffer.from(
-    `From: Sender <sender@example.test>\r\nTo: Human <human@example.test>\r\nMessage-ID: <message-${uid}@example.test>\r\nSubject: ${subject}\r\nDate: Fri, 29 Aug 2025 12:00:00 +0000\r\n${contentType}${text}\r\n${htmlPart}${ending}`,
+    `From: Sender <sender@example.test>\r\nTo: Human <human@example.test>\r\nMessage-ID: <message-${uid}@example.test>\r\nIn-Reply-To: <parent@example.test>\r\nReferences: <root@example.test> <parent@example.test>\r\nSubject: ${subject}\r\nDate: Fri, 29 Aug 2025 12:00:00 +0000\r\n${contentType}${text}\r\n${htmlPart}${ending}`,
   );
   return {
     seq: uid,
@@ -593,6 +616,7 @@ function fakeMessage(
     envelope: {
       subject,
       messageId: `<message-${uid}@example.test>`,
+      inReplyTo: "<parent@example.test>",
       from: [{ name: "Sender", address: "sender@example.test" }],
       to: [{ name: "Human", address: "human@example.test" }],
     },

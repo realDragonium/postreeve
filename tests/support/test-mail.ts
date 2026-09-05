@@ -12,7 +12,13 @@ import {
 } from "../../src/shared/contracts";
 import { PostreeveService } from "../../src/server/core/postreeve";
 import { Store } from "../../src/server/db/store";
-import { MailProviderRegistry, type AppliedMailAction, type MailProvider } from "../../src/server/mail/provider";
+import {
+  MailProviderRegistry,
+  type AppliedMailAction,
+  type MailboxPage,
+  type MailProvider,
+  type ProviderLocationMove,
+} from "../../src/server/mail/provider";
 import { MailSenderRegistry, type MailSender } from "../../src/server/mail/sender";
 import { CredentialVault } from "../../src/server/security/credentials";
 import type { ImapAccountCredentials } from "../../src/server/security/credentials";
@@ -42,29 +48,43 @@ export function testAccountInput(name = "Work", email = "person@example.test"): 
   };
 }
 
-export async function createTestHarness() {
-  const harness = await createEmptyTestHarness();
+interface TestHarnessOptions {
+  imapFailure?: Error;
+  smtpFailure?: Error;
+  duplicateDelivery?: boolean;
+  archiveDelivery?: boolean;
+  missingMessageId?: boolean;
+  readOverrides?: Partial<MessageDetail>;
+}
+
+export async function createTestHarness(options: TestHarnessOptions = {}) {
+  const harness = await createEmptyTestHarness(options);
   const { store, service, sent } = harness;
   const account = await service.createAccount(testAccountInput());
   const messages = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 });
   return { ...harness, store, service, account, messages, sent };
 }
 
-export async function createEmptyTestHarness(options: {
-  imapFailure?: Error;
-  smtpFailure?: Error;
-} = {}) {
+export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
   const store = new Store(":memory:");
   const sent: SendMessageInput[] = [];
   const connections: ImapAccountCredentials[] = [];
   const providers = new Map<string, TestMailProvider>();
   const service = new PostreeveService(
     store,
+    { tenantId: "test-tenant" },
     new MailProviderRegistry(),
     new MailSenderRegistry(),
     new CredentialVault(testMasterKey),
     (accountId) => {
-      const provider = new TestMailProvider(accountId, options.imapFailure);
+      const provider = new TestMailProvider(
+        accountId,
+        options.imapFailure,
+        options.duplicateDelivery ?? false,
+        options.archiveDelivery ?? false,
+        options.missingMessageId ?? false,
+        options.readOverrides ?? {},
+      );
       providers.set(accountId, provider);
       return provider;
     },
@@ -90,10 +110,26 @@ class TestMailProvider implements MailProvider {
     ["Trash", { name: "Trash", specialUse: "trash" }],
   ]);
   readonly #verificationFailure: Error | undefined;
+  readonly #moveChangesUid: boolean;
+  readonly #readOverrides: Partial<MessageDetail>;
 
-  constructor(accountId: string, verificationFailure?: Error) {
+  constructor(
+    accountId: string,
+    verificationFailure: Error | undefined,
+    duplicateDelivery: boolean,
+    archiveDelivery: boolean,
+    missingMessageId: boolean,
+    readOverrides: Partial<MessageDetail>,
+  ) {
     this.#accountId = accountId;
-    this.#messages = testMessages(accountId);
+    this.#messages = testMessages(accountId, duplicateDelivery, archiveDelivery);
+    this.#moveChangesUid = missingMessageId;
+    this.#readOverrides = structuredClone(readOverrides);
+    if (missingMessageId) {
+      this.#messages[0]!.messageId = "missing-message-id";
+      this.#messages[0]!.inReplyTo = "<parent@example.test>";
+      this.#messages[0]!.references = ["<root@example.test>", "<parent@example.test>"];
+    }
     this.#verificationFailure = verificationFailure;
   }
 
@@ -138,12 +174,15 @@ class TestMailProvider implements MailProvider {
   }
 
   async listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]> {
+    return (await this.listMessagePage(accountId, mailbox, limit)).messages;
+  }
+
+  async listMessagePage(accountId: string, mailbox: string, limit: number): Promise<MailboxPage> {
     this.#assertAccount(accountId);
-    return this.#messages
+    const observed = this.#messages
       .filter((message) => message.mailbox === mailbox)
-      .sort((left, right) => right.receivedAt.localeCompare(left.receivedAt))
-      .slice(0, limit)
-      .map(toSummary);
+      .sort((left, right) => right.receivedAt.localeCompare(left.receivedAt));
+    return { messages: observed.slice(0, limit).map(toSummary), complete: observed.length <= limit };
   }
 
   async readMessages(accountId: string, references: MessageRef[]): Promise<MessageDetail[]> {
@@ -151,7 +190,7 @@ class TestMailProvider implements MailProvider {
     return references.map((reference) => {
       const message = this.#find(reference);
       if (!message) throw new Error(`Message UID ${reference.uid} is stale or missing`);
-      return toDetail(message);
+      return { ...toDetail(message), ...structuredClone(this.#readOverrides) };
     });
   }
 
@@ -187,22 +226,28 @@ class TestMailProvider implements MailProvider {
       case "move":
         message.mailbox = action.destination;
         message.ref.mailbox = action.destination;
+        if (this.#moveChangesUid) message.ref.uid += 100;
         break;
       case "trash":
         message.mailbox = "Trash";
         message.ref.mailbox = "Trash";
+        if (this.#moveChangesUid) message.ref.uid += 100;
         break;
     }
     message.ref.modseq = String(Number(message.ref.modseq ?? "0") + 1);
     return { current: structuredClone(message.ref), previous, action, previousRead };
   }
 
-  async undo(applied: AppliedMailAction): Promise<void> {
+  async undo(applied: AppliedMailAction): Promise<ProviderLocationMove | null> {
     const message = this.#find(applied.current);
     if (!message) throw new Error(`Applied message UID ${applied.current.uid} changed or no longer exists`);
+    const previous = structuredClone(message.ref);
     message.mailbox = applied.previous.mailbox;
     message.read = applied.previousRead;
     message.ref = { ...applied.previous, modseq: String(Number(message.ref.modseq ?? "0") + 1) };
+    return applied.action.type === "move" || applied.action.type === "trash"
+      ? { previous, current: structuredClone(message.ref) }
+      : null;
   }
 
   appendSent(input: SendMessageInput, messageId: string, sentAt: string): void {
@@ -287,27 +332,48 @@ function toDetail(message: TestMessage): MessageDetail {
   return structuredClone(detail);
 }
 
-function testMessages(accountId: string): TestMessage[] {
+function testMessages(accountId: string, duplicateDelivery: boolean, archiveDelivery: boolean): TestMessage[] {
   const ref = (uid: number): MessageRef => ({ accountId, mailbox: "INBOX", uidValidity, uid, modseq: "1" });
   const recipient = [{ name: "Test user", address: "person@example.test" }];
-  return [
+  const messages: TestMessage[] = [
     {
-      ref: ref(103), mailbox: "INBOX", messageId: "message-103@example.test", subject: "Quarterly planning notes",
+      ref: ref(103), mailbox: "INBOX", messageId: "<message-103@example.test>", subject: "Quarterly planning notes",
       from: [{ name: "Sam Rivera", address: "sam@example.test" }], to: recipient,
       receivedAt: "2026-08-29T09:30:00.000Z", preview: "Here are the decisions and follow-ups.",
       text: "Here are the decisions and follow-ups.", html: null, read: false, flagged: true,
     },
     {
-      ref: ref(102), mailbox: "INBOX", messageId: "message-102@example.test", subject: "Engineering newsletter",
+      ref: ref(102), mailbox: "INBOX", messageId: "<message-102@example.test>", subject: "Engineering newsletter",
       from: [{ name: "Engineering Weekly", address: "digest@example.test" }], to: recipient,
       receivedAt: "2026-08-28T16:00:00.000Z", preview: "This week's engineering stories.",
       text: "This week's engineering stories.", html: null, read: false, flagged: false,
     },
     {
-      ref: ref(101), mailbox: "INBOX", messageId: "message-101@example.test", subject: "August receipt",
+      ref: ref(101), mailbox: "INBOX", messageId: "<message-101@example.test>", subject: "August receipt",
       from: [{ name: "Hosting", address: "billing@example.test" }], to: recipient,
       receivedAt: "2026-08-27T11:15:00.000Z", preview: "Your payment was successful.",
       text: "Your payment was successful.", html: null, read: true, flagged: false,
     },
   ];
+  if (duplicateDelivery) {
+    messages.splice(1, 0, {
+      ...structuredClone(messages[0]!),
+      ref: { ...ref(104), providerId: "provider-copy-104" },
+      read: true,
+      flagged: false,
+      preview: "Duplicate provider delivery with different mutable flags.",
+    });
+  }
+  if (archiveDelivery) {
+    messages.push({
+      ...structuredClone(messages[0]!),
+      ref: { accountId, mailbox: "Archive", uidValidity, uid: 105, modseq: "3", providerId: "archive-copy-105" },
+      mailbox: "Archive",
+      text: "Archived full body.",
+      html: "<p>Archived full body.</p>",
+      read: true,
+      flagged: false,
+    });
+  }
+  return messages;
 }
