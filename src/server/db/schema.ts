@@ -84,4 +84,6 @@ export const messageLocations = sqliteTable("message_locations", {
     foreignColumns: [messages.tenantId, messages.id],
     name: "message_locations_tenant_message_fk",
   }),
+  uniqueIndex("message_locations_tenant_account_provider_mailbox_location_key_unique")
+    .on(table.tenantId, table.accountId, table.provider, table.mailbox, table.locationKey),
 ]);

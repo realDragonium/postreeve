@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { CanonicalMessageObservation, MessageSummary } from "../src/shared/contracts";
 import { Store } from "../src/server/db/store";
+import { normalizeMessageId } from "../src/server/mail/message-id";
 import { toCanonicalObservation } from "../src/server/mail/provider";
 
 const stores: Store[] = [];
@@ -64,6 +65,34 @@ describe("canonical message persistence", () => {
     expect(repeated!.id).toBe(created!.id);
     expect(await store.listMessageLocations("tenant-a", created!.id)).toHaveLength(2);
     expect(repeated!.references).toEqual(first.references);
+  });
+
+  test("deduplicates commented Message-IDs and retains commented threading identifiers", async () => {
+    const store = await createStore();
+    const first = observation({
+      messageId: "(source (nested\\) comment))\r\n \t<message@Example.Test>",
+      inReplyTo: "<parent@Example.Test> (thread\\ comment)",
+      references: ["(root) <root@Example.Test>", "<parent@Example.Test> (parent)"],
+    });
+    const [created] = await store.reconcileMailbox({
+      tenantId: first.tenantId, accountId: first.location.accountId, provider: first.location.provider,
+      mailbox: first.location.mailbox, observations: [first], authoritative: true,
+    });
+    const duplicate = observation({ location: {
+      ...first.location, accountId: "gmail-account", provider: "gmail", providerId: "gmail-cfws", uidValidity: "gmail",
+    } });
+    const [repeated] = await store.reconcileMailbox({
+      tenantId: duplicate.tenantId, accountId: duplicate.location.accountId, provider: duplicate.location.provider,
+      mailbox: duplicate.location.mailbox, observations: [duplicate], authoritative: true,
+    });
+
+    expect(repeated).toMatchObject({
+      id: created!.id,
+      messageId: "<message@example.test>",
+      inReplyTo: "<parent@example.test>",
+      references: ["<root@example.test>", "<parent@example.test>"],
+    });
+    expect(await store.listMessageLocations("tenant-a", created!.id)).toHaveLength(2);
   });
 
   test("keeps identities tenant-scoped", async () => {
@@ -372,4 +401,22 @@ test("normalizes valid quoted and domain-literal Message-IDs without accepting m
   expect(toCanonicalObservation("tenant-a", "imap", summary("<local@[IPv6:2001:DB8::1]> ")).messageId)
     .toBe("<local@[ipv6:2001:db8::1]>");
   expect(toCanonicalObservation("tenant-a", "imap", summary("not-a-message-id")).messageId).toBeNull();
+});
+
+test("normalizes surrounding RFC 5322 CFWS without accepting malformed or multiple IDs", () => {
+  expect(normalizeMessageId("(outer (nested\\) comment) tail)\r\n \t<local@Example.Test> (trailing\\\\comment)"))
+    .toBe("<local@example.test>");
+  expect(normalizeMessageId("<local@example.test>\r\n\t(comment)"))
+    .toBe("<local@example.test>");
+
+  for (const malformed of [
+    "(unclosed) (comment <local@example.test>",
+    "<local@example.test> (unclosed",
+    "(bad\r\nfold) <local@example.test>",
+    "<local@example.test>\n (bare line feed)",
+    "<one@example.test> <two@example.test>",
+    "(comment) <local@example.test> trailing",
+  ]) {
+    expect(normalizeMessageId(malformed)).toBeNull();
+  }
 });

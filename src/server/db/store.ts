@@ -490,16 +490,23 @@ export class Store {
             UNIQUE (tenant_id, account_id, provider, mailbox, location_key)
           );
           INSERT INTO message_locations_with_tenant_fk
-          SELECT location.*
+            (id, message_id, tenant_id, account_id, provider, mailbox, location_key,
+              uid_validity, uid, modseq, provider_id, read, flagged, observed_at)
+          SELECT location.id, location.message_id, location.tenant_id, location.account_id,
+            location.provider, location.mailbox, location.location_key, location.uid_validity,
+            location.uid, location.modseq, location.provider_id, location.read,
+            location.flagged, location.observed_at
           FROM message_locations location
           INNER JOIN messages message
             ON message.id = location.message_id AND message.tenant_id = location.tenant_id;
           DROP TABLE message_locations;
           ALTER TABLE message_locations_with_tenant_fk RENAME TO message_locations;
           INSERT OR IGNORE INTO schema_migrations (version, applied_at)
-          VALUES (476, CURRENT_TIMESTAMP);
-          COMMIT;
+            VALUES (476, CURRENT_TIMESTAMP);
         `);
+        const violations = this.#sqlite.query("PRAGMA foreign_key_check('message_locations')").all();
+        if (violations.length > 0) throw new Error("Canonical message migration left invalid foreign keys");
+        this.#sqlite.exec("COMMIT");
       } catch (error) {
         if (this.#sqlite.inTransaction) this.#sqlite.exec("ROLLBACK");
         throw error;
@@ -508,8 +515,6 @@ export class Store {
       }
     }
     this.#sqlite.exec("CREATE INDEX IF NOT EXISTS message_locations_message_id_idx ON message_locations(message_id)");
-    const violations = this.#sqlite.query("PRAGMA foreign_key_check").all();
-    if (violations.length > 0) throw new Error("Canonical message migration left invalid foreign keys");
   }
 }
 
