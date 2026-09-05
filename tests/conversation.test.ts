@@ -6,6 +6,37 @@ import {
 } from "../src/server/mail/conversation";
 
 describe("conversation resolution", () => {
+  test("matches the lexicographically first valid order for small acyclic reference observations", () => {
+    const ids = ["<a@example.test>", "<b@example.test>", "<c@example.test>"];
+    const permutations = <T>(values: readonly T[]): T[][] => values.length === 0
+      ? [[]]
+      : values.flatMap((value, index) => permutations(values.filter((_, candidate) => candidate !== index))
+        .map((rest) => [value, ...rest]));
+    const candidateSequences = [
+      ...permutations(ids),
+      [ids[0]!, ids[1]!, ids[0]!],
+      [ids[2]!, ids[0]!, ids[2]!],
+    ];
+
+    for (const retained of candidateSequences) {
+      for (const observed of candidateSequences) {
+        const deduplicated = [retained, observed].map((sequence) => [...new Set(sequence)]);
+        const values = [...new Set(deduplicated.flat())];
+        const expected = permutations(values)
+          .sort((left, right) => left.join("\0").localeCompare(right.join("\0")))
+          .find((candidate) => deduplicated.every((sequence) =>
+            sequence.every((value, index) => index === 0
+              || candidate.indexOf(sequence[index - 1]!) < candidate.indexOf(value))));
+        if (!expected) continue;
+
+        expect(mergeThreadingMetadata(null, observed, {
+          inReplyTo: null,
+          references: retained,
+        }, []).references).toEqual(expected);
+      }
+    }
+  });
+
   test("merges conflicting threading metadata independently of observation order", () => {
     const observations = [
       { inReplyTo: "<parent-b@example.test>", references: ["<root@example.test>", "<parent-b@example.test>"] },
@@ -94,5 +125,15 @@ describe("conversation resolution", () => {
     ];
     expect(orderConversationMessages(messages).map(({ id }) => id))
       .toEqual(["cycle-b", "cycle-a", "child"]);
+  });
+
+  test("merges a long References chain without recursive traversal", () => {
+    const references = Array.from({ length: 10_001 }, (_, index) => `<ref-${index}@example.test>`);
+    const observed = [...references, references[5_000]!, references[0]!];
+
+    const merged = mergeThreadingMetadata(null, observed, { inReplyTo: null, references: [] }, []);
+
+    expect(merged.references).toEqual(references);
+    expect(merged.edges).toHaveLength(references.length);
   });
 });

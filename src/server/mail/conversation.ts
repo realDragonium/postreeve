@@ -34,12 +34,8 @@ function mergeReferenceSequences(sequences: readonly (readonly string[])[]): str
   const values = [...new Set(uniqueSequences.flat())];
   const after = new Map(values.map((value) => [value, new Set<string>()]));
   for (const sequence of uniqueSequences) {
-    for (let index = 0; index < sequence.length; index += 1) {
-      for (const later of sequence.slice(index + 1)) {
-        const earlier = sequence[index]!;
-        if (earlier === later || after.get(earlier)!.has(later)) continue;
-        after.get(earlier)!.add(later);
-      }
+    for (let index = 1; index < sequence.length; index += 1) {
+      after.get(sequence[index - 1]!)!.add(sequence[index]!);
     }
   }
   return orderDirectedGraph(values, after, (left, right) => left.localeCompare(right));
@@ -80,31 +76,52 @@ function orderDirectedGraph(
   const stacked = new Set<string>();
   const components: string[][] = [];
   let nextIndex = 0;
-  const visit = (value: string): void => {
+  interface VisitFrame {
+    value: string;
+    laterValues: string[];
+    nextLater: number;
+  }
+  const startVisit = (value: string): VisitFrame => {
     indexByValue.set(value, nextIndex);
     lowByValue.set(value, nextIndex);
     nextIndex += 1;
     stack.push(value);
     stacked.add(value);
-    for (const later of after.get(value) ?? []) {
-      if (!indexByValue.has(later)) {
-        visit(later);
-        lowByValue.set(value, Math.min(lowByValue.get(value)!, lowByValue.get(later)!));
-      } else if (stacked.has(later)) {
-        lowByValue.set(value, Math.min(lowByValue.get(value)!, indexByValue.get(later)!));
+    return { value, laterValues: [...(after.get(value) ?? [])], nextLater: 0 };
+  };
+  for (const value of values) {
+    if (indexByValue.has(value)) continue;
+    const visits = [startVisit(value)];
+    while (visits.length > 0) {
+      const visit = visits[visits.length - 1]!;
+      const later = visit.laterValues[visit.nextLater];
+      if (later !== undefined) {
+        visit.nextLater += 1;
+        if (!indexByValue.has(later)) {
+          visits.push(startVisit(later));
+        } else if (stacked.has(later)) {
+          lowByValue.set(visit.value, Math.min(lowByValue.get(visit.value)!, indexByValue.get(later)!));
+        }
+        continue;
+      }
+
+      visits.pop();
+      const parent = visits[visits.length - 1];
+      if (parent) {
+        lowByValue.set(parent.value, Math.min(lowByValue.get(parent.value)!, lowByValue.get(visit.value)!));
+      }
+      if (lowByValue.get(visit.value) === indexByValue.get(visit.value)) {
+        const component: string[] = [];
+        while (stack.length > 0) {
+          const member = stack.pop()!;
+          stacked.delete(member);
+          component.push(member);
+          if (member === visit.value) break;
+        }
+        components.push(component.sort(compareValues));
       }
     }
-    if (lowByValue.get(value) !== indexByValue.get(value)) return;
-    const component: string[] = [];
-    while (stack.length > 0) {
-      const member = stack.pop()!;
-      stacked.delete(member);
-      component.push(member);
-      if (member === value) break;
-    }
-    components.push(component.sort(compareValues));
-  };
-  for (const value of values) if (!indexByValue.has(value)) visit(value);
+  }
 
   const componentByValue = new Map<string, number>();
   components.forEach((component, index) => {
