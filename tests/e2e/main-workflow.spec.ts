@@ -44,7 +44,9 @@ const message: CanonicalMessageDetail = {
   messageId: "message@example.com",
   subject: "Quarterly planning notes",
   from: [{ name: "Sam Rivera", address: "sam@example.com" }],
+  replyTo: [{ name: "Planning replies", address: "planning-replies@example.com" }],
   to: [{ name: "Alex", address: account.email }],
+  cc: [{ name: "Taylor", address: "taylor@example.com" }],
   deliveredTo: ["planning-alias@example.com"],
   receivedAt: "2026-08-29T08:30:00.000Z",
   preview: "Here are the decisions and follow-ups from our quarterly planning session.",
@@ -98,7 +100,7 @@ async function installWebMcpHarness(page: Page): Promise<void> {
 }
 
 test("sends and manages mail, then inspects and undoes activity", async ({ page }) => {
-  let sentMessage: SendMessageInput | null = null;
+  const sentMessages: SendMessageInput[] = [];
   let folderRequests = 0;
   let messageRequests = 0;
   let batch: OperationBatch | null = null;
@@ -152,7 +154,8 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
     }
     if (method === "POST" && url.pathname === "/api/messages/read") return json(route, [message]);
     if (method === "POST" && url.pathname === "/api/messages/send") {
-      sentMessage = sendMessageInputSchema.parse(request.postDataJSON());
+      const sentMessage = sendMessageInputSchema.parse(request.postDataJSON());
+      sentMessages.push(sentMessage);
       return json(route, {
         id: "sent-1",
         accountId: account.id,
@@ -258,7 +261,7 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await page.getByLabel("Message", { exact: true }).fill("Here are the next steps from our planning session.");
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByRole("heading", { name: "Message sent" })).toBeVisible();
-  expect(sentMessage).toMatchObject({ accountId: account.id, subject: "Planning follow-up", text: "Here are the next steps from our planning session." });
+  expect(sentMessages[0]).toMatchObject({ accountId: account.id, subject: "Planning follow-up", text: "Here are the next steps from our planning session." });
   await expect.poll(() => messageRequests).toBeGreaterThan(1);
   await page.getByRole("button", { name: "Done" }).click();
 
@@ -313,11 +316,53 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await expect.poll(() => remoteImageRequests).toBeGreaterThan(0);
 
   await page.getByRole("button", { name: "Reply", exact: true }).click();
-  await expect(page.getByLabel("To", { exact: true })).toHaveValue("sam@example.com");
+  await expect(page.getByLabel("To", { exact: true })).toHaveValue("planning-replies@example.com");
   await expect(page.getByLabel("Subject", { exact: true })).toHaveValue("Re: Quarterly planning notes");
-  await expect(page.getByText("Frontend ready, backend pending.", { exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
+  await expect(page.getByLabel("Message", { exact: true })).toContainText("> Here are the decisions and follow-ups.");
+  await page.getByLabel("Message", { exact: true }).fill(`Thanks, Sam.${await page.getByLabel("Message", { exact: true }).inputValue()}`);
+  await page.getByRole("button", { name: "Save draft" }).click();
   await page.getByRole("button", { name: "Close Reply" }).click();
+  await page.getByRole("button", { name: /Local drafts/ }).click();
+  await page.getByText("Re: Quarterly planning notes", { exact: true }).click();
+  await expect(page.getByLabel("To", { exact: true })).toHaveValue("planning-replies@example.com");
+  await expect(page.getByLabel("Message", { exact: true })).toContainText("> Here are the decisions and follow-ups.");
+  const readsBeforeReply = messageRequests;
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByRole("heading", { name: "Message sent" })).toBeVisible();
+  await expect.poll(() => messageRequests).toBeGreaterThan(readsBeforeReply);
+  expect(sentMessages[1]).toMatchObject({
+    to: [{ address: "planning-replies@example.com" }],
+    subject: "Re: Quarterly planning notes",
+    intent: {
+      type: "reply",
+      source: { canonicalMessageId: message.canonicalId, conversationId: message.conversationId },
+    },
+  });
+  await page.getByRole("button", { name: "Done" }).click();
+
+  await page.getByRole("button", { name: "Reply all" }).click();
+  await expect(page.getByLabel("To", { exact: true })).toHaveValue("planning-replies@example.com");
+  await expect(page.getByLabel("Cc", { exact: true })).toHaveValue("taylor@example.com");
+  await page.getByLabel("Subject", { exact: true }).fill("Planning decision follow-up");
+  await page.getByLabel("Message", { exact: true }).fill("Replying to everyone.");
+  await page.getByRole("button", { name: "Send message" }).click();
+  expect(sentMessages[2]).toMatchObject({
+    cc: [{ address: "taylor@example.com" }],
+    subject: "Planning decision follow-up",
+    intent: { type: "reply_all" },
+  });
+  await page.getByRole("button", { name: "Done" }).click();
+
+  await page.getByRole("button", { name: "Forward" }).click();
+  await expect(page.getByLabel("Subject", { exact: true })).toHaveValue("Fwd: Quarterly planning notes");
+  await expect(page.getByLabel("Message", { exact: true })).toContainText("---------- Forwarded message ----------");
+  await page.getByLabel("To", { exact: true }).fill("forward@example.com");
+  await page.getByRole("button", { name: "Send message" }).click();
+  expect(sentMessages[3]).toMatchObject({
+    to: [{ address: "forward@example.com" }],
+    intent: { type: "forward" },
+  });
+  await page.getByRole("button", { name: "Done" }).click();
 
   await page.getByLabel("Move message to").selectOption("Archive");
   await expect(page.getByRole("status")).toContainText("Moved 1 to Archive");
@@ -327,6 +372,34 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await expect(page.getByText("you", { exact: true }).first()).toBeVisible();
   await page.getByRole("button", { name: "Undo", exact: true }).click();
   await expect(page.getByText("moved to Archive (undone)", { exact: true })).toBeVisible();
+
+  await page.evaluate(({ accountId }) => {
+    localStorage.setItem("postreeve.local-drafts.v1", JSON.stringify([{
+      id: "legacy-reply",
+      accountId,
+      mode: "reply",
+      from: "alex@example.com",
+      to: "legacy-recipient@example.com",
+      cc: "",
+      bcc: "",
+      subject: "Re: Legacy reply",
+      body: "Authored legacy reply body.",
+      attachments: [],
+      updatedAt: "2026-08-29T10:00:00.000Z",
+    }]));
+  }, { accountId: account.id });
+  await page.reload();
+  await page.getByRole("button", { name: /Local drafts/ }).click();
+  await page.getByText("Re: Legacy reply", { exact: true }).click();
+  await expect(page.getByText("This local draft no longer has its source conversation.")).toBeVisible();
+  await page.getByRole("button", { name: "Convert to a new message" }).click();
+  await page.getByRole("button", { name: "Send message" }).click();
+  expect(sentMessages[4]).toMatchObject({
+    to: [{ address: "legacy-recipient@example.com" }],
+    subject: "Re: Legacy reply",
+    text: "Authored legacy reply body.",
+    intent: { type: "new" },
+  });
 });
 
 test("reads a message and returns to the list on a narrow screen", async ({ page }) => {

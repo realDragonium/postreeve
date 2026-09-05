@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { CanonicalMessageObservation, CanonicalMessageSummary, MessageSummary } from "../src/shared/contracts";
 import { uniqueCanonicalMessages } from "../src/shared/canonical-messages";
 import { Store } from "../src/server/db/store";
@@ -1009,6 +1012,196 @@ describe("canonical message persistence", () => {
     expect(duplicate!.conversationId).toBe(first!.conversationId);
     expect((await store.getConversation("tenant-a", first!.conversationId))?.messages).toHaveLength(2);
     expect(otherAccount!.conversationId).not.toBe(first!.conversationId);
+  });
+
+  test("requires the selected Gmail thread when one canonical message has multiple provider conversations", async () => {
+    const store = await createStore();
+    const observations = ["thread-a", "thread-b"].map((providerConversationId, index) => ({
+      ...observation({
+        messageId: "<ambiguous-thread@example.test>",
+        inReplyTo: null,
+        references: [],
+        location: {
+          accountId: "gmail-account",
+          provider: "gmail",
+          mailbox: "INBOX",
+          uidValidity: "gmail",
+          uid: index + 1,
+          modseq: null,
+          providerId: `provider-${index + 1}`,
+          read: false,
+          flagged: false,
+        },
+      }),
+      providerConversationId,
+    }));
+    const [canonical] = await store.reconcileMailbox({
+      tenantId: "tenant-a",
+      accountId: "gmail-account",
+      provider: "gmail",
+      mailbox: "INBOX",
+      observations,
+      authoritative: false,
+    });
+
+    await expect(store.getProviderConversationId(
+      "tenant-a", canonical!.id, "gmail-account", "gmail",
+    )).rejects.toThrow("multiple provider conversations");
+    expect(await store.getProviderConversationId(
+      "tenant-a", canonical!.id, "gmail-account", "gmail", "thread-b",
+    )).toBe("thread-b");
+    await expect(store.getProviderConversationId(
+      "tenant-a", canonical!.id, "gmail-account", "gmail", "thread-c",
+    )).rejects.toThrow("no longer belongs");
+  });
+
+  test("does not assign an edited-subject reply to the source Gmail thread before provider reconciliation", async () => {
+    const store = await createStore();
+    const sourceObservation = observation({
+      messageId: "<gmail-source@example.test>",
+      inReplyTo: null,
+      references: [],
+      location: {
+        accountId: "gmail-account",
+        provider: "gmail",
+        mailbox: "INBOX",
+        uidValidity: "gmail",
+        uid: 1,
+        modseq: null,
+        providerId: "gmail-source",
+        read: true,
+        flagged: false,
+      },
+    });
+    const [source] = await store.reconcileMailbox({
+      tenantId: "tenant-a",
+      accountId: "gmail-account",
+      provider: "gmail",
+      mailbox: "INBOX",
+      observations: [{ ...sourceObservation, providerConversationId: "source-thread" }],
+      authoritative: false,
+    });
+    if (!source) throw new Error("Expected Gmail source fixture");
+    const receipt = {
+      id: "gmail-send-id",
+      accountId: "gmail-account",
+      messageId: "<gmail-outgoing@example.test>",
+      accepted: ["recipient@example.test"],
+      rejected: [],
+      submittedAt: "2026-09-05T10:00:00.000Z",
+    };
+    const recorded = await store.recordConversationSend("tenant-a", "gmail-account", "gmail", receipt, {
+      type: "reply",
+      sourceMessageId: source.id,
+      conversationId: source.conversationId,
+      sourceSubject: "Original subject",
+      inReplyTo: "<gmail-source@example.test>",
+      references: ["<gmail-source@example.test>"],
+    });
+
+    expect(await store.getProviderConversationId(
+      "tenant-a", recorded.id, "gmail-account", "gmail",
+    )).toBeNull();
+    const [observed] = await store.reconcileMailbox({
+      tenantId: "tenant-a",
+      accountId: "gmail-account",
+      provider: "gmail",
+      mailbox: "Sent",
+      observations: [{
+        ...observation({
+          messageId: receipt.messageId,
+          inReplyTo: "<gmail-source@example.test>",
+          references: ["<gmail-source@example.test>"],
+          location: {
+            accountId: "gmail-account",
+            provider: "gmail",
+            mailbox: "Sent",
+            uidValidity: "gmail",
+            uid: 2,
+            modseq: null,
+            providerId: "gmail-outgoing",
+            read: true,
+            flagged: false,
+          },
+        }),
+        providerConversationId: "new-thread",
+      }],
+      authoritative: false,
+    });
+
+    expect(observed?.id).toBe(recorded.id);
+    expect(await store.getProviderConversationId(
+      "tenant-a", recorded.id, "gmail-account", "gmail",
+    )).toBe("new-thread");
+  });
+
+  test("keeps a headerless reply in its source conversation after provider observation and reopen", async () => {
+    const path = join(tmpdir(), `postreeve-conversation-send-${crypto.randomUUID()}.sqlite`);
+    let store = new Store(path);
+    try {
+      await store.insertAccount({
+        id: "imap-account",
+        name: "IMAP account",
+        email: "imap-account@example.test",
+        kind: "imap",
+        encryptedCredentials: null,
+      });
+      const [source] = await store.reconcileMailbox({
+        tenantId: "tenant-a",
+        accountId: "imap-account",
+        provider: "imap",
+        mailbox: "INBOX",
+        observations: [observation({ messageId: null, inReplyTo: null, references: [] })],
+        authoritative: false,
+      });
+      if (!source) throw new Error("Expected fallback source fixture");
+      const receipt = {
+        id: "provider-send-id",
+        accountId: "imap-account",
+        messageId: "<outgoing@example.test>",
+        accepted: ["recipient@example.test"],
+        rejected: [],
+        submittedAt: "2026-09-05T10:00:00.000Z",
+      };
+      const recorded = await store.recordConversationSend("tenant-a", "imap-account", "imap", receipt, {
+        type: "reply",
+        sourceMessageId: source.id,
+        conversationId: source.conversationId,
+        sourceSubject: "Subject",
+        references: [],
+      });
+
+      expect(recorded.conversationId).toBe(source.conversationId);
+      const [observed] = await store.reconcileMailbox({
+        tenantId: "tenant-a",
+        accountId: "imap-account",
+        provider: "imap",
+        mailbox: "Sent",
+        observations: [observation({
+          messageId: receipt.messageId,
+          inReplyTo: null,
+          references: [],
+          location: {
+            ...observation().location,
+            mailbox: "Sent",
+            uid: 43,
+          },
+        })],
+        authoritative: false,
+      });
+      expect(observed?.id).toBe(recorded.id);
+      expect(observed?.conversationId).toBe(source.conversationId);
+
+      store.close();
+      store = new Store(path);
+      expect(new Set((await store.getConversation("tenant-a", source.conversationId))?.messages.map(({ id }) => id)))
+        .toEqual(new Set([source.id, recorded.id]));
+    } finally {
+      store.close();
+      rmSync(path, { force: true });
+      rmSync(`${path}-shm`, { force: true });
+      rmSync(`${path}-wal`, { force: true });
+    }
   });
 
   test("repairs an affected component with 1,100 distinct provider thread keys", async () => {

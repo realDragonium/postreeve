@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { simpleParser } from "mailparser";
 import { GmailMailClient, type HttpFetch } from "../src/server/mail/gmail";
 import { MailProviderRegistry, toCanonicalObservation } from "../src/server/mail/provider";
 import { MailSenderRegistry } from "../src/server/mail/sender";
@@ -24,6 +25,7 @@ describe("Gmail compatibility", () => {
     let labelIds = ["INBOX", "UNREAD"];
     const raw = Buffer.from([
       "From: Sender <sender@example.test>",
+      "Reply-To: Planning replies <planning-replies@example.test>",
       "To: Person <person@example.test>",
       "Subject: Gmail test",
       "Message-ID: <gmail-test@example.test>",
@@ -80,6 +82,7 @@ describe("Gmail compatibility", () => {
         payload: { headers: [
           { name: "Subject", value: "Gmail test" },
           { name: "From", value: "Sender <sender@example.test>" },
+          { name: "Reply-To", value: "Planning replies <planning-replies@example.test>" },
           { name: "To", value: "Person <person@example.test>" },
           { name: "Message-ID", value: "<gmail-test@example.test>" },
           { name: "In-Reply-To", value: "Your messages <parent-a@example.test> and <parent-b@example.test>" },
@@ -112,6 +115,7 @@ describe("Gmail compatibility", () => {
     const summaries = page.messages;
     expect(page.complete).toBe(false);
     expect(summaries[0]?.subject).toBe("Gmail test");
+    expect(summaries[0]?.replyTo).toEqual([{ name: "Planning replies", address: "planning-replies@example.test" }]);
     expect(summaries[0]?.ref.providerId).toBe("18fabc123");
     expect(summaries[0]?.providerConversationId).toBe("thread-1");
     expect(summaries[0]?.inReplyTo).toBe("Your messages <parent-a@example.test> and <parent-b@example.test>");
@@ -120,6 +124,7 @@ describe("Gmail compatibility", () => {
       .toBe("<parent-a@example.test> <parent-b@example.test>");
     const details = await client.readMessages(account.id, [summaries[0]!.ref]);
     expect(details[0]?.text.trim()).toBe("Hello from Gmail.");
+    expect(details[0]?.replyTo).toEqual([{ name: "Planning replies", address: "planning-replies@example.test" }]);
     expect(details[0]?.providerConversationId).toBe("thread-1");
     expect(details[0]?.html).toContain("data:image/png;base64,");
     const applied = await client.apply(summaries[0]!.ref, { type: "mark_read" });
@@ -132,12 +137,30 @@ describe("Gmail compatibility", () => {
       to: [{ name: "Recipient", address: "recipient@example.test" }],
       cc: [],
       bcc: [],
-      subject: "Sent through Gmail",
+      subject: "Re: Sent through Gmail",
       text: "Test body",
+      intent: {
+        type: "reply",
+        source: { canonicalMessageId: "canonical-source", conversationId: "canonical-thread" },
+      },
+    }, {
+      type: "reply",
+      sourceMessageId: "canonical-source",
+      conversationId: "canonical-thread",
+      sourceSubject: "Sent through Gmail",
+      inReplyTo: "<gmail-test@example.test>",
+      references: ["<root@example.test>", "<gmail-test@example.test>"],
+      providerConversationId: "thread-1",
     });
     expect(receipt.id).toBe("sent-1");
     expect(requests.filter(({ url }) => url === "https://oauth2.googleapis.com/token")).toHaveLength(1);
-    expect(requests.find(({ url }) => url.endsWith("/messages/send"))?.body).not.toContain("Test body");
+    const sendBody = requests.find(({ url }) => url.endsWith("/messages/send"))?.body ?? "";
+    expect(sendBody).not.toContain("Test body");
+    const sendRequest = JSON.parse(sendBody) as { raw: string; threadId?: string };
+    const sentRaw = Buffer.from(sendRequest.raw, "base64url").toString("utf8");
+    expect(sendRequest.threadId).toBe("thread-1");
+    expect(sentRaw).toContain("In-Reply-To: <gmail-test@example.test>\r\n");
+    expect(sentRaw).toContain("References: <root@example.test> <gmail-test@example.test>\r\n");
 
     function message(extra: Record<string, unknown> = {}) {
       return {
@@ -150,6 +173,145 @@ describe("Gmail compatibility", () => {
         ...extra,
       };
     }
+  });
+
+  test("folds long Unicode and References headers while retaining Bcc delivery", async () => {
+    let requestBody = "";
+    const request: HttpFetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return json({ access_token: "short-lived-access-token", expires_in: 3600 });
+      }
+      if (url.endsWith("/messages/send")) {
+        requestBody = typeof init?.body === "string" ? init.body : "";
+        return json({ id: "sent-long", threadId: "thread-long" });
+      }
+      return new Response(null, { status: 404 });
+    };
+    const client = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "stored-refresh-token" },
+      clientId: "desktop-client-id",
+      fetch: request,
+    });
+    const subject = `Re: Résumé ${"世界".repeat(80)}`;
+    const references = Array.from({ length: 100 }, (_, index) => `<ancestor-${index}@example.test>`);
+
+    await client.send({
+      accountId: account.id,
+      to: [{ name: "名".repeat(80), address: "recipient@example.test" }],
+      cc: [],
+      bcc: [{ name: "Hidden", address: "hidden@example.test" }],
+      subject,
+      text: "Long-header body.",
+      intent: { type: "reply", source: { canonicalMessageId: "source", conversationId: "conversation" } },
+    }, {
+      type: "reply",
+      sourceMessageId: "source",
+      conversationId: "conversation",
+      sourceSubject: subject,
+      inReplyTo: "<source@example.test>",
+      references,
+      providerConversationId: "thread-long",
+    });
+
+    const sent = JSON.parse(requestBody) as { raw: string; threadId?: string };
+    const raw = Buffer.from(sent.raw, "base64url").toString("utf8");
+    expect(Math.max(...raw.split("\r\n").map((line) => Buffer.byteLength(line)))).toBeLessThanOrEqual(998);
+    expect([...raw.matchAll(/=\?UTF-8\?[BQ]\?[^?]+\?=/gi)].every(([word]) => word.length <= 75)).toBe(true);
+    expect(raw).toContain("Bcc: Hidden <hidden@example.test>");
+    expect((await simpleParser(raw)).subject).toBe(subject);
+    expect(sent.threadId).toBe("thread-long");
+  });
+
+  test("omits RFC reply headers and Gmail threadId for a fallback source", async () => {
+    let requestBody = "";
+    const request: HttpFetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return json({ access_token: "short-lived-access-token", expires_in: 3600 });
+      }
+      if (url.endsWith("/messages/send")) {
+        requestBody = typeof init?.body === "string" ? init.body : "";
+        return json({ id: "sent-fallback", threadId: "new-thread" });
+      }
+      return new Response(null, { status: 404 });
+    };
+    const client = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "stored-refresh-token" },
+      clientId: "desktop-client-id",
+      fetch: request,
+    });
+
+    await client.send({
+      accountId: account.id,
+      to: [{ name: "Recipient", address: "recipient@example.test" }],
+      cc: [],
+      bcc: [],
+      subject: "Re: Fallback source",
+      text: "Fallback reply body.",
+      intent: { type: "reply", source: { canonicalMessageId: "fallback", conversationId: "conversation" } },
+    }, {
+      type: "reply",
+      sourceMessageId: "fallback",
+      conversationId: "conversation",
+      sourceSubject: "Fallback source",
+      references: [],
+      providerConversationId: "source-thread",
+    });
+
+    const sent = JSON.parse(requestBody) as { raw: string; threadId?: string };
+    const raw = Buffer.from(sent.raw, "base64url").toString("utf8");
+    expect(sent).not.toHaveProperty("threadId");
+    expect(raw).not.toContain("In-Reply-To:");
+    expect(raw).not.toContain("References:");
+  });
+
+  test("keeps reply headers but omits Gmail threadId when the reply subject is edited", async () => {
+    let requestBody = "";
+    const request: HttpFetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return json({ access_token: "short-lived-access-token", expires_in: 3600 });
+      }
+      if (url.endsWith("/messages/send")) {
+        requestBody = typeof init?.body === "string" ? init.body : "";
+        return json({ id: "sent-edited", threadId: "new-thread" });
+      }
+      return new Response(null, { status: 404 });
+    };
+    const client = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "stored-refresh-token" },
+      clientId: "desktop-client-id",
+      fetch: request,
+    });
+
+    await client.send({
+      accountId: account.id,
+      to: [{ name: "Recipient", address: "recipient@example.test" }],
+      cc: [],
+      bcc: [],
+      subject: "A deliberate new subject",
+      text: "Reply body.",
+      intent: { type: "reply", source: { canonicalMessageId: "source", conversationId: "conversation" } },
+    }, {
+      type: "reply",
+      sourceMessageId: "source",
+      conversationId: "conversation",
+      sourceSubject: "Original subject",
+      inReplyTo: "<source@example.test>",
+      references: ["<root@example.test>", "<source@example.test>"],
+      providerConversationId: "source-thread",
+    });
+
+    const sent = JSON.parse(requestBody) as { raw: string; threadId?: string };
+    const raw = Buffer.from(sent.raw, "base64url").toString("utf8");
+    expect(sent).not.toHaveProperty("threadId");
+    expect(raw).toContain("Subject: A deliberate new subject\r\n");
+    expect(raw).toContain("In-Reply-To: <source@example.test>\r\n");
+    expect(raw).toContain("References: <root@example.test> <source@example.test>\r\n");
   });
 
   test("retains ordered References from a raw Gmail message", async () => {
@@ -312,7 +474,11 @@ describe("Gmail compatibility", () => {
       const response = await api.request(`/api/conversations/${listed.conversationId}`);
       const conversation = canonicalConversationSchema.parse(await response.json());
 
-      expect(read).toMatchObject({ canonicalId: listed.canonicalId, conversationId: listed.conversationId });
+      expect(read).toMatchObject({
+        canonicalId: listed.canonicalId,
+        conversationId: listed.conversationId,
+        providerConversationId: "thread-repeated",
+      });
       expect(conversation.messages).toContainEqual(expect.objectContaining({
         id: listed.canonicalId,
         messageId: repeatedIdentification.normalizedMessageId,
@@ -354,6 +520,7 @@ describe("Gmail compatibility", () => {
     });
 
     const messages = await client.listMessages(account.id, "INBOX", 3);
+    expect(messages.map(({ messageId }) => messageId)).toEqual(["", "", ""]);
     const canonicalTimes = messages.map((message) =>
       toCanonicalObservation("tenant-a", "gmail", message).receivedAt);
     expect(messages.map(({ receivedAt }) => receivedAt)).toEqual([

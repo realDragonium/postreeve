@@ -1,3 +1,5 @@
+import type { ConversationSendSource } from "../shared/contracts";
+
 export type ComposeMode = "new" | "reply" | "reply_all" | "forward" | "draft";
 export type MessageFilter = "all" | "unread" | "flagged";
 export type MessageSort = "newest" | "oldest" | "sender" | "subject";
@@ -12,6 +14,7 @@ export interface LocalDraft {
   readonly id: string;
   readonly accountId: string;
   readonly mode: ComposeMode;
+  readonly source?: ConversationSendSource;
   readonly from: string;
   readonly to: string;
   readonly cc: string;
@@ -77,6 +80,11 @@ function isLocalDraft(value: unknown): value is LocalDraft {
     && typeof value.id === "string"
     && typeof value.accountId === "string"
     && isComposeMode(value.mode)
+    && (value.source === undefined || (isRecord(value.source)
+      && typeof value.source.canonicalMessageId === "string"
+      && typeof value.source.conversationId === "string"
+      && (value.source.providerConversationId === undefined
+        || typeof value.source.providerConversationId === "string")))
     && typeof value.from === "string"
     && typeof value.to === "string"
     && typeof value.cc === "string"

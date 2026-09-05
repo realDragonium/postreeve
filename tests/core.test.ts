@@ -464,6 +464,248 @@ describe("Postreeve core workflow", () => {
     store.close();
   });
 
+  test("resolves reply threading from the account-scoped canonical source", async () => {
+    const { store, service, account, messages, sent, sendContexts } = await createTestHarness();
+    const source = messages[0]!;
+    await service.sendMessage({
+      accountId: account.id,
+      to: source.from,
+      cc: [],
+      bcc: [],
+      subject: `Re: ${source.subject}`,
+      text: "Reply body.\n\n> Original body.",
+      intent: {
+        type: "reply",
+        source: { canonicalMessageId: source.canonicalId, conversationId: source.conversationId },
+      },
+    });
+
+    expect(sent[0]?.intent?.type).toBe("reply");
+    expect(sendContexts[0]).toEqual({
+      type: "reply",
+      sourceMessageId: source.canonicalId,
+      conversationId: source.conversationId,
+      sourceSubject: source.subject,
+      inReplyTo: "<message-103@example.test>",
+      references: ["<message-103@example.test>"],
+    });
+    expect((await service.getConversation(source.conversationId)).messages).toHaveLength(2);
+    const sentMessages = await service.listMessages({ accountId: account.id, mailbox: "Sent", limit: 50 });
+    expect(sentMessages[0]?.conversationId).toBe(source.conversationId);
+
+    const otherAccount = await service.createAccount(testAccountInput("Other", "other@example.test"));
+    await expect(service.sendMessage({
+      accountId: otherAccount.id,
+      to: source.from,
+      cc: [],
+      bcc: [],
+      subject: `Re: ${source.subject}`,
+      text: "Cross-account reply.",
+      intent: {
+        type: "reply",
+        source: { canonicalMessageId: source.canonicalId, conversationId: source.conversationId },
+      },
+    })).rejects.toThrow("does not belong to the selected account");
+    store.close();
+  });
+
+  test("uses source In-Reply-To as reply ancestry when References is absent", async () => {
+    const { store, service, account, messages, sendContexts } = await createTestHarness({
+      readOverrides: { inReplyTo: "<earlier@example.test>", references: [] },
+    });
+    const source = messages[0]!;
+    await service.readMessages([source.ref]);
+
+    await service.sendMessage({
+      accountId: account.id,
+      to: source.from,
+      cc: [],
+      bcc: [],
+      subject: `Re: ${source.subject}`,
+      text: "Reply with retained ancestry.",
+      intent: {
+        type: "reply",
+        source: { canonicalMessageId: source.canonicalId, conversationId: source.conversationId },
+      },
+    });
+
+    expect(sendContexts[0]).toMatchObject({
+      inReplyTo: "<message-103@example.test>",
+      references: ["<earlier@example.test>", "<message-103@example.test>"],
+    });
+    store.close();
+  });
+
+  test("does not retain a provider thread assignment when the reply subject is edited", async () => {
+    const { store, service, account, messages, sendContexts } = await createTestHarness({
+      readOverrides: { providerConversationId: "source-thread" },
+    });
+    const source = messages[0]!;
+    await service.readMessages([source.ref]);
+
+    await service.sendMessage({
+      accountId: account.id,
+      to: source.from,
+      cc: [],
+      bcc: [],
+      subject: "A deliberate new subject",
+      text: "Reply with an edited subject.",
+      intent: {
+        type: "reply",
+        source: { canonicalMessageId: source.canonicalId, conversationId: source.conversationId },
+      },
+    });
+
+    expect(sendContexts[0]).toMatchObject({
+      type: "reply",
+      sourceSubject: source.subject,
+      inReplyTo: "<message-103@example.test>",
+    });
+    expect(sendContexts[0]).not.toHaveProperty("providerConversationId");
+    store.close();
+  });
+
+  test("sends replies to fallback messages without inventing an RFC Message-ID", async () => {
+    const { store, service, account, messages, sent, sendContexts } = await createTestHarness({
+      sourceThreading: {
+        messageId: "malformed-message-id",
+        inReplyTo: null,
+        references: ["<root@example.test>", "<parent@example.test>"],
+      },
+    });
+    const source = messages[0]!;
+
+    const receipt = await service.sendMessage({
+      accountId: account.id,
+      to: source.from,
+      cc: [],
+      bcc: [],
+      subject: `Re: ${source.subject}`,
+      text: "Reply without invented parent identity.",
+      intent: {
+        type: "reply",
+        source: { canonicalMessageId: source.canonicalId, conversationId: source.conversationId },
+      },
+    });
+
+    expect(receipt.messageId).toMatch(/^<.+@example\.test>$/);
+    expect(sent).toHaveLength(1);
+    expect(sendContexts[0]).toEqual({
+      type: "reply",
+      sourceMessageId: source.canonicalId,
+      conversationId: source.conversationId,
+      sourceSubject: source.subject,
+      references: ["<root@example.test>", "<parent@example.test>"],
+    });
+    expect((await service.getConversation(source.conversationId)).messages).toHaveLength(2);
+    await service.listMessages({ accountId: account.id, mailbox: "Sent", limit: 50 });
+    expect((await service.getConversation(source.conversationId)).messages).toHaveLength(2);
+    store.close();
+  });
+
+  test("uses only a single source In-Reply-To as fallback reply ancestry", async () => {
+    const { store, service, account, messages, sendContexts } = await createTestHarness({
+      sourceThreading: { messageId: "", inReplyTo: "<only-parent@example.test>", references: [] },
+    });
+    const source = messages[0]!;
+
+    await service.sendMessage({
+      accountId: account.id,
+      to: source.from,
+      cc: [],
+      bcc: [],
+      subject: `Re: ${source.subject}`,
+      text: "Fallback ancestry.",
+      intent: {
+        type: "reply",
+        source: { canonicalMessageId: source.canonicalId, conversationId: source.conversationId },
+      },
+    });
+
+    expect(sendContexts[0]).toMatchObject({ references: ["<only-parent@example.test>"] });
+    expect(sendContexts[0]).not.toHaveProperty("inReplyTo");
+    store.close();
+  });
+
+  test("does not turn a multi-parent source In-Reply-To into a References chain", async () => {
+    const { store, service, account, messages, sendContexts } = await createTestHarness({
+      sourceThreading: {
+        messageId: "invalid",
+        inReplyTo: "<first-parent@example.test> <second-parent@example.test>",
+        references: [],
+      },
+    });
+    const source = messages[0]!;
+
+    await service.sendMessage({
+      accountId: account.id,
+      to: source.from,
+      cc: [],
+      bcc: [],
+      subject: `Re: ${source.subject}`,
+      text: "No invented linear ancestry.",
+      intent: {
+        type: "reply",
+        source: { canonicalMessageId: source.canonicalId, conversationId: source.conversationId },
+      },
+    });
+
+    expect(sendContexts[0]).toMatchObject({ references: [] });
+    expect(sendContexts[0]).not.toHaveProperty("inReplyTo");
+    store.close();
+  });
+
+  test("returns an accepted receipt with a warning when local conversation recording fails", async () => {
+    const { store, service, account, messages, sent } = await createTestHarness();
+    store.recordConversationSend = async () => {
+      throw new Error("fixture conversation persistence failure");
+    };
+    const source = messages[0]!;
+
+    const receipt = await service.sendMessage({
+      accountId: account.id,
+      to: source.from,
+      cc: [],
+      bcc: [],
+      subject: `Re: ${source.subject}`,
+      text: "Provider accepted this message.",
+      intent: {
+        type: "reply",
+        source: { canonicalMessageId: source.canonicalId, conversationId: source.conversationId },
+      },
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(receipt.accepted).toEqual([source.from[0]!.address]);
+    expect(receipt.warning).toContain("accepted for delivery");
+    expect(receipt.warning).toContain("fixture conversation persistence failure");
+    store.close();
+  });
+
+  test("validates forward source context without adding reply headers", async () => {
+    const { store, service, account, messages, sendContexts } = await createTestHarness();
+    const source = messages[0]!;
+    await service.sendMessage({
+      accountId: account.id,
+      to: [{ name: "", address: "forward@example.test" }],
+      cc: [],
+      bcc: [],
+      subject: `Fwd: ${source.subject}`,
+      text: "Forwarded content.",
+      intent: {
+        type: "forward",
+        source: { canonicalMessageId: source.canonicalId, conversationId: source.conversationId },
+      },
+    });
+
+    expect(sendContexts[0]).toEqual({
+      type: "forward",
+      sourceMessageId: source.canonicalId,
+      conversationId: source.conversationId,
+    });
+    store.close();
+  });
+
   test("tests and reconnects an account without returning or replacing blank passwords", async () => {
     const { store, service, account, connections } = await createTestHarness();
     const settings = await service.getAccountSettings(account.id);

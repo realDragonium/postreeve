@@ -28,6 +28,7 @@ import {
   directActionInputSchema,
   renameFolderInputSchema,
   sendMessageInputSchema,
+  sendReceiptSchema,
   updateProposalInputSchema,
 } from "../../shared/contracts";
 import { uniqueCanonicalMessages } from "../../shared/canonical-messages";
@@ -40,7 +41,8 @@ import {
   type ProviderLocationMove,
   type ProviderMessageSummary,
 } from "../mail/provider";
-import { MailSenderRegistry, type MailSender } from "../mail/sender";
+import { MailSenderRegistry, type ConversationSendContext, type MailSender } from "../mail/sender";
+import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
 import {
   CredentialVault,
   type AccountCredentials,
@@ -320,14 +322,80 @@ export class PostreeveService {
         canonicalId: canonical.id,
         canonicalAliases: canonical.aliases,
         conversationId: canonical.conversationId,
+        ...(_providerConversationId ? { providerConversationId: _providerConversationId } : {}),
       };
     }));
   }
 
   async sendMessage(rawInput: SendMessageInput): Promise<SendReceipt> {
     const input = sendMessageInputSchema.parse(rawInput);
-    await this.#requireAccount(input.accountId);
-    return this.#senders.forAccount(input.accountId).send(input);
+    const account = await this.#requireAccount(input.accountId);
+    const intent = input.intent ?? { type: "new" as const };
+    if (intent.type === "new") return this.#senders.forAccount(input.accountId).send(input);
+
+    const source = await this.#store.getMessage(this.#context.tenantId, intent.source.canonicalMessageId);
+    const conversation = await this.#store.getConversation(this.#context.tenantId, intent.source.conversationId);
+    if (!source || !conversation || source.conversationId !== conversation.id) {
+      throw new Error("Conversation send source was not found");
+    }
+    const locations = await this.#store.listMessageLocations(this.#context.tenantId, source.id);
+    const accountLocations = locations.filter(({ accountId }) => accountId === input.accountId);
+    if (accountLocations.length === 0) {
+      throw new Error("Conversation send source does not belong to the selected account");
+    }
+    if (intent.type === "forward") {
+      const context: ConversationSendContext = {
+        type: "forward",
+        sourceMessageId: source.id,
+        conversationId: source.conversationId,
+      };
+      const receipt = await this.#senders.forAccount(input.accountId).send(input, context);
+      return this.#recordConversationSend(input.accountId, account.kind, receipt, context);
+    }
+
+    const inReplyTo = normalizeMessageId(source.messageId);
+    const parentReferences = normalizeMessageIdLists(source.references);
+    const parentInReplyTo = normalizeMessageIdList(source.inReplyTo);
+    const references = normalizeMessageIdLists([
+      ...(parentReferences.length > 0 ? parentReferences : parentInReplyTo.length === 1 ? parentInReplyTo : []),
+      inReplyTo,
+    ]);
+    const sourceLocation = accountLocations[0]!;
+    const sourceReference: MessageRef = {
+      accountId: sourceLocation.accountId,
+      mailbox: sourceLocation.mailbox,
+      uidValidity: sourceLocation.uidValidity,
+      uid: sourceLocation.uid,
+      modseq: sourceLocation.modseq,
+      ...(sourceLocation.providerId ? { providerId: sourceLocation.providerId } : {}),
+    };
+    const [sourceDetail] = await this.#providers.forAccount(input.accountId)
+      .readMessages(input.accountId, [sourceReference]);
+    if (!sourceDetail) throw new Error("Conversation send source could not be read");
+    const sourceProviderConversationId = inReplyTo
+      ? await this.#store.getProviderConversationId(
+        this.#context.tenantId,
+        source.id,
+        input.accountId,
+        account.kind,
+        intent.source.providerConversationId,
+      )
+      : null;
+    const providerConversationId = sourceProviderConversationId
+      && input.subject === replySubject(sourceDetail.subject)
+      ? sourceProviderConversationId
+      : null;
+    const context: ConversationSendContext = {
+      type: intent.type,
+      sourceMessageId: source.id,
+      conversationId: source.conversationId,
+      sourceSubject: sourceDetail.subject,
+      ...(inReplyTo ? { inReplyTo } : {}),
+      references,
+      ...(providerConversationId ? { providerConversationId } : {}),
+    };
+    const receipt = await this.#senders.forAccount(input.accountId).send(input, context);
+    return this.#recordConversationSend(input.accountId, account.kind, receipt, context);
   }
 
   async applyDirectActions(rawInput: DirectActionInput): Promise<OperationBatch> {
@@ -533,6 +601,23 @@ export class PostreeveService {
     }
   }
 
+  async #recordConversationSend(
+    accountId: string,
+    provider: Account["kind"],
+    receipt: SendReceipt,
+    context: ConversationSendContext,
+  ): Promise<SendReceipt> {
+    try {
+      await this.#store.recordConversationSend(this.#context.tenantId, accountId, provider, receipt, context);
+      return receipt;
+    } catch (error) {
+      return sendReceiptSchema.parse({
+        ...receipt,
+        warning: `Message was accepted for delivery, but its local conversation could not be updated: ${errorMessage(error)}`,
+      });
+    }
+  }
+
   #registerStoredAccount(account: StoredAccount): void {
     const credentials = this.#credentialsFor(account);
     this.#registerClients(account.id, this.#clientsFor(toPublicAccount(account), credentials));
@@ -645,6 +730,10 @@ export class PostreeveService {
     if (!account) throw new Error("Account not found");
     return account;
   }
+}
+
+function replySubject(subject: string): string {
+  return /^re:/i.test(subject) ? subject : `Re: ${subject}`;
 }
 
 function operationResult(

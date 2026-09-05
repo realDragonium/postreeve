@@ -77,6 +77,7 @@ describe("Bun IMAP compatibility", () => {
     expect((await provider.listMessagePage(config.accountId, "INBOX", 3)).complete).toBe(true);
     expect(summaries.map((message) => message.ref.uid)).toEqual([3, 2]);
     expect(summaries[0]?.preview).toBe("Newest plain text body");
+    expect(summaries[0]?.replyTo).toEqual([{ name: "Replies", address: "replies@example.test" }]);
     expect(summaries[0]?.inReplyTo).toBe("<parent@example.test>");
     expect(summaries[0]?.references).toEqual(["<root@example.test>", "<parent@example.test>"]);
     expect(summaries[0]?.ref).toEqual({
@@ -91,6 +92,7 @@ describe("Bun IMAP compatibility", () => {
     if (!reference) throw new Error("Expected a message reference");
     const details = await provider.readMessages(config.accountId, [reference]);
     expect(details[0]?.subject).toBe("Newest message");
+    expect(details[0]?.replyTo).toEqual([{ name: "Replies", address: "replies@example.test" }]);
     expect(details[0]?.text.trim()).toBe("Newest plain text body");
     expect(details[0]?.html).toContain("https://tracker.example.test/pixel.png");
     expect(details[0]?.html).toContain("data:image/png;base64,");
@@ -847,7 +849,7 @@ function fakeMessage(
     : "Content-Type: multipart/alternative; boundary=boundary\r\n\r\n--boundary\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n";
   const ending = html === undefined ? "" : "--boundary--\r\n";
   const source = Buffer.from(
-    `From: Sender <sender@example.test>\r\nTo: Human <human@example.test>\r\nMessage-ID: <message-${uid}@example.test>\r\nIn-Reply-To: <parent@example.test>\r\nReferences: <root@example.test> <parent@example.test>\r\nSubject: ${subject}\r\nDate: Fri, 29 Aug 2025 12:00:00 +0000\r\n${contentType}${text}\r\n${htmlPart}${ending}`,
+    `From: Sender <sender@example.test>\r\nReply-To: Replies <replies@example.test>\r\nTo: Human <human@example.test>\r\nMessage-ID: <message-${uid}@example.test>\r\nIn-Reply-To: <parent@example.test>\r\nReferences: <root@example.test> <parent@example.test>\r\nSubject: ${subject}\r\nDate: Fri, 29 Aug 2025 12:00:00 +0000\r\n${contentType}${text}\r\n${htmlPart}${ending}`,
   );
   return {
     seq: uid,
@@ -860,6 +862,7 @@ function fakeMessage(
       messageId: `<message-${uid}@example.test>`,
       inReplyTo: "<parent@example.test>",
       from: [{ name: "Sender", address: "sender@example.test" }],
+      replyTo: [{ name: "Replies", address: "replies@example.test" }],
       to: [{ name: "Human", address: "human@example.test" }],
     },
     source,
