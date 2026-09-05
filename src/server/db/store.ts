@@ -14,7 +14,7 @@ import type {
   Proposal,
 } from "../../shared/contracts";
 import { accounts, batches, proposals, type StoredOperation } from "./schema";
-import { normalizeMessageId } from "../mail/message-id";
+import { normalizeMessageId, normalizeMessageIdList } from "../mail/message-id";
 import type { ProviderMessageObservation } from "../mail/provider";
 import {
   mergeThreadingMetadata,
@@ -196,7 +196,8 @@ export class Store {
       for (const observation of value.observations) {
         const observedReceivedAt = observation.receivedAt ?? null;
         const normalizedMessageId = normalizeMessageId(observation.messageId);
-        const normalizedInReplyTo = normalizeMessageId(observation.inReplyTo);
+        const normalizedInReplyToIds = normalizeMessageIdList(observation.inReplyTo);
+        const normalizedInReplyTo = normalizedInReplyToIds.length > 0 ? normalizedInReplyToIds.join(" ") : null;
         const normalizedReferences = observation.references.flatMap((reference) => {
           const normalized = normalizeMessageId(reference);
           return normalized ? [normalized] : [];
@@ -346,7 +347,7 @@ export class Store {
         ensureMessageConversation(this.#sqlite, canonical);
         if (canonicalCreated) newConversationIds.add(canonical.id);
         const threadChanged = associateThreadEdges(this.#sqlite, value.tenantId, canonicalId,
-          [normalizedInReplyTo, ...normalizedReferences]);
+          [...normalizedInReplyToIds, ...normalizedReferences]);
         if (threadChanged || (canonicalCreated && normalizedMessageId)) {
           graphChanged = true;
           affectedMessageIds.add(canonicalId);
@@ -836,11 +837,7 @@ export class Store {
         WHERE NOT EXISTS (
           SELECT 1 FROM conversation_messages membership
           WHERE membership.tenant_id = message.tenant_id AND membership.message_id = message.id
-        ) OR (message.in_reply_to IS NOT NULL AND NOT EXISTS (
-          SELECT 1 FROM message_thread_edges edge
-          WHERE edge.tenant_id = message.tenant_id AND edge.message_id = message.id
-            AND edge.referenced_message_id = message.in_reply_to
-        )) OR EXISTS (
+        ) OR EXISTS (
           SELECT 1 FROM json_each(message."references") reference
           WHERE NOT EXISTS (
             SELECT 1 FROM message_thread_edges edge
@@ -850,13 +847,23 @@ export class Store {
         )
         LIMIT 1
       `).get();
+      const storedEdges = new Set((this.#sqlite.query(`
+        SELECT tenant_id, message_id, referenced_message_id FROM message_thread_edges
+      `).all() as Array<{ tenant_id: string; message_id: string; referenced_message_id: string }>)
+        .map(({ tenant_id, message_id, referenced_message_id }) =>
+          JSON.stringify([tenant_id, message_id, referenced_message_id])));
+      const missingInReplyToEdge = (this.#sqlite.query(`
+        SELECT tenant_id, id, in_reply_to FROM messages WHERE in_reply_to IS NOT NULL
+      `).all() as Array<{ tenant_id: string; id: string; in_reply_to: string }>)
+        .some(({ tenant_id, id, in_reply_to }) => normalizeMessageIdList(in_reply_to)
+          .some((parentId) => !storedEdges.has(JSON.stringify([tenant_id, id, parentId]))));
       const liveAlias = this.#sqlite.query(`
         SELECT 1 FROM conversation_aliases alias
         INNER JOIN conversations conversation
           ON conversation.tenant_id = alias.tenant_id AND conversation.id = alias.alias_id
         LIMIT 1
       `).get();
-      if (!incomplete && !liveAlias) return;
+      if (!incomplete && !missingInReplyToEdge && !liveAlias) return;
       const recover = this.#sqlite.transaction(() => this.#recoverConversations());
       recover();
       return;
@@ -918,7 +925,7 @@ export class Store {
       for (const message of messages) {
         ensureMessageConversation(this.#sqlite, message);
         associateThreadEdges(this.#sqlite, message.tenant_id, message.id,
-          [message.in_reply_to, ...parseStoredReferences(message.references)]);
+          [...normalizeMessageIdList(message.in_reply_to), ...parseStoredReferences(message.references)]);
       }
       const tenants = [...new Set(messages.map(({ tenant_id }) => tenant_id))];
       for (const tenantId of tenants) repairConversations(this.#sqlite, tenantId, new Set());
@@ -952,7 +959,7 @@ export class Store {
     for (const message of messages) {
       ensureMessageConversation(this.#sqlite, message);
       associateThreadEdges(this.#sqlite, message.tenant_id, message.id,
-        [message.in_reply_to, ...parseStoredReferences(message.references)]);
+        [...normalizeMessageIdList(message.in_reply_to), ...parseStoredReferences(message.references)]);
     }
     for (const tenantId of new Set(messages.map(({ tenant_id }) => tenant_id))) {
       repairConversations(this.#sqlite, tenantId, new Set());

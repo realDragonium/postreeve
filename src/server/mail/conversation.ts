@@ -1,3 +1,5 @@
+import { normalizeMessageIdList } from "./message-id";
+
 export interface ThreadingMetadata {
   inReplyTo: string | null;
   references: readonly string[];
@@ -17,11 +19,11 @@ export function mergeThreadingMetadata(
   merged: readonly ThreadingMetadata[],
 ): { inReplyTo: string | null; references: string[]; edges: string[] } {
   const rows = [retained, ...merged];
-  const parents = [observedInReplyTo, ...rows.map(({ inReplyTo }) => inReplyTo)]
-    .filter((value): value is string => value !== null);
+  const parents = [...new Set([observedInReplyTo, ...rows.map(({ inReplyTo }) => inReplyTo)]
+    .flatMap(normalizeMessageIdList))].sort();
   const references = mergeReferenceSequences([...rows.map(({ references }) => references), observedReferences]);
   return {
-    inReplyTo: parents.sort()[0] ?? null,
+    inReplyTo: parents.length > 0 ? parents.join(" ") : null,
     references,
     edges: [...new Set([...parents, ...references])].sort(),
   };
@@ -65,7 +67,7 @@ export function orderConversationMessages<T extends ConversationMessageForOrder>
     message.messageId ? [[message.messageId, message.id] as const] : []));
   const children = new Map(messages.map(({ id }) => [id, new Set<string>()]));
   for (const message of messages) {
-    for (const reference of new Set([message.inReplyTo, ...message.references])) {
+    for (const reference of new Set([...normalizeMessageIdList(message.inReplyTo), ...message.references])) {
       if (!reference) continue;
       const parentId = byMessageId.get(reference);
       if (parentId && parentId !== message.id) children.get(parentId)!.add(message.id);

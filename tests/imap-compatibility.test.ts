@@ -104,6 +104,40 @@ describe("Bun IMAP compatibility", () => {
     });
   });
 
+  test("retains multiple In-Reply-To parents from envelopes and parsed-header fallback", async () => {
+    const state = fakeState();
+    const inbox = state.mailboxes.get("INBOX");
+    if (!inbox) throw new Error("Expected test inbox");
+    const raw = (uid: number) => Buffer.from([
+      "From: Sender <sender@example.test>",
+      "To: Human <human@example.test>",
+      `Message-ID: <message-${uid}@example.test>`,
+      "In-Reply-To: <parent-a@example.test> <parent-b@example.test>",
+      `Subject: Message ${uid}`,
+      "Date: Fri, 29 Aug 2025 12:00:00 +0000",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "Body",
+    ].join("\r\n"));
+    const envelopeMessage = fakeMessage(1, 1n, "Envelope", "Body", new Set());
+    const fallbackMessage = fakeMessage(2, 2n, "Fallback", "Body", new Set());
+    inbox.messages.clear();
+    inbox.messages.set(1, { ...envelopeMessage, envelope: {
+      ...envelopeMessage.envelope,
+      inReplyTo: "<parent-a@example.test> <parent-b@example.test>",
+    }, source: raw(1) });
+    const { inReplyTo: _inReplyTo, ...fallbackEnvelope } = fallbackMessage.envelope!;
+    inbox.messages.set(2, { ...fallbackMessage, envelope: fallbackEnvelope, source: raw(2) });
+
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const summaries = await provider.listMessages(config.accountId, "INBOX", 2);
+    expect(summaries.map(({ inReplyTo }) => inReplyTo))
+      .toEqual(["<parent-a@example.test> <parent-b@example.test>", "<parent-a@example.test> <parent-b@example.test>"]);
+    const details = await provider.readMessages(config.accountId, summaries.map(({ ref }) => ref));
+    expect(details.map(({ inReplyTo }) => inReplyTo))
+      .toEqual(["<parent-a@example.test> <parent-b@example.test>", "<parent-a@example.test> <parent-b@example.test>"]);
+  });
+
   test("keeps missing and malformed IMAP dates out of canonical ordering", async () => {
     const state = fakeState();
     const inbox = state.mailboxes.get("INBOX");

@@ -76,7 +76,7 @@ describe("Gmail compatibility", () => {
           { name: "From", value: "Sender <sender@example.test>" },
           { name: "To", value: "Person <person@example.test>" },
           { name: "Message-ID", value: "<gmail-test@example.test>" },
-          { name: "In-Reply-To", value: "<parent@example.test>" },
+          { name: "In-Reply-To", value: "<parent-a@example.test> <parent-b@example.test>" },
           { name: "References", value: "<root@example.test> <parent@example.test>" },
           { name: "Date", value: "Sat, 29 Aug 2026 10:00:00 +0200" },
         ] },
@@ -108,7 +108,7 @@ describe("Gmail compatibility", () => {
     expect(summaries[0]?.subject).toBe("Gmail test");
     expect(summaries[0]?.ref.providerId).toBe("18fabc123");
     expect(summaries[0]?.providerConversationId).toBe("thread-1");
-    expect(summaries[0]?.inReplyTo).toBe("<parent@example.test>");
+    expect(summaries[0]?.inReplyTo).toBe("<parent-a@example.test> <parent-b@example.test>");
     expect(summaries[0]?.references).toEqual(["<root@example.test>", "<parent@example.test>"]);
     const details = await client.readMessages(account.id, [summaries[0]!.ref]);
     expect(details[0]?.text.trim()).toBe("Hello from Gmail.");
@@ -150,7 +150,7 @@ describe("Gmail compatibility", () => {
       "To: Person <person@example.test>",
       "Subject: Threaded Gmail message",
       "Message-ID: <threaded@example.test>",
-      "In-Reply-To: <parent@example.test>",
+      "In-Reply-To: <parent-a@example.test> <parent-b@example.test>",
       "References: <root@example.test> <parent@example.test>",
       "Date: Sat, 29 Aug 2026 10:00:00 +0200",
       "Content-Type: text/plain; charset=UTF-8",
@@ -189,7 +189,7 @@ describe("Gmail compatibility", () => {
       providerId: "threaded",
     }]);
 
-    expect(detail?.inReplyTo).toBe("<parent@example.test>");
+    expect(detail?.inReplyTo).toBe("<parent-a@example.test> <parent-b@example.test>");
     expect(detail?.references).toEqual(["<root@example.test>", "<parent@example.test>"]);
     expect(detail?.providerConversationId).toBeUndefined();
   });

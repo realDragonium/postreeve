@@ -73,14 +73,30 @@ function consumeCfws(value: string, start: number): number {
   return index;
 }
 
-export function normalizeMessageId(value: string | null | undefined): string | null {
-  if (!value) return null;
-  const messageIdStart = consumeCfws(value, 0);
-  for (let messageIdEnd = messageIdStart; messageIdEnd < value.length; messageIdEnd += 1) {
-    if (value[messageIdEnd] !== ">") continue;
-    const match = messageIdPattern.exec(value.slice(messageIdStart, messageIdEnd + 1));
-    if (!match || consumeCfws(value, messageIdEnd + 1) !== value.length) continue;
-    return `<${match[1]}@${match[2]!.toLowerCase()}>`;
+function parseMessageIds(value: string | null | undefined): string[] | null {
+  if (!value) return [];
+  const result: string[] = [];
+  let messageIdStart = consumeCfws(value, 0);
+  while (messageIdStart < value.length) {
+    let match: RegExpExecArray | null = null;
+    let messageIdEnd = messageIdStart;
+    for (; messageIdEnd < value.length; messageIdEnd += 1) {
+      if (value[messageIdEnd] !== ">") continue;
+      match = messageIdPattern.exec(value.slice(messageIdStart, messageIdEnd + 1));
+      if (match) break;
+    }
+    if (!match) return null;
+    result.push(`<${match[1]}@${match[2]!.toLowerCase()}>`);
+    messageIdStart = consumeCfws(value, messageIdEnd + 1);
   }
-  return null;
+  return result;
+}
+
+export function normalizeMessageId(value: string | null | undefined): string | null {
+  const messageIds = parseMessageIds(value);
+  return messageIds?.length === 1 ? messageIds[0] ?? null : null;
+}
+
+export function normalizeMessageIdList(value: string | null | undefined): string[] {
+  return [...new Set(parseMessageIds(value) ?? [])];
 }

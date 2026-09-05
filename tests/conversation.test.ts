@@ -24,7 +24,7 @@ describe("conversation resolution", () => {
     const forward = resolve(observations);
     const reverse = resolve([...observations].reverse());
     expect(forward).toEqual(reverse);
-    expect(forward.inReplyTo).toBe("<parent-a@example.test>");
+    expect(forward.inReplyTo).toBe("<parent-a@example.test> <parent-b@example.test>");
     expect(forward.edges).toEqual([
       "<parent-a@example.test>", "<parent-b@example.test>", "<root@example.test>",
     ]);
@@ -48,11 +48,25 @@ describe("conversation resolution", () => {
     expect(ordered.map(({ id }) => id)).toEqual(["earlier-root", "later-root", "child", "missing-date"]);
   });
 
+  test("orders every direct parent before a multi-parent reply without ordering the parents artificially", () => {
+    const messages: ConversationMessageForOrder[] = [
+      { id: "reply", identityKey: "reply", messageId: "<reply@example.test>",
+        inReplyTo: "<later@example.test> <earlier@example.test>", references: [],
+        receivedAt: "2026-09-01T00:00:00.000Z" },
+      { id: "later", identityKey: "later", messageId: "<later@example.test>", inReplyTo: null, references: [],
+        receivedAt: "2026-09-03T00:00:00.000Z" },
+      { id: "earlier", identityKey: "earlier", messageId: "<earlier@example.test>", inReplyTo: null, references: [],
+        receivedAt: "2026-09-02T00:00:00.000Z" },
+    ];
+
+    expect(orderConversationMessages(messages).map(({ id }) => id)).toEqual(["earlier", "later", "reply"]);
+  });
+
   test("keeps descendants after a cyclic parent component", () => {
     const messages: ConversationMessageForOrder[] = [
-      { id: "child", identityKey: "a", messageId: "<child>", inReplyTo: "<cycle-a>", references: [], receivedAt: "2026-09-01T00:00:00.000Z" },
-      { id: "cycle-a", identityKey: "b", messageId: "<cycle-a>", inReplyTo: "<cycle-b>", references: [], receivedAt: "2026-09-03T00:00:00.000Z" },
-      { id: "cycle-b", identityKey: "c", messageId: "<cycle-b>", inReplyTo: "<cycle-a>", references: [], receivedAt: "2026-09-02T00:00:00.000Z" },
+      { id: "child", identityKey: "a", messageId: "<child@example.test>", inReplyTo: "<cycle-a@example.test>", references: [], receivedAt: "2026-09-01T00:00:00.000Z" },
+      { id: "cycle-a", identityKey: "b", messageId: "<cycle-a@example.test>", inReplyTo: "<cycle-b@example.test>", references: [], receivedAt: "2026-09-03T00:00:00.000Z" },
+      { id: "cycle-b", identityKey: "c", messageId: "<cycle-b@example.test>", inReplyTo: "<cycle-a@example.test>", references: [], receivedAt: "2026-09-02T00:00:00.000Z" },
     ];
     expect(orderConversationMessages(messages).map(({ id }) => id))
       .toEqual(["cycle-b", "cycle-a", "child"]);

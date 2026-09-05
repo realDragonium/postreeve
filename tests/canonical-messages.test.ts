@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { CanonicalMessageObservation, CanonicalMessageSummary, MessageSummary } from "../src/shared/contracts";
 import { uniqueCanonicalMessages } from "../src/shared/canonical-messages";
 import { Store } from "../src/server/db/store";
-import { normalizeMessageId } from "../src/server/mail/message-id";
+import { normalizeMessageId, normalizeMessageIdList } from "../src/server/mail/message-id";
 import { toCanonicalObservation, type ProviderMessageSummary } from "../src/server/mail/provider";
 
 const stores: Store[] = [];
@@ -827,7 +827,36 @@ describe("canonical message persistence", () => {
     });
     expect(new Set(parents.map(({ conversationId }) => conversationId)).size).toBe(1);
     expect(parents[0]!.conversationId).toBe(storedChild!.conversationId);
-    expect((await store.getMessage("tenant-a", storedChild!.id))?.inReplyTo).toBe("<parent-a@example.test>");
+    expect((await store.getMessage("tenant-a", storedChild!.id))?.inReplyTo)
+      .toBe("<parent-a@example.test> <parent-b@example.test>");
+  });
+
+  test("retains every parent from one In-Reply-To field and repairs all parent conversations", async () => {
+    const store = await createStore();
+    const child = observation({
+      messageId: "<multi-child@example.test>",
+      inReplyTo: "<parent-b@Example.Test> (between) <parent-a@example.test> <parent-b@Example.Test>",
+      references: [],
+    });
+    const [storedChild] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [child], authoritative: false,
+    });
+    const parents = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [
+        observation({ messageId: "<parent-a@example.test>", inReplyTo: null, references: [],
+          location: { ...child.location, uid: 101 } }),
+        observation({ messageId: "<parent-b@example.test>", inReplyTo: null, references: [],
+          location: { ...child.location, uid: 102 } }),
+      ], authoritative: false,
+    });
+
+    expect(new Set(parents.map(({ conversationId }) => conversationId))).toEqual(new Set([storedChild!.conversationId]));
+    expect((await store.getMessage("tenant-a", storedChild!.id))?.inReplyTo)
+      .toBe("<parent-a@example.test> <parent-b@example.test>");
+    expect((await store.getConversation("tenant-a", storedChild!.conversationId))?.messages.map(({ messageId }) => messageId))
+      .toEqual(["<parent-a@example.test>", "<parent-b@example.test>", "<multi-child@example.test>"]);
   });
 
   test("retains conflicting parent edges and whole conversation membership through a move and account deletion", async () => {
@@ -969,12 +998,15 @@ describe("canonical message persistence", () => {
 test("provider summaries map identifiers, threading, location, and flags into the shared observation", () => {
   const summary: ProviderMessageSummary = {
     ref: { accountId: "gmail-account", mailbox: "INBOX", uidValidity: "gmail", uid: 7, modseq: "3", providerId: "gmail-id" },
-    messageId: " <MESSAGE@Example.Test> ", inReplyTo: "<PARENT@Example.Test>", references: ["<ROOT@Example.Test>"],
+    messageId: " <MESSAGE@Example.Test> ",
+    inReplyTo: "<PARENT-B@Example.Test> (alternate) <PARENT-A@Example.Test>",
+    references: ["<ROOT@Example.Test>"],
     subject: "Subject", from: [], to: [], receivedAt: "2026-09-03T00:00:00.000Z", preview: "", read: true, flagged: false,
     providerConversationId: "gmail-thread",
   };
   expect(toCanonicalObservation("tenant-a", "gmail", summary)).toEqual({
-    tenantId: "tenant-a", messageId: "<MESSAGE@example.test>", inReplyTo: "<PARENT@example.test>", references: ["<ROOT@example.test>"],
+    tenantId: "tenant-a", messageId: "<MESSAGE@example.test>",
+    inReplyTo: "<PARENT-B@example.test> <PARENT-A@example.test>", references: ["<ROOT@example.test>"],
     receivedAt: "2026-09-03T00:00:00.000Z",
     providerConversationId: "gmail-thread",
     location: { accountId: "gmail-account", provider: "gmail", mailbox: "INBOX", uidValidity: "gmail", uid: 7,
@@ -1032,6 +1064,15 @@ test("normalizes surrounding RFC 5322 CFWS without accepting malformed or multip
   ]) {
     expect(normalizeMessageId(malformed)).toBeNull();
   }
+});
+
+test("normalizes complete RFC 5322 Message-ID lists without extracting from malformed input", () => {
+  expect(normalizeMessageIdList(
+    '(first) <"quoted local"@Example.Test>\r\n\t(second) <local@[IPv6:2001:DB8::1]> <"quoted local"@Example.Test>',
+  )).toEqual(['<"quoted local"@example.test>', "<local@[ipv6:2001:db8::1]>"]);
+  expect(normalizeMessageIdList("<one@example.test> garbage <two@example.test>")).toEqual([]);
+  expect(normalizeMessageIdList("comment <one@example.test>")).toEqual([]);
+  expect(normalizeMessageId("<one@example.test> <two@example.test>")).toBeNull();
 });
 
 test("canonical deduplication retains added aliases when invalid aliases keep the same length", () => {

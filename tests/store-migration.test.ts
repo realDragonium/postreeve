@@ -77,6 +77,43 @@ describe("Store migrations", () => {
     recovered.close();
   });
 
+  test("recovers every missing edge from a stored multi-parent In-Reply-To field", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const store = new Store(path);
+    await store.insertAccount({
+      id: "imap-account", name: "IMAP", email: "person@example.test", kind: "imap", encryptedCredentials: null,
+    });
+    const [child] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{
+        tenantId: "tenant-a", messageId: "<child@example.test>",
+        inReplyTo: "<parent-a@example.test> <parent-b@example.test>", references: [],
+        location: { accountId: "imap-account", provider: "imap", mailbox: "INBOX", uidValidity: "1", uid: 1,
+          modseq: null, providerId: null, read: false, flagged: false },
+      }],
+    });
+    store.close();
+
+    const damaged = new Database(path);
+    damaged.query(`
+      DELETE FROM message_thread_edges
+      WHERE tenant_id = ? AND message_id = ? AND referenced_message_id = ?
+    `).run("tenant-a", child!.id, "<parent-b@example.test>");
+    damaged.close();
+
+    new Store(path).close();
+    const recovered = new Database(path);
+    expect(recovered.query(`
+      SELECT referenced_message_id FROM message_thread_edges
+      WHERE tenant_id = ? AND message_id = ? ORDER BY referenced_message_id
+    `).all("tenant-a", child!.id)).toEqual([
+      { referenced_message_id: "<parent-a@example.test>" },
+      { referenced_message_id: "<parent-b@example.test>" },
+    ]);
+    recovered.close();
+  });
+
   test("repairs only the RFC component affected by a late parent", async () => {
     const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
     paths.push(path);
