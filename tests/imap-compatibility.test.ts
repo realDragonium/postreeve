@@ -20,6 +20,8 @@ import {
   type ImapClient,
   type ImapClientFactory,
 } from "../src/server/mail/imap";
+import { toCanonicalObservation } from "../src/server/mail/provider";
+import { Store } from "../src/server/db/store";
 import type { MessageRef } from "../src/shared/contracts";
 
 interface StoredMailbox {
@@ -100,6 +102,57 @@ describe("Bun IMAP compatibility", () => {
       logger: false,
       qresync: true,
     });
+  });
+
+  test("keeps missing and malformed IMAP dates out of canonical ordering", async () => {
+    const state = fakeState();
+    const inbox = state.mailboxes.get("INBOX");
+    if (!inbox) throw new Error("Expected test inbox");
+    const undatedSource = (uid: number, date?: string) => Buffer.from([
+      "From: Sender <sender@example.test>",
+      "To: Human <human@example.test>",
+      `Message-ID: <undated-${uid}@example.test>`,
+      `Subject: Undated ${uid}`,
+      ...(date ? [`Date: ${date}`] : []),
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "Body",
+    ].join("\r\n"));
+    const missing = fakeMessage(1, 1n, "Missing", "Body", new Set());
+    const malformed = fakeMessage(2, 2n, "Malformed", "Body", new Set());
+    const epoch = fakeMessage(3, 3n, "Epoch", "Body", new Set());
+    const { internalDate: _missingInternalDate, ...missingWithoutInternalDate } = missing;
+    inbox.messages.clear();
+    inbox.messages.set(1, { ...missingWithoutInternalDate, source: undatedSource(1) });
+    inbox.messages.set(2, {
+      ...malformed,
+      internalDate: "not-a-time",
+      envelope: { ...malformed.envelope, date: new Date("not-a-time") },
+      source: undatedSource(2, "not-a-date"),
+    });
+    inbox.messages.set(3, { ...epoch, internalDate: new Date(0), source: undatedSource(3) });
+
+    const messages = await new ImapMailProvider(config, fakeFactory(state)).listMessages(config.accountId, "INBOX", 3);
+    const byUid = new Map(messages.map((message) => [message.ref.uid, message]));
+    expect(toCanonicalObservation("tenant-a", "imap", byUid.get(1)!).receivedAt).toBeNull();
+    expect(toCanonicalObservation("tenant-a", "imap", byUid.get(2)!).receivedAt).toBeNull();
+    expect(toCanonicalObservation("tenant-a", "imap", byUid.get(3)!).receivedAt)
+      .toBe("1970-01-01T00:00:00.000Z");
+    expect(messages.every(({ receivedAt }) => receivedAt === "1970-01-01T00:00:00.000Z")).toBe(true);
+
+    const store = new Store(":memory:");
+    try {
+      await store.insertAccount({
+        id: config.accountId, name: "IMAP", email: config.username, kind: "imap", encryptedCredentials: null,
+      });
+      const stored = await store.reconcileMailbox({
+        tenantId: "tenant-a", accountId: config.accountId, provider: "imap", mailbox: "INBOX", authoritative: false,
+        observations: messages.map((message) => toCanonicalObservation("tenant-a", "imap", message)),
+      });
+      expect(stored.map(({ receivedAt }) => receivedAt)).toEqual(["1970-01-01T00:00:00.000Z", null, null]);
+    } finally {
+      store.close();
+    }
   });
 
   test("discovers selectable special-use folders and keeps accounts isolated", async () => {

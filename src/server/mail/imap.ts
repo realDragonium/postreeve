@@ -23,7 +23,14 @@ import type {
   MessageSummary,
   TriageAction,
 } from "../../shared/contracts";
-import type { AppliedMailAction, MailboxPage, MailProvider, ProviderLocationMove } from "./provider";
+import type {
+  AppliedMailAction,
+  MailboxPage,
+  MailProvider,
+  ProviderLocationMove,
+  ProviderMessageDetail,
+  ProviderMessageSummary,
+} from "./provider";
 
 export interface ImapAccountConfig {
   accountId: string;
@@ -583,8 +590,11 @@ function toSummary(
   mailbox: MailboxObject,
   message: FetchMessageObject,
   parsed?: ParsedMail,
-): MessageSummary {
-  const receivedAt = toDate(message.internalDate) ?? message.envelope?.date ?? parsed?.date ?? new Date(0);
+): ProviderMessageSummary {
+  const canonicalReceivedAt = [message.internalDate, message.envelope?.date, parsedDate(parsed)]
+    .map(toDate)
+    .find((date): date is Date => date !== undefined)
+    ?.toISOString() ?? null;
   const deliveredTo = deliveryAddresses(parsed);
   return {
     ref: referenceFor(accountId, mailboxPath, mailbox, message),
@@ -596,7 +606,8 @@ function toSummary(
     to: message.envelope?.to?.map(toEnvelopeAddress) ?? parsedAddresses(flattenAddresses(parsed?.to)),
     cc: message.envelope?.cc?.map(toEnvelopeAddress) ?? parsedAddresses(flattenAddresses(parsed?.cc)),
     ...(deliveredTo.length === 0 ? {} : { deliveredTo }),
-    receivedAt: receivedAt.toISOString(),
+    canonicalReceivedAt,
+    receivedAt: canonicalReceivedAt ?? new Date(0).toISOString(),
     preview: previewFor(parsed?.text),
     read: hasFlag(message.flags, SEEN_FLAG),
     flagged: hasFlag(message.flags, "\\Flagged"),
@@ -624,7 +635,7 @@ function toDetail(
   mailbox: MailboxObject,
   message: FetchMessageObject,
   parsed: ParsedMail,
-): MessageDetail {
+): ProviderMessageDetail {
   return {
     ...toSummary(accountId, mailboxPath, mailbox, message, parsed),
     text: parsed.text ?? "",
@@ -675,6 +686,13 @@ function headerString(parsed: ParsedMail | undefined, name: string): string | un
   return Array.isArray(value) && value.every((entry): entry is string => typeof entry === "string")
     ? value.join(" ")
     : undefined;
+}
+
+function parsedDate(parsed: ParsedMail | undefined): string | undefined {
+  const header = parsed?.headerLines.find(({ key }) => key.toLowerCase() === "date")?.line;
+  if (!header) return undefined;
+  const separator = header.indexOf(":");
+  return separator < 0 ? undefined : header.slice(separator + 1).trim();
 }
 
 function parseReferences(parsed: ParsedMail | undefined): string[] {

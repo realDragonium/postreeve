@@ -309,7 +309,11 @@ export class PostreeveService {
       if (!observedId) throw new Error("Canonical read result is missing");
       const canonical = await this.#store.getMessage(this.#context.tenantId, observedId);
       if (!canonical) throw new Error("Canonical read message is missing");
-      const { providerConversationId: _providerConversationId, ...publicDetail } = detail;
+      const {
+        providerConversationId: _providerConversationId,
+        canonicalReceivedAt: _canonicalReceivedAt,
+        ...publicDetail
+      } = detail;
       return {
         ...publicDetail,
         canonicalId: canonical.id,
@@ -549,7 +553,11 @@ export class PostreeveService {
     });
     if (canonical.length !== messages.length) throw new Error("Canonical reconciliation result count does not match observations");
     return uniqueCanonicalMessages(messages.map((message, index) => {
-      const { providerConversationId: _providerConversationId, ...publicMessage } = message;
+      const {
+        providerConversationId: _providerConversationId,
+        canonicalReceivedAt: _canonicalReceivedAt,
+        ...publicMessage
+      } = message;
       return {
         ...publicMessage,
         canonicalId: canonical[index]!.id,

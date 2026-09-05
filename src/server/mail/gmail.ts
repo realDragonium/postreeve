@@ -401,6 +401,7 @@ function folderOrder(left: Folder, right: Folder): number {
 
 function toSummary(accountId: string, mailbox: string, message: z.infer<typeof gmailMessageSchema>): ProviderMessageSummary {
   const headers = new Map((message.payload?.headers ?? []).map(({ name, value }) => [name.toLocaleLowerCase(), value]));
+  const canonicalReceivedAt = receivedAt(message, headers.get("date"));
   return {
     ...(message.threadId ? { providerConversationId: message.threadId } : {}),
     ref: toReference(accountId, mailbox, message),
@@ -412,7 +413,8 @@ function toSummary(accountId: string, mailbox: string, message: z.infer<typeof g
     to: parseAddresses(headers.get("to")),
     cc: parseAddresses(headers.get("cc")),
     deliveredTo: parseAddresses(headers.get("delivered-to")).map(({ address }) => address).filter(isEmail),
-    receivedAt: receivedAt(message, headers.get("date")),
+    canonicalReceivedAt,
+    receivedAt: canonicalReceivedAt ?? new Date(0).toISOString(),
     preview: message.snippet,
     read: !message.labelIds.includes("UNREAD"),
     flagged: message.labelIds.includes("STARRED"),
@@ -436,7 +438,7 @@ function toDetail(
         ["Delivered-To", headerString(parsed, "delivered-to")],
         ["Message-ID", parsed.messageId],
         ["In-Reply-To", headerString(parsed, "in-reply-to")],
-        ["Date", parsed.date?.toUTCString()],
+        ["Date", rawHeaderValue(parsed, "date")],
       ].flatMap(([name, value]) => value ? [{ name: name!, value }] : []),
     },
   });
@@ -472,10 +474,17 @@ function numericId(value: string): number {
   return (hash >>> 0) || 1;
 }
 
-function receivedAt(message: z.infer<typeof gmailMessageSchema>, dateHeader?: string): string {
-  const internal = message.internalDate ? Number(message.internalDate) : Number.NaN;
-  const date = Number.isFinite(internal) ? new Date(internal) : new Date(dateHeader ?? 0);
-  return Number.isNaN(date.valueOf()) ? new Date(0).toISOString() : date.toISOString();
+function receivedAt(message: z.infer<typeof gmailMessageSchema>, dateHeader?: string): string | null {
+  const internal = message.internalDate === undefined || !/^\d+$/.test(message.internalDate)
+    ? null
+    : validDate(Number(message.internalDate));
+  const header = dateHeader === undefined ? null : validDate(dateHeader);
+  return (internal ?? header)?.toISOString() ?? null;
+}
+
+function validDate(value: string | number): Date | null {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? null : date;
 }
 
 function parseAddresses(value?: string): Array<{ name: string; address: string }> {
@@ -508,6 +517,13 @@ function headerString(parsed: ParsedMail, name: string): string | undefined {
   return Array.isArray(value) && value.every((entry): entry is string => typeof entry === "string")
     ? value.join(" ")
     : undefined;
+}
+
+function rawHeaderValue(parsed: ParsedMail, name: string): string | undefined {
+  const line = parsed.headerLines.find(({ key }) => key.toLowerCase() === name)?.line;
+  if (!line) return undefined;
+  const separator = line.indexOf(":");
+  return separator < 0 ? undefined : line.slice(separator + 1).trim();
 }
 
 function parsedReferences(parsed: ParsedMail): string[] {

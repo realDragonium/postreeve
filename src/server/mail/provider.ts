@@ -9,8 +9,13 @@ import type {
 } from "../../shared/contracts";
 import { normalizeMessageId } from "./message-id";
 
-export type ProviderMessageSummary = MessageSummary & { providerConversationId?: string };
-export type ProviderMessageDetail = MessageDetail & { providerConversationId?: string };
+interface ProviderMessageMetadata {
+  providerConversationId?: string;
+  canonicalReceivedAt?: string | null;
+}
+
+export type ProviderMessageSummary = MessageSummary & ProviderMessageMetadata;
+export type ProviderMessageDetail = MessageDetail & ProviderMessageMetadata;
 export type ProviderMessageObservation = CanonicalMessageObservation & { providerConversationId?: string };
 
 export function toCanonicalObservation(
@@ -21,7 +26,9 @@ export function toCanonicalObservation(
   const messageId = normalizeMessageId(message.messageId);
   return {
     tenantId,
-    receivedAt: message.receivedAt,
+    receivedAt: message.canonicalReceivedAt === undefined
+      ? message.receivedAt
+      : message.canonicalReceivedAt,
     messageId,
     inReplyTo: normalizeMessageId(message.inReplyTo),
     references: (message.references ?? []).flatMap((reference) => {

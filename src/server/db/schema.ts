@@ -63,6 +63,7 @@ export const messages = sqliteTable("messages", {
 }, (table) => [
   uniqueIndex("messages_tenant_id_id_unique").on(table.tenantId, table.id),
   uniqueIndex("messages_tenant_id_identity_key_unique").on(table.tenantId, table.identityKey),
+  index("messages_tenant_id_message_id_idx").on(table.tenantId, table.messageId),
 ]);
 
 export const conversations = sqliteTable("conversations", {

@@ -44,11 +44,114 @@ describe("Store migrations", () => {
     const inspected = new Database(path);
     expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 477").get()).toEqual({ version: 477 });
     expect(inspected.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    inspected.exec(`
+      CREATE TRIGGER reject_healthy_conversation_rebuild
+      BEFORE INSERT ON conversations
+      BEGIN SELECT RAISE(ABORT, 'healthy startup rebuilt conversations'); END;
+    `);
     inspected.close();
 
     const reopened = new Store(path);
     expect((await reopened.getConversation("tenant-a", parent!.conversationId))?.messages.map(({ id }) => id))
       .toEqual(["parent", "child"]);
+    reopened.close();
+  });
+
+  test("recovers messages inserted without DRA-477 memberships after the migration marker", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    new Store(path).close();
+    const fixture = new Database(path);
+    fixture.query(`
+      INSERT INTO messages
+        (id, tenant_id, identity_key, message_id, in_reply_to, "references", received_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+    `).run("late-fixture", "tenant-a", "message-id:<late-fixture@example.test>",
+      "<late-fixture@example.test>", null, "[]", "2026-09-01T00:00:00.000Z", "2026-09-01T00:00:00.000Z");
+    fixture.close();
+
+    const recovered = new Store(path);
+    const message = await recovered.getMessage("tenant-a", "late-fixture");
+    expect((await recovered.getConversation("tenant-a", message!.conversationId))?.messages.map(({ id }) => id))
+      .toEqual(["late-fixture"]);
+    recovered.close();
+  });
+
+  test("repairs only the RFC component affected by a late parent", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const store = new Store(path);
+    await store.insertAccount({
+      id: "imap-account", name: "IMAP", email: "person@example.test", kind: "imap", encryptedCredentials: null,
+    });
+    const location = (uid: number) => ({
+      accountId: "imap-account", provider: "imap" as const, mailbox: "INBOX", uidValidity: "1", uid,
+      modseq: null, providerId: null, read: false, flagged: false,
+    });
+    const [unrelated] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{ tenantId: "tenant-a", messageId: "<unrelated@example.test>", inReplyTo: null,
+        references: [], location: location(1) }],
+    });
+    const [child] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{ tenantId: "tenant-a", messageId: "<child@example.test>",
+        inReplyTo: "<late-parent@example.test>", references: [], location: location(2) }],
+    });
+    store.close();
+
+    const fixture = new Database(path);
+    const unrelatedConversationId = unrelated!.conversationId.replaceAll("'", "''");
+    fixture.exec(`
+      CREATE TRIGGER reject_unrelated_conversation_reinsert
+      BEFORE INSERT ON conversations WHEN NEW.id = '${unrelatedConversationId}'
+      BEGIN SELECT RAISE(ABORT, 'unrelated conversation was rebuilt'); END
+    `);
+    fixture.close();
+
+    const reopened = new Store(path);
+    const [parent] = await reopened.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{ tenantId: "tenant-a", messageId: "<late-parent@example.test>", inReplyTo: null,
+        references: [], location: location(3) }],
+    });
+    expect(parent!.conversationId).toBe(child!.conversationId);
+    expect((await reopened.getConversation("tenant-a", unrelated!.conversationId))?.messages.map(({ id }) => id))
+      .toEqual([unrelated!.id]);
+    reopened.close();
+  });
+
+  test("records a location-only provider move without graph repair", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const store = new Store(path);
+    await store.insertAccount({
+      id: "imap-account", name: "IMAP", email: "person@example.test", kind: "imap", encryptedCredentials: null,
+    });
+    const [message] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{
+        tenantId: "tenant-a", messageId: "<moved@example.test>", inReplyTo: null, references: [],
+        location: { accountId: "imap-account", provider: "imap", mailbox: "INBOX", uidValidity: "1", uid: 1,
+          modseq: null, providerId: null, read: false, flagged: false },
+      }],
+    });
+    store.close();
+    const fixture = new Database(path);
+    fixture.exec(`
+      CREATE TRIGGER reject_move_conversation_rebuild
+      BEFORE INSERT ON conversations
+      BEGIN SELECT RAISE(ABORT, 'location move rebuilt conversations'); END;
+    `);
+    fixture.close();
+
+    const reopened = new Store(path);
+    expect(await reopened.recordProviderMove("tenant-a", "imap", {
+      accountId: "imap-account", mailbox: "INBOX", uidValidity: "1", uid: 1, modseq: null,
+    }, {
+      accountId: "imap-account", mailbox: "Archive", uidValidity: "1", uid: 2, modseq: null,
+    })).toBe(true);
+    expect((await reopened.getMessage("tenant-a", message!.id))?.conversationId).toBe(message!.conversationId);
     reopened.close();
   });
 

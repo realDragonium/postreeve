@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { GmailMailClient, type HttpFetch } from "../src/server/mail/gmail";
+import { toCanonicalObservation } from "../src/server/mail/provider";
+import { Store } from "../src/server/db/store";
 import { GoogleOAuth, type OAuthFetch } from "../src/server/google/oauth";
 
 const account = {
@@ -190,6 +192,53 @@ describe("Gmail compatibility", () => {
     expect(detail?.inReplyTo).toBe("<parent@example.test>");
     expect(detail?.references).toEqual(["<root@example.test>", "<parent@example.test>"]);
     expect(detail?.providerConversationId).toBeUndefined();
+  });
+
+  test("keeps missing and malformed Gmail dates out of canonical ordering", async () => {
+    const request: HttpFetch = async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return json({ access_token: "access", expires_in: 3600 });
+      }
+      if (url.includes("/messages?")) return json({ messages: [{ id: "missing" }, { id: "malformed" }, { id: "epoch" }] });
+      const id = /\/messages\/([^?]+)/.exec(url)?.[1];
+      if (id) return json({
+        id,
+        labelIds: ["INBOX"],
+        snippet: id,
+        ...(id === "malformed" ? { internalDate: "not-a-time", payload: { headers: [{ name: "Date", value: "not-a-date" }] } } : {}),
+        ...(id === "epoch" ? { internalDate: "0" } : {}),
+      });
+      return new Response(null, { status: 404 });
+    };
+    const client = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "stored-refresh-token" },
+      clientId: "desktop-client-id",
+      fetch: request,
+    });
+
+    const messages = await client.listMessages(account.id, "INBOX", 3);
+    const canonicalTimes = messages.map((message) =>
+      toCanonicalObservation("tenant-a", "gmail", message).receivedAt);
+    expect(messages.map(({ receivedAt }) => receivedAt)).toEqual([
+      "1970-01-01T00:00:00.000Z",
+      "1970-01-01T00:00:00.000Z",
+      "1970-01-01T00:00:00.000Z",
+    ]);
+    expect(canonicalTimes).toEqual([null, null, "1970-01-01T00:00:00.000Z"]);
+
+    const store = new Store(":memory:");
+    try {
+      await store.insertAccount({ ...account, encryptedCredentials: null });
+      const stored = await store.reconcileMailbox({
+        tenantId: "tenant-a", accountId: account.id, provider: "gmail", mailbox: "INBOX", authoritative: false,
+        observations: messages.map((message) => toCanonicalObservation("tenant-a", "gmail", message)),
+      });
+      expect(stored.map(({ receivedAt }) => receivedAt)).toEqual([null, null, "1970-01-01T00:00:00.000Z"]);
+    } finally {
+      store.close();
+    }
   });
 
   test("uses a state-bound PKCE desktop authorization flow", async () => {
