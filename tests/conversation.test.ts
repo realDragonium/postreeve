@@ -229,6 +229,32 @@ describe("conversation resolution", () => {
       .toEqual(["cycle-b", "cycle-a", "child"]);
   });
 
+  test("orders wide fan-out with logarithmic ready-queue comparison growth", () => {
+    const childCount = 512;
+    let identityKeyReads = 0;
+    const message = (id: string, inReplyTo: string | null): ConversationMessageForOrder => ({
+      id,
+      get identityKey() {
+        identityKeyReads += 1;
+        return `message-id:<${id}@example.test>`;
+      },
+      messageId: `<${id}@example.test>`,
+      inReplyTo,
+      references: [],
+      receivedAt: "2026-09-01T00:00:00.000Z",
+    });
+    const childIds = Array.from({ length: childCount }, (_, index) =>
+      `child-${index.toString().padStart(4, "0")}`);
+    const messages = [
+      message("root", null),
+      ...[...childIds].reverse().map((id) => message(id, "<root@example.test>")),
+    ];
+
+    expect(orderConversationMessages(messages).map(({ id }) => id)).toEqual(["root", ...childIds]);
+    const logarithmicComparisonReadBound = childCount * Math.ceil(Math.log2(childCount + 1)) * 8;
+    expect(identityKeyReads).toBeLessThan(logarithmicComparisonReadBound);
+  });
+
   test("merges a long References chain without recursive traversal", () => {
     const references = Array.from({ length: 10_001 }, (_, index) => `<ref-${index}@example.test>`);
     const observed = [...references, references[5_000]!, references[0]!];

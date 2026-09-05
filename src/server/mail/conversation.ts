@@ -180,30 +180,84 @@ function orderDirectedGraph<T>(
     }
   }
 
-  const compareComponents = (left: number, right: number): number => {
-    const leftComponent = components[left]!;
-    const rightComponent = components[right]!;
-    const leftVisible = leftComponent.find(isVisible);
-    const rightVisible = rightComponent.find(isVisible);
-    if (leftVisible === undefined && rightVisible !== undefined) return -1;
-    if (leftVisible !== undefined && rightVisible === undefined) return 1;
-    return compareValues(leftVisible ?? leftComponent[0]!, rightVisible ?? rightComponent[0]!);
+  const representatives = components.map((component) => {
+    const visibleIndex = component.findIndex(isVisible);
+    return visibleIndex === -1
+      ? { visible: false as const, value: component[0]! }
+      : { visible: true as const, value: component[visibleIndex]! };
+  });
+  interface ReadyEntry {
+    component: number;
+    sequence: number;
+  }
+  const compareReady = (left: ReadyEntry, right: ReadyEntry): number => {
+    const leftRepresentative = representatives[left.component]!;
+    const rightRepresentative = representatives[right.component]!;
+    if (leftRepresentative.visible !== rightRepresentative.visible) return leftRepresentative.visible ? 1 : -1;
+    return compareValues(leftRepresentative.value, rightRepresentative.value) || left.sequence - right.sequence;
   };
-  const ready = components.map((_, index) => index)
-    .filter((index) => incoming.get(index) === 0)
-    .sort(compareComponents);
+  const ready = new MinPriorityQueue(compareReady);
+  let nextSequence = 0;
+  for (let component = 0; component < components.length; component += 1) {
+    if (incoming.get(component) === 0) ready.push({ component, sequence: nextSequence++ });
+  }
   const ordered: T[] = [];
-  while (ready.length > 0) {
-    const component = ready.shift()!;
+  while (ready.size > 0) {
+    const component = ready.pop()!.component;
     ordered.push(...components[component]!.filter(isVisible));
     for (const later of componentAfter.get(component)!) {
       const remaining = incoming.get(later)! - 1;
       incoming.set(later, remaining);
       if (remaining === 0) {
-        ready.push(later);
-        ready.sort(compareComponents);
+        ready.push({ component: later, sequence: nextSequence++ });
       }
     }
   }
   return ordered;
+}
+
+class MinPriorityQueue<T> {
+  readonly #compare: (left: T, right: T) => number;
+  readonly #values: T[] = [];
+
+  constructor(compare: (left: T, right: T) => number) {
+    this.#compare = compare;
+  }
+
+  get size(): number {
+    return this.#values.length;
+  }
+
+  push(value: T): void {
+    let index = this.#values.length;
+    this.#values.push(value);
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      const parentValue = this.#values[parent]!;
+      if (this.#compare(parentValue, value) <= 0) break;
+      this.#values[index] = parentValue;
+      index = parent;
+    }
+    this.#values[index] = value;
+  }
+
+  pop(): T | undefined {
+    const first = this.#values[0];
+    const last = this.#values.pop();
+    if (first === undefined || last === undefined || this.#values.length === 0) return first;
+
+    let index = 0;
+    while (true) {
+      const left = index * 2 + 1;
+      if (left >= this.#values.length) break;
+      const right = left + 1;
+      const child = right < this.#values.length
+        && this.#compare(this.#values[right]!, this.#values[left]!) < 0 ? right : left;
+      if (this.#compare(last, this.#values[child]!) <= 0) break;
+      this.#values[index] = this.#values[child]!;
+      index = child;
+    }
+    this.#values[index] = last;
+    return first;
+  }
 }
