@@ -178,6 +178,41 @@ describe("Hono RPC API", () => {
     store.close();
   });
 
+  test("keeps a late-arriving References ancestry ordered under the original conversation identity", async () => {
+    const { store, service } = await createEmptyTestHarness();
+    const account = await service.createAccount(testAccountInput());
+    const location = (uid: number) => ({
+      accountId: account.id, provider: "imap" as const, mailbox: "INBOX", uidValidity: "late-ancestry", uid,
+      modseq: null, providerId: null, read: false, flagged: false,
+    });
+    const reconcile = async (uid: number, messageId: string, references: readonly string[], receivedAt: string) => {
+      const [message] = await store.reconcileMailbox({
+        tenantId: "test-tenant", accountId: account.id, provider: "imap", mailbox: "INBOX",
+        authoritative: false,
+        observations: [{ tenantId: "test-tenant", messageId, inReplyTo: null, references: [...references],
+          receivedAt, location: location(uid) }],
+      });
+      return message!;
+    };
+
+    const child = await reconcile(1, "<child@example.test>", [
+      "<root@example.test>", "<missing@example.test>", "<parent@example.test>",
+    ], "2026-09-01T00:00:00.000Z");
+    const parent = await reconcile(2, "<parent@example.test>", [], "2026-09-02T00:00:00.000Z");
+    const root = await reconcile(3, "<root@example.test>", [], "2026-09-03T00:00:00.000Z");
+    const response = await createApi(service).request(`/api/conversations/${child.conversationId}`);
+    const conversation = canonicalConversationSchema.parse(await response.json());
+
+    expect(response.status).toBe(200);
+    expect(parent.conversationId).toBe(child.conversationId);
+    expect(root.conversationId).toBe(child.conversationId);
+    expect(conversation.id).toBe(child.conversationId);
+    expect(conversation.messages.map(({ messageId }) => messageId)).toEqual([
+      "<root@example.test>", "<parent@example.test>", "<child@example.test>",
+    ]);
+    store.close();
+  });
+
   test("manages custom folders through typed routes", async () => {
     const { store, service } = await createTestHarness();
     const app = createApi(service);

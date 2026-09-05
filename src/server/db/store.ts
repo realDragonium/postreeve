@@ -1492,14 +1492,15 @@ function earliestReceivedAt(
     .sort()[0] ?? null;
 }
 
-function toConversationMessageForOrder(message: MessageRow, threadingEdges?: readonly string[]) {
+function toConversationMessageForOrder(message: MessageRow, threadingEdges: readonly string[] = []) {
   return {
     id: message.id,
     identityKey: message.identity_key,
     messageId: message.message_id,
     inReplyTo: message.in_reply_to,
-    references: threadingEdges ?? parseStoredReferences(message.references),
+    references: parseStoredReferences(message.references),
     receivedAt: message.received_at,
+    threadingEdges,
   };
 }
 

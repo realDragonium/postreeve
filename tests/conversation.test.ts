@@ -117,6 +117,108 @@ describe("conversation resolution", () => {
     expect(orderConversationMessages(messages).map(({ id }) => id)).toEqual(["earlier", "later", "reply"]);
   });
 
+  test("orders unordered historical parents independently before their child", () => {
+    const messages: ConversationMessageForOrder[] = [
+      { id: "reply", identityKey: "reply", messageId: "<reply@example.test>", inReplyTo: null, references: [],
+        threadingEdges: ["<later@example.test>", "<earlier@example.test>"],
+        receivedAt: "2026-09-01T00:00:00.000Z" },
+      { id: "later", identityKey: "later", messageId: "<later@example.test>", inReplyTo: null, references: [],
+        receivedAt: "2026-09-03T00:00:00.000Z" },
+      { id: "earlier", identityKey: "earlier", messageId: "<earlier@example.test>", inReplyTo: null,
+        references: [], receivedAt: "2026-09-02T00:00:00.000Z" },
+    ];
+
+    expect(orderConversationMessages(messages).map(({ id }) => id)).toEqual(["earlier", "later", "reply"]);
+  });
+
+  test("uses a descendant's References sequence to order ancestors without their own headers", () => {
+    const messages: ConversationMessageForOrder[] = [
+      { id: "child", identityKey: "child", messageId: "<child@example.test>", inReplyTo: null,
+        references: ["<root@example.test>", "<parent@example.test>"],
+        receivedAt: "2026-09-01T00:00:00.000Z" },
+      { id: "parent", identityKey: "parent", messageId: "<parent@example.test>", inReplyTo: null,
+        references: [], receivedAt: "2026-09-02T00:00:00.000Z" },
+      { id: "root", identityKey: "root", messageId: "<root@example.test>", inReplyTo: null,
+        references: [], receivedAt: "2026-09-03T00:00:00.000Z" },
+    ];
+
+    expect(orderConversationMessages(messages).map(({ id }) => id)).toEqual(["root", "parent", "child"]);
+  });
+
+  test("preserves known References ancestry across unknown interleaved ancestors for every input permutation", () => {
+    const messages: ConversationMessageForOrder[] = [
+      { id: "child", identityKey: "child", messageId: "<child@example.test>", inReplyTo: null,
+        references: ["<root@example.test>", "<missing-a@example.test>", "<parent@example.test>",
+          "<missing-b@example.test>"], receivedAt: "2026-09-01T00:00:00.000Z" },
+      { id: "parent", identityKey: "parent", messageId: "<parent@example.test>", inReplyTo: null,
+        references: [], receivedAt: "2026-09-02T00:00:00.000Z" },
+      { id: "root", identityKey: "root", messageId: "<root@example.test>", inReplyTo: null,
+        references: [], receivedAt: "2026-09-03T00:00:00.000Z" },
+    ];
+    const permutations = <T>(values: readonly T[]): T[][] => values.length === 0
+      ? [[]]
+      : values.flatMap((value, index) => permutations(values.filter((_, candidate) => candidate !== index))
+        .map((rest) => [value, ...rest]));
+
+    for (const input of permutations(messages)) {
+      expect(orderConversationMessages(input).map(({ id }) => id)).toEqual(["root", "parent", "child"]);
+    }
+  });
+
+  test("joins split References ancestry through a shared unknown identifier for every input permutation", () => {
+    const messages: ConversationMessageForOrder[] = [
+      { id: "unrelated", identityKey: "unrelated", messageId: "<unrelated@example.test>", inReplyTo: null,
+        references: [], receivedAt: "2026-09-02T00:00:00.000Z" },
+      { id: "root", identityKey: "root", messageId: "<root@example.test>", inReplyTo: null,
+        references: [], receivedAt: "2026-09-04T00:00:00.000Z" },
+      { id: "parent", identityKey: "parent", messageId: "<parent@example.test>", inReplyTo: null,
+        references: [], receivedAt: "2026-09-01T00:00:00.000Z" },
+      { id: "descendant-a", identityKey: "descendant-a", messageId: "<descendant-a@example.test>",
+        inReplyTo: null, references: ["<root@example.test>", "<missing@example.test>"],
+        receivedAt: "2026-09-02T00:00:00.000Z" },
+      { id: "descendant-b", identityKey: "descendant-b", messageId: "<descendant-b@example.test>",
+        inReplyTo: null, references: ["<missing@example.test>", "<parent@example.test>"],
+        receivedAt: "2026-09-03T00:00:00.000Z" },
+    ];
+    const permutations = <T>(values: readonly T[]): T[][] => values.length === 0
+      ? [[]]
+      : values.flatMap((value, index) => permutations(values.filter((_, candidate) => candidate !== index))
+        .map((rest) => [value, ...rest]));
+
+    for (const input of permutations(messages)) {
+      const orderedIds = orderConversationMessages(input).map(({ id }) => id);
+      expect(orderedIds).toEqual(["unrelated", "root", "parent", "descendant-a", "descendant-b"]);
+    }
+  });
+
+  test("ignores self references without losing surrounding ancestry", () => {
+    const messages: ConversationMessageForOrder[] = [
+      { id: "child", identityKey: "child", messageId: "<child@example.test>", inReplyTo: null,
+        references: ["<root@example.test>", "<child@example.test>", "<parent@example.test>"],
+        threadingEdges: ["<child@example.test>"], receivedAt: "2026-09-01T00:00:00.000Z" },
+      { id: "parent", identityKey: "parent", messageId: "<parent@example.test>", inReplyTo: null,
+        references: [], receivedAt: "2026-09-02T00:00:00.000Z" },
+      { id: "root", identityKey: "root", messageId: "<root@example.test>", inReplyTo: null,
+        references: [], receivedAt: "2026-09-03T00:00:00.000Z" },
+    ];
+
+    expect(orderConversationMessages(messages).map(({ id }) => id)).toEqual(["root", "parent", "child"]);
+  });
+
+  test("collapses a References cycle deterministically while keeping its descendant last", () => {
+    const messages: ConversationMessageForOrder[] = [
+      { id: "child", identityKey: "a", messageId: "<child@example.test>", inReplyTo: null,
+        references: ["<cycle-a@example.test>"], receivedAt: "2026-09-01T00:00:00.000Z" },
+      { id: "cycle-a", identityKey: "b", messageId: "<cycle-a@example.test>", inReplyTo: null,
+        references: ["<cycle-b@example.test>"], receivedAt: "2026-09-03T00:00:00.000Z" },
+      { id: "cycle-b", identityKey: "c", messageId: "<cycle-b@example.test>", inReplyTo: null,
+        references: ["<cycle-a@example.test>"], receivedAt: "2026-09-02T00:00:00.000Z" },
+    ];
+
+    expect(orderConversationMessages(messages).map(({ id }) => id))
+      .toEqual(["cycle-b", "cycle-a", "child"]);
+  });
+
   test("keeps descendants after a cyclic parent component", () => {
     const messages: ConversationMessageForOrder[] = [
       { id: "child", identityKey: "a", messageId: "<child@example.test>", inReplyTo: "<cycle-a@example.test>", references: [], receivedAt: "2026-09-01T00:00:00.000Z" },

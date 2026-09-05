@@ -10,6 +10,7 @@ export interface ConversationMessageForOrder extends ThreadingMetadata {
   identityKey: string;
   messageId: string | null;
   receivedAt: string | null;
+  threadingEdges?: readonly string[];
 }
 
 export function mergeThreadingMetadata(
@@ -42,46 +43,86 @@ function mergeReferenceSequences(sequences: readonly (readonly string[])[]): str
 }
 
 export function orderConversationMessages<T extends ConversationMessageForOrder>(messages: readonly T[]): T[] {
-  const byId = new Map(messages.map((message) => [message.id, message]));
-  const byMessageId = new Map(messages.flatMap((message) =>
-    message.messageId ? [[message.messageId, message.id] as const] : []));
-  const children = new Map(messages.map(({ id }) => [id, new Set<string>()]));
+  type OrderNode =
+    | { kind: "message"; message: T }
+    | { kind: "reference"; messageId: string };
+  const messageNodes = new Map(messages.map((message) => [message.id, {
+    kind: "message" as const,
+    message,
+  }]));
+  const byMessageId = new Map(messages.flatMap((message) => {
+    const node = messageNodes.get(message.id)!;
+    return message.messageId ? [[message.messageId, node] as const] : [];
+  }));
+  const referenceNodes = new Map<string, OrderNode>();
+  const children = new Map<OrderNode, Set<OrderNode>>(
+    [...messageNodes.values()].map((node) => [node, new Set<OrderNode>()]),
+  );
+  const nodeForReference = (messageId: string): OrderNode => {
+    const messageNode = byMessageId.get(messageId);
+    if (messageNode) return messageNode;
+    const retained = referenceNodes.get(messageId);
+    if (retained) return retained;
+    const created: OrderNode = { kind: "reference", messageId };
+    referenceNodes.set(messageId, created);
+    children.set(created, new Set());
+    return created;
+  };
   for (const message of messages) {
-    for (const reference of new Set([...normalizeMessageIdList(message.inReplyTo), ...message.references])) {
-      if (!reference) continue;
-      const parentId = byMessageId.get(reference);
-      if (parentId && parentId !== message.id) children.get(parentId)!.add(message.id);
+    const messageNode = messageNodes.get(message.id)!;
+    for (const parent of normalizeMessageIdList(message.inReplyTo)) {
+      const parentNode = nodeForReference(parent);
+      if (parentNode !== messageNode) children.get(parentNode)!.add(messageNode);
+    }
+
+    let previousAncestor: OrderNode | null = null;
+    for (const reference of new Set(message.references)) {
+      const ancestor = nodeForReference(reference);
+      if (ancestor === messageNode) continue;
+      if (previousAncestor) children.get(previousAncestor)!.add(ancestor);
+      previousAncestor = ancestor;
+    }
+    if (previousAncestor) children.get(previousAncestor)!.add(messageNode);
+
+    for (const parent of new Set(message.threadingEdges ?? [])) {
+      const parentNode = nodeForReference(parent);
+      if (parentNode !== messageNode) children.get(parentNode)!.add(messageNode);
     }
   }
 
-  const compareMessages = (leftId: string, rightId: string): number => {
-    const left = byId.get(leftId)!;
-    const right = byId.get(rightId)!;
+  const compareMessages = (left: T, right: T): number => {
     if (left.receivedAt === null && right.receivedAt !== null) return 1;
     if (left.receivedAt !== null && right.receivedAt === null) return -1;
     return (left.receivedAt?.localeCompare(right.receivedAt ?? "") ?? 0)
       || left.identityKey.localeCompare(right.identityKey);
   };
-  return orderDirectedGraph([...byId.keys()], children, compareMessages).map((id) => byId.get(id)!);
+  const compareNodes = (left: OrderNode, right: OrderNode): number => {
+    if (left.kind === "message" && right.kind === "message") return compareMessages(left.message, right.message);
+    if (left.kind === "reference" && right.kind === "reference") return left.messageId.localeCompare(right.messageId);
+    return left.kind === "reference" ? -1 : 1;
+  };
+  return orderDirectedGraph([...children.keys()], children, compareNodes, (node) => node.kind === "message")
+    .flatMap((node) => node.kind === "message" ? [node.message] : []);
 }
 
-function orderDirectedGraph(
-  values: readonly string[],
-  after: ReadonlyMap<string, ReadonlySet<string>>,
-  compareValues: (left: string, right: string) => number,
-): string[] {
-  const indexByValue = new Map<string, number>();
-  const lowByValue = new Map<string, number>();
-  const stack: string[] = [];
-  const stacked = new Set<string>();
-  const components: string[][] = [];
+function orderDirectedGraph<T>(
+  values: readonly T[],
+  after: ReadonlyMap<T, ReadonlySet<T>>,
+  compareValues: (left: T, right: T) => number,
+  isVisible: (value: T) => boolean = () => true,
+): T[] {
+  const indexByValue = new Map<T, number>();
+  const lowByValue = new Map<T, number>();
+  const stack: T[] = [];
+  const stacked = new Set<T>();
+  const components: T[][] = [];
   let nextIndex = 0;
   interface VisitFrame {
-    value: string;
-    laterValues: string[];
+    value: T;
+    laterValues: T[];
     nextLater: number;
   }
-  const startVisit = (value: string): VisitFrame => {
+  const startVisit = (value: T): VisitFrame => {
     indexByValue.set(value, nextIndex);
     lowByValue.set(value, nextIndex);
     nextIndex += 1;
@@ -111,7 +152,7 @@ function orderDirectedGraph(
         lowByValue.set(parent.value, Math.min(lowByValue.get(parent.value)!, lowByValue.get(visit.value)!));
       }
       if (lowByValue.get(visit.value) === indexByValue.get(visit.value)) {
-        const component: string[] = [];
+        const component: T[] = [];
         while (stack.length > 0) {
           const member = stack.pop()!;
           stacked.delete(member);
@@ -123,7 +164,7 @@ function orderDirectedGraph(
     }
   }
 
-  const componentByValue = new Map<string, number>();
+  const componentByValue = new Map<T, number>();
   components.forEach((component, index) => {
     for (const value of component) componentByValue.set(value, index);
   });
@@ -139,15 +180,22 @@ function orderDirectedGraph(
     }
   }
 
-  const compareComponents = (left: number, right: number): number =>
-    compareValues(components[left]![0]!, components[right]![0]!);
+  const compareComponents = (left: number, right: number): number => {
+    const leftComponent = components[left]!;
+    const rightComponent = components[right]!;
+    const leftVisible = leftComponent.find(isVisible);
+    const rightVisible = rightComponent.find(isVisible);
+    if (leftVisible === undefined && rightVisible !== undefined) return -1;
+    if (leftVisible !== undefined && rightVisible === undefined) return 1;
+    return compareValues(leftVisible ?? leftComponent[0]!, rightVisible ?? rightComponent[0]!);
+  };
   const ready = components.map((_, index) => index)
     .filter((index) => incoming.get(index) === 0)
     .sort(compareComponents);
-  const ordered: string[] = [];
+  const ordered: T[] = [];
   while (ready.length > 0) {
     const component = ready.shift()!;
-    ordered.push(...components[component]!);
+    ordered.push(...components[component]!.filter(isVisible));
     for (const later of componentAfter.get(component)!) {
       const remaining = incoming.get(later)! - 1;
       incoming.set(later, remaining);

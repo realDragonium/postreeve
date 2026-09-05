@@ -121,6 +121,63 @@ describe("Store migrations", () => {
     recovered.close();
   });
 
+  test("retains historical edge ordering without restoring removed public threading metadata", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const store = new Store(path);
+    await store.insertAccount({
+      id: "imap-account", name: "IMAP", email: "person@example.test", kind: "imap", encryptedCredentials: null,
+    });
+    const location = (uid: number) => ({
+      accountId: "imap-account", provider: "imap" as const, mailbox: "INBOX", uidValidity: "historic-order", uid,
+      modseq: null, providerId: null, read: false, flagged: false,
+    });
+    const [child] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{
+        tenantId: "tenant-a", messageId: "<child@example.test>", inReplyTo: "<parent@example.test>",
+        references: [], receivedAt: "2026-09-01T00:00:00.000Z", location: location(1),
+      }],
+    });
+    store.close();
+
+    const fixture = new Database(path);
+    fixture.query(`
+      UPDATE messages SET in_reply_to = NULL, "references" = '[]' WHERE tenant_id = ? AND id = ?
+    `).run("tenant-a", child!.id);
+    fixture.close();
+
+    const repaired = new Store(path);
+    const [parent] = await repaired.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{
+        tenantId: "tenant-a", messageId: "<parent@example.test>", inReplyTo: null, references: [],
+        receivedAt: "2026-09-02T00:00:00.000Z", location: location(2),
+      }],
+    });
+    const repairedConversation = await repaired.getConversation("tenant-a", child!.conversationId);
+    expect(parent!.conversationId).toBe(child!.conversationId);
+    expect(repairedConversation?.messages.map(({ messageId }) => messageId)).toEqual([
+      "<parent@example.test>", "<child@example.test>",
+    ]);
+    expect(repairedConversation?.messages.find(({ id }) => id === child!.id)).toMatchObject({
+      inReplyTo: null,
+      references: [],
+    });
+    repaired.close();
+
+    const reopened = new Store(path);
+    const reopenedConversation = await reopened.getConversation("tenant-a", child!.conversationId);
+    expect(reopenedConversation?.messages.map(({ messageId }) => messageId)).toEqual([
+      "<parent@example.test>", "<child@example.test>",
+    ]);
+    expect(reopenedConversation?.messages.find(({ id }) => id === child!.id)).toMatchObject({
+      inReplyTo: null,
+      references: [],
+    });
+    reopened.close();
+  });
+
   test("repairs only the RFC component affected by a late parent", async () => {
     const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
     paths.push(path);
