@@ -88,6 +88,49 @@ describe("Postreeve core workflow", () => {
     store.close();
   });
 
+  test("returns one canonical summary while retaining duplicate delivery locations", async () => {
+    const { store, service } = await createEmptyTestHarness({ duplicateDelivery: true });
+    const account = await service.createAccount(testAccountInput());
+
+    const listed = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 });
+    const searched = await service.searchMessages({
+      accountId: account.id,
+      mailbox: "INBOX",
+      query: "planning",
+      limit: 50,
+    });
+    const queried = await service.listMessages({
+      accountId: account.id,
+      mailbox: "INBOX",
+      query: "planning",
+      limit: 50,
+    });
+    const planning = listed.filter(({ messageId }) => messageId === "<message-103@example.test>");
+
+    expect(planning).toHaveLength(1);
+    expect(planning[0]).toMatchObject({ ref: { uid: 103 }, read: false, flagged: true });
+    expect(searched.map(({ canonicalId }) => canonicalId)).toEqual([planning[0]!.canonicalId]);
+    expect(queried.map(({ canonicalId }) => canonicalId)).toEqual([planning[0]!.canonicalId]);
+    const locations = await store.listMessageLocations("test-tenant", planning[0]!.canonicalId);
+    expect(locations.map(({ uid, providerId }) => ({ uid, providerId })).toSorted((left, right) => left.uid - right.uid))
+      .toEqual([
+      { uid: 103, providerId: null },
+      { uid: 104, providerId: "provider-copy-104" },
+      ]);
+    expect((await service.readMessages([
+      { accountId: account.id, mailbox: "INBOX", uidValidity: "1723371481", uid: 103, modseq: "1" },
+      {
+        accountId: account.id,
+        mailbox: "INBOX",
+        uidValidity: "1723371481",
+        uid: 104,
+        modseq: "1",
+        providerId: "provider-copy-104",
+      },
+    ])).map(({ ref }) => ref.uid)).toEqual([103, 104]);
+    store.close();
+  });
+
   test("creates, renames, and deletes custom folders while protecting system folders", async () => {
     const { store, service, account } = await createTestHarness();
 

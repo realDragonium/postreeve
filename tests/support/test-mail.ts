@@ -53,6 +53,7 @@ export async function createTestHarness() {
 export async function createEmptyTestHarness(options: {
   imapFailure?: Error;
   smtpFailure?: Error;
+  duplicateDelivery?: boolean;
 } = {}) {
   const store = new Store(":memory:");
   const sent: SendMessageInput[] = [];
@@ -65,7 +66,7 @@ export async function createEmptyTestHarness(options: {
     new MailSenderRegistry(),
     new CredentialVault(testMasterKey),
     (accountId) => {
-      const provider = new TestMailProvider(accountId, options.imapFailure);
+      const provider = new TestMailProvider(accountId, options.imapFailure, options.duplicateDelivery ?? false);
       providers.set(accountId, provider);
       return provider;
     },
@@ -92,9 +93,9 @@ class TestMailProvider implements MailProvider {
   ]);
   readonly #verificationFailure: Error | undefined;
 
-  constructor(accountId: string, verificationFailure?: Error) {
+  constructor(accountId: string, verificationFailure: Error | undefined, duplicateDelivery: boolean) {
     this.#accountId = accountId;
-    this.#messages = testMessages(accountId);
+    this.#messages = testMessages(accountId, duplicateDelivery);
     this.#verificationFailure = verificationFailure;
   }
 
@@ -291,10 +292,10 @@ function toDetail(message: TestMessage): MessageDetail {
   return structuredClone(detail);
 }
 
-function testMessages(accountId: string): TestMessage[] {
+function testMessages(accountId: string, duplicateDelivery: boolean): TestMessage[] {
   const ref = (uid: number): MessageRef => ({ accountId, mailbox: "INBOX", uidValidity, uid, modseq: "1" });
   const recipient = [{ name: "Test user", address: "person@example.test" }];
-  return [
+  const messages: TestMessage[] = [
     {
       ref: ref(103), mailbox: "INBOX", messageId: "<message-103@example.test>", subject: "Quarterly planning notes",
       from: [{ name: "Sam Rivera", address: "sam@example.test" }], to: recipient,
@@ -314,4 +315,14 @@ function testMessages(accountId: string): TestMessage[] {
       text: "Your payment was successful.", html: null, read: true, flagged: false,
     },
   ];
+  if (duplicateDelivery) {
+    messages.splice(1, 0, {
+      ...structuredClone(messages[0]!),
+      ref: { ...ref(104), providerId: "provider-copy-104" },
+      read: true,
+      flagged: false,
+      preview: "Duplicate provider delivery with different mutable flags.",
+    });
+  }
+  return messages;
 }

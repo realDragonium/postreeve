@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { uniqueCanonicalMessages } from "../../shared/canonical-messages.ts";
 import {
   accountSchema,
   batchIdSchema,
@@ -194,7 +195,9 @@ export function createPostreeveWebMcpTools(services: WebMcpServices): readonly W
       annotations: readOnlyAnnotations,
       execute: async (input, { signal }) => {
         const parsed = strictListMessagesInputSchema.parse(input);
-        const messages = z.array(canonicalMessageSummarySchema).parse(await services.listMessages(parsed, signal));
+        const messages = uniqueCanonicalMessages(
+          z.array(canonicalMessageSummarySchema).parse(await services.listMessages(parsed, signal)),
+        );
         return showMailboxView(services, { ...parsed, query: "", messages });
       },
     },
@@ -217,7 +220,9 @@ export function createPostreeveWebMcpTools(services: WebMcpServices): readonly W
       annotations: readOnlyAnnotations,
       execute: async (input, { signal }) => {
         const parsed = searchMessagesInputSchema.parse(input);
-        const messages = z.array(canonicalMessageSummarySchema).parse(await services.searchMessages(parsed, signal));
+        const messages = uniqueCanonicalMessages(
+          z.array(canonicalMessageSummarySchema).parse(await services.searchMessages(parsed, signal)),
+        );
         return showMailboxView(services, { ...parsed, messages });
       },
     },

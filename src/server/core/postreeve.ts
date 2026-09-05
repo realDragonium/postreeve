@@ -30,6 +30,7 @@ import {
   sendMessageInputSchema,
   updateProposalInputSchema,
 } from "../../shared/contracts";
+import { uniqueCanonicalMessages } from "../../shared/canonical-messages";
 import type { Store, StoredAccount, StoredBatch } from "../db/store";
 import type { StoredOperation } from "../db/schema";
 import { MailProviderRegistry, toCanonicalObservation, type MailProvider } from "../mail/provider";
@@ -477,11 +478,11 @@ export class PostreeveService {
       authoritative,
     });
     if (canonical.length !== messages.length) throw new Error("Canonical reconciliation result count does not match observations");
-    return messages.map((message, index) => ({
+    return uniqueCanonicalMessages(messages.map((message, index) => ({
       ...message,
       canonicalId: canonical[index]!.id,
       canonicalAliases: canonical[index]!.aliases,
-    }));
+    })));
   }
 
   #credentialsFor(account: StoredAccount): AccountCredentials {

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { canonicalMessageSummarySchema } from "../src/shared/contracts.ts";
 import type {
   Account,
   CanonicalMessageSummary,
@@ -74,6 +75,7 @@ const messageDetail: MessageDetail = {
 
 const olderUnreadMessage: CanonicalMessageSummary = {
   ...message,
+  canonicalId: "canonical-message-older",
   ref: { ...message.ref, uid: 6 },
   messageId: "message-older@example.test",
   subject: "Older matching subject",
@@ -83,6 +85,7 @@ const olderUnreadMessage: CanonicalMessageSummary = {
 
 const readMessage: CanonicalMessageSummary = {
   ...message,
+  canonicalId: "canonical-message-read",
   ref: { ...message.ref, uid: 8 },
   messageId: "message-read@example.test",
   subject: "Read matching subject",
@@ -439,6 +442,53 @@ describe("Postreeve WebMCP", () => {
       filter: "all",
       sort: "newest",
     }, executeOptions())).rejects.toThrow();
+  });
+
+  test("returns one canonical summary from mocked list and search services", async () => {
+    const duplicate: CanonicalMessageSummary = {
+      ...message,
+      canonicalAliases: ["retired-canonical"],
+      ref: { ...message.ref, uid: 9 },
+      preview: "Duplicate delivery",
+      read: true,
+      flagged: true,
+    };
+    class DuplicateServices extends FakeServices {
+      override async listMessages(
+        input: WebMcpListMessagesInput,
+        signal: AbortSignal,
+      ): Promise<readonly CanonicalMessageSummary[]> {
+        return [...await super.listMessages(input, signal), duplicate];
+      }
+
+      override async searchMessages(
+        _input: WebMcpSearchMessagesInput,
+        _signal: AbortSignal,
+      ): Promise<readonly CanonicalMessageSummary[]> {
+        return [message, duplicate];
+      }
+    }
+
+    const services = new DuplicateServices();
+    const tools = createPostreeveWebMcpTools(services);
+    const list = tools.find(({ name }) => name === "list_messages");
+    const search = tools.find(({ name }) => name === "search_messages");
+    if (!list || !search) throw new Error("Missing message listing tools");
+
+    const listed = canonicalMessageSummarySchema.array().parse(
+      await list.execute({ accountId: account.id, mailbox: "INBOX" }, executeOptions()),
+    );
+    const searched = canonicalMessageSummarySchema.array().parse(await search.execute({
+      accountId: account.id,
+      mailbox: "INBOX",
+      query: "subject",
+      filter: "all",
+      sort: "newest",
+    }, executeOptions()));
+
+    expect(listed).toEqual([{ ...message, canonicalAliases: ["retired-canonical"] }]);
+    expect(searched).toEqual([{ ...message, canonicalAliases: ["retired-canonical"] }]);
+    expect(services.mailboxViews.map(({ messages }) => messages)).toEqual([listed, searched]);
   });
 
   test("is inert outside a WebMCP-capable browser", async () => {
