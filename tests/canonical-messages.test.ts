@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { CanonicalMessageObservation, MessageSummary } from "../src/shared/contracts";
+import type { CanonicalMessageObservation, CanonicalMessageSummary, MessageSummary } from "../src/shared/contracts";
+import { uniqueCanonicalMessages } from "../src/shared/canonical-messages";
 import { Store } from "../src/server/db/store";
 import { normalizeMessageId } from "../src/server/mail/message-id";
 import { toCanonicalObservation } from "../src/server/mail/provider";
@@ -273,6 +274,97 @@ describe("canonical message persistence", () => {
     const [first] = await store.reconcileMailbox({ tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", observations: [inbox], authoritative: true });
     const [second] = await store.reconcileMailbox({ tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "Archive", observations: [archive], authoritative: true });
     expect(second!.id).not.toBe(first!.id);
+  });
+
+  test("links exact provider move references and preserves fallback aliases and threading", async () => {
+    const store = await createStore();
+    const source = observation({ messageId: null });
+    const destination = observation({
+      messageId: null,
+      inReplyTo: null,
+      references: [],
+      location: { ...source.location, mailbox: "Archive", uidValidity: "20", uid: 84 },
+    });
+    const [sourceCanonical] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [source], authoritative: true,
+    });
+    const [destinationFallback] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "Archive",
+      observations: [destination], authoritative: false,
+    });
+
+    expect(await store.recordProviderMove("tenant-a", "imap", {
+      accountId: "imap-account", mailbox: "INBOX", uidValidity: "10", uid: 42, modseq: "1",
+    }, {
+      accountId: "imap-account", mailbox: "Archive", uidValidity: "20", uid: 84, modseq: "2",
+    })).toBe(true);
+    await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [], authoritative: true,
+    });
+    const [moved] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "Archive",
+      observations: [destination], authoritative: true,
+    });
+
+    expect(moved).toMatchObject({
+      id: sourceCanonical!.id,
+      aliases: [destinationFallback!.id],
+      inReplyTo: "<parent@example.test>",
+      references: ["<root@example.test>", "<parent@example.test>"],
+    });
+    expect(await store.getMessage("tenant-a", destinationFallback!.id)).toEqual(moved!);
+
+    expect(await store.recordProviderMove("tenant-a", "imap", {
+      accountId: "imap-account", mailbox: "Archive", uidValidity: "20", uid: 84, modseq: "2",
+    }, {
+      accountId: "imap-account", mailbox: "INBOX", uidValidity: "30", uid: 96, modseq: "3",
+    })).toBe(true);
+    await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "Archive",
+      observations: [], authoritative: true,
+    });
+    const reversed = observation({
+      messageId: null,
+      inReplyTo: null,
+      references: [],
+      location: { ...source.location, uidValidity: "30", uid: 96, modseq: "3" },
+    });
+    const [restored] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [reversed], authoritative: true,
+    });
+    expect(restored!.id).toBe(sourceCanonical!.id);
+  });
+
+  test("rejects known moves across boundaries or conflicting valid canonical IDs", async () => {
+    const store = await createStore();
+    const source = observation({ messageId: "<source@example.test>" });
+    const destination = observation({
+      messageId: "<destination@example.test>",
+      location: { ...source.location, mailbox: "Archive", uidValidity: "20", uid: 84 },
+    });
+    const [sourceCanonical] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [source], authoritative: true,
+    });
+    const [destinationCanonical] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "Archive",
+      observations: [destination], authoritative: true,
+    });
+    const previous = { accountId: "imap-account", mailbox: "INBOX", uidValidity: "10", uid: 42, modseq: "1" };
+    const current = { accountId: "imap-account", mailbox: "Archive", uidValidity: "20", uid: 84, modseq: "2" };
+
+    await expect(store.recordProviderMove("tenant-a", "imap", previous, current))
+      .rejects.toThrow("different canonical Message-ID");
+    await expect(store.recordProviderMove("tenant-a", "imap", previous, { ...current, accountId: "gmail-account" }))
+      .rejects.toThrow("cannot cross accounts");
+    await expect(store.recordProviderMove("tenant-a", "gmail", previous, current))
+      .rejects.toThrow("account boundary is invalid");
+    expect(await store.recordProviderMove("tenant-b", "imap", previous, current)).toBe(false);
+    expect((await store.listMessageLocations("tenant-a", sourceCanonical!.id))).toHaveLength(1);
+    expect((await store.listMessageLocations("tenant-a", destinationCanonical!.id))).toHaveLength(1);
   });
 
   test("promotes a fallback message when its Message-ID becomes available", async () => {
@@ -647,5 +739,26 @@ test("normalizes surrounding RFC 5322 CFWS without accepting malformed or multip
     "(comment) <local@example.test> trailing",
   ]) {
     expect(normalizeMessageId(malformed)).toBeNull();
+  }
+});
+
+test("canonical deduplication retains added aliases when invalid aliases keep the same length", () => {
+  const summary = (canonicalAliases: string[]): CanonicalMessageSummary => ({
+    canonicalId: "canonical",
+    canonicalAliases,
+    ref: { accountId: "account", mailbox: "INBOX", uidValidity: "1", uid: 1, modseq: null },
+    messageId: "<message@example.test>",
+    subject: "Subject",
+    from: [],
+    to: [],
+    receivedAt: "2026-09-03T00:00:00.000Z",
+    preview: "",
+    read: false,
+    flagged: false,
+  });
+
+  for (const existing of [["canonical", "retained"], ["retained", "retained"]]) {
+    const [deduplicated] = uniqueCanonicalMessages([summary(existing), summary(["added"])]);
+    expect(deduplicated!.canonicalAliases).toEqual(["retained", "added"]);
   }
 });

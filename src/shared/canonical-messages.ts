@@ -19,9 +19,7 @@ export function uniqueCanonicalMessages(
       ...representative.canonicalAliases,
       ...message.canonicalAliases,
     ])].filter((alias) => alias !== representative.canonicalId);
-    if (aliases.length !== representative.canonicalAliases.length) {
-      unique[existingIndex] = { ...representative, canonicalAliases: aliases };
-    }
+    unique[existingIndex] = { ...representative, canonicalAliases: aliases };
   }
 
   return unique;

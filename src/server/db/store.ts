@@ -8,6 +8,7 @@ import type {
   CanonicalMessage,
   CanonicalMessageObservation,
   MailProviderKind,
+  MessageRef,
   OperationBatch,
   Proposal,
 } from "../../shared/contracts";
@@ -188,7 +189,7 @@ export class Store {
         const locationKey = locationKeyFor(observation);
         const legacyLocationKey = legacyLocationKeyFor(observation);
         const fallbackIdentityKey = fallbackIdentityKeyFor(observation);
-        const legacyFallbackIdentityKey = legacyFallbackIdentityKeyFor(observation);
+        const legacyFallbackIdentityKey = legacyFallbackIdentityKeyFor(this.#sqlite, observation);
         const providerCanonical = findProviderCanonical(this.#sqlite, observation);
         let canonical: MessageRow | null = null;
         let fallbackRows: MessageRow[] = [];
@@ -362,6 +363,59 @@ export class Store {
       });
     });
     return reconcile(snapshot);
+  }
+
+  async recordProviderMove(
+    tenantId: string,
+    provider: MailProviderKind,
+    previous: MessageRef,
+    current: MessageRef,
+  ): Promise<boolean> {
+    if (!tenantId.trim()) throw new Error("A tenant ID is required");
+    if (previous.accountId !== current.accountId) throw new Error("Provider moves cannot cross accounts");
+    if (previous.providerId === "" || current.providerId === "") {
+      throw new Error("Provider ID must be non-empty when present");
+    }
+    const account = this.#sqlite.query("SELECT kind FROM accounts WHERE id = ?").get(previous.accountId) as {
+      kind: MailProviderKind;
+    } | null;
+    if (!account || account.kind !== provider) throw new Error("Provider move account boundary is invalid");
+
+    const record = this.#sqlite.transaction(() => {
+      const source = findCanonicalForReference(this.#sqlite, tenantId, provider, previous);
+      if (!source) return false;
+      const destination = findCanonicalForReference(this.#sqlite, tenantId, provider, current);
+      let canonical = source;
+
+      if (destination && destination.id !== source.id) {
+        if (source.message_id && destination.message_id && source.message_id !== destination.message_id) {
+          throw new Error("Provider move conflicts with a different canonical Message-ID");
+        }
+        const merged = destination.message_id && !source.message_id ? source : destination;
+        canonical = merged.id === source.id ? destination : source;
+        const now = new Date().toISOString();
+        const metadata = mergeThreadingMetadata(null, [], canonical, [merged]);
+        this.#sqlite.query(`
+          UPDATE messages SET in_reply_to = ?, "references" = ?, updated_at = ?
+          WHERE tenant_id = ? AND id = ?
+        `).run(metadata.inReplyTo, JSON.stringify(metadata.references), now, tenantId, canonical.id);
+        this.#sqlite.query("UPDATE message_locations SET message_id = ? WHERE tenant_id = ? AND message_id = ?")
+          .run(canonical.id, tenantId, merged.id);
+        this.#sqlite.query("UPDATE message_aliases SET message_id = ? WHERE tenant_id = ? AND message_id = ?")
+          .run(canonical.id, tenantId, merged.id);
+        this.#sqlite.query("UPDATE message_provider_associations SET message_id = ? WHERE tenant_id = ? AND message_id = ?")
+          .run(canonical.id, tenantId, merged.id);
+        this.#sqlite.query(`
+          INSERT INTO message_aliases (alias_id, tenant_id, message_id, created_at) VALUES (?, ?, ?, ?)
+        `).run(merged.id, tenantId, canonical.id, now);
+        this.#sqlite.query("DELETE FROM messages WHERE tenant_id = ? AND id = ?").run(tenantId, merged.id);
+      }
+
+      associateProviderReference(this.#sqlite, tenantId, provider, previous, canonical.id);
+      associateProviderReference(this.#sqlite, tenantId, provider, current, canonical.id);
+      return true;
+    });
+    return record();
   }
 
   async getMessage(tenantId: string, id: string): Promise<CanonicalMessage | null> {
@@ -669,9 +723,25 @@ function fallbackIdentityKeyFor(observation: CanonicalMessageObservation): strin
     : [location.provider, location.accountId, location.mailbox, location.uidValidity, location.uid])}`;
 }
 
-function legacyFallbackIdentityKeyFor(observation: CanonicalMessageObservation): string {
+function legacyFallbackIdentityKeyFor(
+  sqlite: Database,
+  observation: CanonicalMessageObservation,
+): string | null {
   const location = observation.location;
-  return `provider:${location.provider}:${location.accountId}:${legacyLocationKeyFor(observation)}`;
+  if (!location.providerId && (location.mailbox.includes(":") || location.uidValidity.includes(":"))) return null;
+  const key = `provider:${location.provider}:${location.accountId}:${legacyLocationKeyFor(observation)}`;
+  const accounts = sqlite.query("SELECT id FROM accounts WHERE kind = ?").all(location.provider) as Array<{ id: string }>;
+  const candidates = accounts.filter(({ id }) => couldBeLegacyFallbackForAccount(key, location.provider, id));
+  return candidates.length === 1 && candidates[0]!.id === location.accountId ? key : null;
+}
+
+function couldBeLegacyFallbackForAccount(key: string, provider: MailProviderKind, accountId: string): boolean {
+  const providerPrefix = `provider:${provider}:${accountId}:provider-id:`;
+  if (key.startsWith(providerPrefix)) return key.length > providerPrefix.length;
+  const imapPrefix = `provider:${provider}:${accountId}:imap:`;
+  if (!key.startsWith(imapPrefix)) return false;
+  const parts = key.slice(imapPrefix.length).split(":");
+  return parts.length >= 3 && parts.every((part) => part.length > 0) && /^[1-9]\d*$/.test(parts.at(-1)!);
 }
 
 function locationKeyFor(observation: CanonicalMessageObservation): string {
@@ -704,22 +774,77 @@ function findProviderCanonical(sqlite: Database, observation: CanonicalMessageOb
   `).get(observation.tenantId, location.accountId, location.provider, ...values) as MessageRow | null;
 }
 
+function findCanonicalForReference(
+  sqlite: Database,
+  tenantId: string,
+  provider: MailProviderKind,
+  reference: MessageRef,
+): MessageRow | null {
+  const association = reference.providerId
+    ? sqlite.query(`
+        SELECT message.* FROM message_provider_associations association
+        INNER JOIN messages message
+          ON message.tenant_id = association.tenant_id AND message.id = association.message_id
+        WHERE association.tenant_id = ? AND association.account_id = ? AND association.provider = ?
+          AND association.provider_id = ?
+        LIMIT 1
+      `).get(tenantId, reference.accountId, provider, reference.providerId) as MessageRow | null
+    : sqlite.query(`
+        SELECT message.* FROM message_provider_associations association
+        INNER JOIN messages message
+          ON message.tenant_id = association.tenant_id AND message.id = association.message_id
+        WHERE association.tenant_id = ? AND association.account_id = ? AND association.provider = ?
+          AND association.provider_id IS NULL AND association.mailbox = ?
+          AND association.uid_validity = ? AND association.uid = ?
+        LIMIT 1
+      `).get(tenantId, reference.accountId, provider, reference.mailbox,
+        reference.uidValidity, reference.uid) as MessageRow | null;
+  if (association) return association;
+  return sqlite.query(`
+    SELECT message.* FROM message_locations location
+    INNER JOIN messages message
+      ON message.tenant_id = location.tenant_id AND message.id = location.message_id
+    WHERE location.tenant_id = ? AND location.account_id = ? AND location.provider = ?
+      AND location.mailbox = ? AND location.uid_validity = ? AND location.uid = ?
+      AND ((? IS NULL AND location.provider_id IS NULL) OR location.provider_id = ?)
+    LIMIT 1
+  `).get(tenantId, reference.accountId, provider, reference.mailbox, reference.uidValidity,
+    reference.uid, reference.providerId ?? null, reference.providerId ?? null) as MessageRow | null;
+}
+
+function associateProviderReference(
+  sqlite: Database,
+  tenantId: string,
+  provider: MailProviderKind,
+  reference: MessageRef,
+  messageId: string,
+): void {
+  sqlite.query(`
+    INSERT INTO message_provider_associations
+      (tenant_id, account_id, provider, provider_id, mailbox, uid_validity, uid, message_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT DO UPDATE SET message_id = excluded.message_id
+  `).run(tenantId, reference.accountId, provider, reference.providerId ?? null,
+    reference.providerId ? null : reference.mailbox,
+    reference.providerId ? null : reference.uidValidity,
+    reference.providerId ? null : reference.uid,
+    messageId);
+}
+
 function associateProviderObservation(
   sqlite: Database,
   observation: CanonicalMessageObservation,
   messageId: string,
 ): void {
   const location = observation.location;
-  sqlite.query(`
-    INSERT INTO message_provider_associations
-      (tenant_id, account_id, provider, provider_id, mailbox, uid_validity, uid, message_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT DO UPDATE SET message_id = excluded.message_id
-  `).run(observation.tenantId, location.accountId, location.provider, location.providerId,
-    location.providerId ? null : location.mailbox,
-    location.providerId ? null : location.uidValidity,
-    location.providerId ? null : location.uid,
-    messageId);
+  associateProviderReference(sqlite, observation.tenantId, location.provider, {
+    accountId: location.accountId,
+    mailbox: location.mailbox,
+    uidValidity: location.uidValidity,
+    uid: location.uid,
+    modseq: location.modseq,
+    ...(location.providerId ? { providerId: location.providerId } : {}),
+  }, messageId);
 }
 
 function toStoredLocation(row: LocationRow): StoredMessageLocation {

@@ -33,7 +33,12 @@ import {
 import { uniqueCanonicalMessages } from "../../shared/canonical-messages";
 import type { Store, StoredAccount, StoredBatch } from "../db/store";
 import type { StoredOperation } from "../db/schema";
-import { MailProviderRegistry, toCanonicalObservation, type MailProvider } from "../mail/provider";
+import {
+  MailProviderRegistry,
+  toCanonicalObservation,
+  type MailProvider,
+  type ProviderLocationMove,
+} from "../mail/provider";
 import { MailSenderRegistry, type MailSender } from "../mail/sender";
 import {
   CredentialVault,
@@ -381,7 +386,8 @@ export class PostreeveService {
           operation = { result: operationResult(item, "applied", null), applied: null };
         } else {
           const applied = await provider.apply(item.message, item.action);
-          operation = { result: operationResult(item, "applied", null), applied };
+          const identityError = await this.#recordProviderMove(proposal.accountId, applied);
+          operation = { result: operationResult(item, "applied", identityError), applied };
         }
       } catch (error) {
         operation = { result: operationResult(item, "failed", errorMessage(error)), applied: null };
@@ -431,10 +437,11 @@ export class PostreeveService {
         continue;
       }
       try {
-        await provider.undo(operation.applied);
+        const reversed = await provider.undo(operation.applied);
+        const identityError = reversed ? await this.#recordProviderMove(batch.accountId, reversed) : null;
         storedOperations.push({
           ...operation,
-          result: { ...operation.result, status: "undone", error: null },
+          result: { ...operation.result, status: "undone", error: identityError },
         });
       } catch (error) {
         storedOperations.push({
@@ -456,6 +463,16 @@ export class PostreeveService {
     const proposal = await this.getProposal(batch.proposalId);
     await this.#store.updateProposal({ ...proposal, status, updatedAt: updated.updatedAt });
     return toPublicBatch(updated);
+  }
+
+  async #recordProviderMove(accountId: string, move: ProviderLocationMove): Promise<string | null> {
+    try {
+      const account = await this.#requireAccount(accountId);
+      await this.#store.recordProviderMove(this.#context.tenantId, account.kind, move.previous, move.current);
+      return null;
+    } catch (error) {
+      return `Provider action succeeded, but local message identity could not be retained: ${errorMessage(error)}`;
+    }
   }
 
   #registerStoredAccount(account: StoredAccount): void {

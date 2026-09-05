@@ -12,7 +12,7 @@ import type {
   TriageAction,
 } from "../../shared/contracts";
 import type { GmailAccountCredentials } from "../security/credentials";
-import type { AppliedMailAction, MailboxPage, MailProvider } from "./provider";
+import type { AppliedMailAction, MailboxPage, MailProvider, ProviderLocationMove } from "./provider";
 import type { MailSender } from "./sender";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -219,24 +219,25 @@ export class GmailMailClient implements MailProvider, MailSender {
     };
   }
 
-  async undo(applied: AppliedMailAction): Promise<void> {
+  async undo(applied: AppliedMailAction): Promise<ProviderLocationMove | null> {
     this.#assertReference(applied.current);
     const id = providerId(applied.current);
     switch (applied.action.type) {
       case "leave":
-        return;
+        return null;
       case "mark_read":
       case "mark_unread":
         await this.#modify(id, applied.previousRead ? [] : ["UNREAD"], applied.previousRead ? ["UNREAD"] : []);
-        return;
+        return null;
       case "trash":
         await this.#request(`/messages/${encodeURIComponent(id)}/untrash`, gmailMessageSchema, { method: "POST" });
-        return;
+        return null;
       case "move": {
         const add = applied.previous.mailbox === GMAIL_ARCHIVE ? [] : [applied.previous.mailbox];
         const remove = applied.current.mailbox === GMAIL_ARCHIVE ? [] : [applied.current.mailbox];
         if (applied.current.mailbox === GMAIL_ARCHIVE && applied.previous.mailbox === "INBOX") add.push("INBOX");
         await this.#modify(id, add, remove.filter((label) => !add.includes(label)));
+        return null;
       }
     }
   }

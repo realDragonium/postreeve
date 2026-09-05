@@ -44,6 +44,11 @@ export interface AppliedMailAction {
   previousRead: boolean;
 }
 
+export interface ProviderLocationMove {
+  current: MessageRef;
+  previous: MessageRef;
+}
+
 export interface MailboxPage {
   messages: MessageSummary[];
   complete: boolean;
@@ -61,7 +66,7 @@ export interface MailProvider {
   searchMessages(accountId: string, mailbox: string, query: string, limit: number): Promise<MessageSummary[]>;
   revalidate(reference: MessageRef): Promise<boolean>;
   apply(reference: MessageRef, action: TriageAction): Promise<AppliedMailAction>;
-  undo(applied: AppliedMailAction): Promise<void>;
+  undo(applied: AppliedMailAction): Promise<ProviderLocationMove | null>;
 }
 
 export class MailProviderRegistry {

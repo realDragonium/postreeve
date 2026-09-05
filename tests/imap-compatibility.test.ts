@@ -238,9 +238,25 @@ describe("Bun IMAP compatibility", () => {
     expect(state.mailboxes.get("INBOX")?.messages.has(3)).toBe(false);
     expect(state.mailboxes.get("Bin")?.messages.has(30)).toBe(true);
 
-    await provider.undo(applied);
+    const reversed = await provider.undo(applied);
     expect(state.mailboxes.get("Bin")?.messages.has(30)).toBe(false);
     expect(state.mailboxes.get("INBOX")?.messages.size).toBe(3);
+    expect(reversed).toEqual({
+      previous: {
+        accountId: config.accountId,
+        mailbox: "Bin",
+        uidValidity: "303",
+        uid: 30,
+        modseq: "14",
+      },
+      current: {
+        accountId: config.accountId,
+        mailbox: "INBOX",
+        uidValidity: "101",
+        uid: 4,
+        modseq: null,
+      },
+    });
   });
 
   test("refuses an untraceable move before changing server state", async () => {

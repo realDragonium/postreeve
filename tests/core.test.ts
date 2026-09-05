@@ -231,6 +231,63 @@ describe("Postreeve core workflow", () => {
     store.close();
   });
 
+  test("retains a missing-ID message through an applied move and its undo", async () => {
+    const { store, service, account, messages } = await createTestHarness({ missingMessageId: true });
+    const message = messages[0]!;
+    const batch = await service.applyDirectActions({
+      accountId: account.id,
+      items: [{
+        message: message.ref,
+        subject: message.subject,
+        action: { type: "move", destination: "Archive" },
+      }],
+    });
+
+    expect(batch.status).toBe("applied");
+    expect(batch.operations[0]?.error).toBeNull();
+    await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 });
+    const [moved] = await service.listMessages({ accountId: account.id, mailbox: "Archive", limit: 50 });
+    expect(moved?.canonicalId).toBe(message.canonicalId);
+    expect(await store.getMessage("test-tenant", message.canonicalId!)).toMatchObject({
+      inReplyTo: "<parent@example.test>",
+      references: ["<root@example.test>", "<parent@example.test>"],
+    });
+
+    const undone = await service.undoBatch(batch.id);
+    expect(undone.status).toBe("undone");
+    expect(undone.operations[0]?.error).toBeNull();
+    await service.listMessages({ accountId: account.id, mailbox: "Archive", limit: 50 });
+    const restored = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 });
+    expect(restored.find(({ subject }) => subject === message.subject)?.canonicalId).toBe(message.canonicalId);
+    store.close();
+  });
+
+  test("keeps provider success and undoability when local move identity persistence fails", async () => {
+    const { store, service, account, messages } = await createTestHarness({ missingMessageId: true });
+    store.recordProviderMove = async () => {
+      throw new Error("fixture identity persistence failure");
+    };
+    const message = messages[0]!;
+    const batch = await service.applyDirectActions({
+      accountId: account.id,
+      items: [{
+        message: message.ref,
+        subject: message.subject,
+        action: { type: "move", destination: "Archive" },
+      }],
+    });
+
+    expect(batch.status).toBe("applied");
+    expect(batch.operations[0]?.status).toBe("applied");
+    expect(batch.operations[0]?.error).toContain("local message identity");
+    const undone = await service.undoBatch(batch.id);
+    expect(undone.status).toBe("undone");
+    expect(undone.operations[0]?.error).toContain("local message identity");
+    const restored = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 });
+    expect(restored.some(({ subject }) => subject === message.subject)).toBe(true);
+    store.close();
+  });
+
   test("sends from the selected account without crossing account boundaries", async () => {
     const { store, service, account, sent } = await createTestHarness();
     const receipt = await service.sendMessage({

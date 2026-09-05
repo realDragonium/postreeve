@@ -364,6 +364,105 @@ describe("Store migrations", () => {
     store.close();
   });
 
+  test("does not claim a locationless legacy key with ambiguous account boundaries", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const initial = new Store(path);
+    for (const id of ["scope", "scope:provider-id:shared"]) {
+      await initial.insertAccount({
+        id,
+        name: id,
+        email: `${id}@example.test`,
+        kind: "gmail",
+        encryptedCredentials: null,
+      });
+    }
+    initial.close();
+    const legacy = new Database(path);
+    legacy.query(`
+      INSERT INTO messages
+        (id, tenant_id, identity_key, message_id, in_reply_to, "references", created_at, updated_at)
+      VALUES (?, ?, ?, NULL, NULL, '[]', ?, ?)
+    `).run("ambiguous-account-legacy", "tenant-a",
+      "provider:gmail:scope:provider-id:shared:provider-id:tail",
+      "2026-09-03T00:00:00.000Z", "2026-09-03T00:00:00.000Z");
+    legacy.close();
+
+    const store = new Store(path);
+    const observation = {
+      tenantId: "tenant-a",
+      messageId: null,
+      inReplyTo: null,
+      references: [],
+      location: {
+        accountId: "scope",
+        provider: "gmail" as const,
+        mailbox: "INBOX",
+        uidValidity: "gmail",
+        uid: 1,
+        modseq: null,
+        providerId: "shared:provider-id:tail",
+        read: false,
+        flagged: false,
+      },
+    };
+    const [created] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "scope", provider: "gmail", mailbox: "INBOX",
+      observations: [observation], authoritative: false,
+    });
+    const [repeated] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "scope", provider: "gmail", mailbox: "INBOX",
+      observations: [observation], authoritative: false,
+    });
+
+    expect(created!.id).not.toBe("ambiguous-account-legacy");
+    expect(repeated!.id).toBe(created!.id);
+    expect(await store.getMessage("tenant-a", "ambiguous-account-legacy")).not.toBeNull();
+    store.close();
+  });
+
+  test("does not claim a locationless legacy key with ambiguous mailbox and UIDVALIDITY boundaries", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const initial = new Store(path);
+    await initial.insertAccount({
+      id: "imap-account",
+      name: "IMAP",
+      email: "imap@example.test",
+      kind: "imap",
+      encryptedCredentials: null,
+    });
+    initial.close();
+    const legacy = new Database(path);
+    legacy.query(`
+      INSERT INTO messages
+        (id, tenant_id, identity_key, message_id, in_reply_to, "references", created_at, updated_at)
+      VALUES (?, ?, ?, NULL, NULL, '[]', ?, ?)
+    `).run("ambiguous-imap-legacy", "tenant-a", "provider:imap:imap-account:imap:A:B:C:7",
+      "2026-09-03T00:00:00.000Z", "2026-09-03T00:00:00.000Z");
+    legacy.close();
+
+    const store = new Store(path);
+    const [created] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "A",
+      observations: [{
+        tenantId: "tenant-a",
+        messageId: null,
+        inReplyTo: null,
+        references: [],
+        location: {
+          accountId: "imap-account", provider: "imap", mailbox: "A", uidValidity: "B:C", uid: 7,
+          modseq: null, providerId: null, read: false, flagged: false,
+        },
+      }],
+      authoritative: false,
+    });
+
+    expect(created!.id).not.toBe("ambiguous-imap-legacy");
+    expect(await store.getMessage("tenant-a", "ambiguous-imap-legacy")).not.toBeNull();
+    store.close();
+  });
+
   test("rolls back earlier observations when a later observation fails", async () => {
     const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
     paths.push(path);
@@ -432,11 +531,10 @@ describe("Store migrations", () => {
         UNIQUE (tenant_id, identity_key), UNIQUE (tenant_id, id)
       );
       CREATE TABLE message_locations (
-        id TEXT PRIMARY KEY NOT NULL, message_id TEXT NOT NULL, tenant_id TEXT NOT NULL,
+        id TEXT PRIMARY KEY NOT NULL, message_id TEXT NOT NULL REFERENCES messages(id), tenant_id TEXT NOT NULL,
         account_id TEXT NOT NULL REFERENCES accounts(id), provider TEXT NOT NULL, mailbox TEXT NOT NULL,
         location_key TEXT NOT NULL, uid_validity TEXT NOT NULL, uid INTEGER NOT NULL, modseq TEXT,
         provider_id TEXT, read INTEGER NOT NULL, flagged INTEGER NOT NULL, observed_at TEXT NOT NULL,
-        FOREIGN KEY (tenant_id, message_id) REFERENCES messages(tenant_id, id),
         UNIQUE (tenant_id, account_id, provider, mailbox, location_key)
       );
       INSERT INTO accounts VALUES
@@ -461,10 +559,21 @@ describe("Store migrations", () => {
       SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'message_provider_associations'
     `).get()).toBeNull();
     expect(rolledBack.query("SELECT version FROM schema_migrations WHERE version = 476001").get()).toBeNull();
+    expect(rolledBack.query("SELECT version FROM schema_migrations WHERE version = 476").get()).toEqual({ version: 476 });
     expect(rolledBack.query("SELECT id, message_id FROM message_locations ORDER BY id").all()).toEqual([
       { id: "first-location", message_id: "first" },
       { id: "second-location", message_id: "second" },
     ]);
+    rolledBack.query("UPDATE message_locations SET message_id = 'first' WHERE id = 'second-location'").run();
     rolledBack.close();
+
+    new Store(path).close();
+    const retried = new Database(path);
+    expect(retried.query("SELECT version FROM schema_migrations WHERE version = 476001").get())
+      .toEqual({ version: 476001 });
+    expect(retried.query("SELECT COUNT(*) AS count FROM message_provider_associations").get()).toEqual({ count: 1 });
+    expect(retried.query("PRAGMA foreign_key_check('message_locations')").all()).toEqual([]);
+    expect(retried.query("PRAGMA foreign_key_check('message_provider_associations')").all()).toEqual([]);
+    retried.close();
   });
 });

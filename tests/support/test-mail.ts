@@ -12,7 +12,13 @@ import {
 } from "../../src/shared/contracts";
 import { PostreeveService } from "../../src/server/core/postreeve";
 import { Store } from "../../src/server/db/store";
-import { MailProviderRegistry, type AppliedMailAction, type MailboxPage, type MailProvider } from "../../src/server/mail/provider";
+import {
+  MailProviderRegistry,
+  type AppliedMailAction,
+  type MailboxPage,
+  type MailProvider,
+  type ProviderLocationMove,
+} from "../../src/server/mail/provider";
 import { MailSenderRegistry, type MailSender } from "../../src/server/mail/sender";
 import { CredentialVault } from "../../src/server/security/credentials";
 import type { ImapAccountCredentials } from "../../src/server/security/credentials";
@@ -42,19 +48,22 @@ export function testAccountInput(name = "Work", email = "person@example.test"): 
   };
 }
 
-export async function createTestHarness() {
-  const harness = await createEmptyTestHarness();
+interface TestHarnessOptions {
+  imapFailure?: Error;
+  smtpFailure?: Error;
+  duplicateDelivery?: boolean;
+  missingMessageId?: boolean;
+}
+
+export async function createTestHarness(options: TestHarnessOptions = {}) {
+  const harness = await createEmptyTestHarness(options);
   const { store, service, sent } = harness;
   const account = await service.createAccount(testAccountInput());
   const messages = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 });
   return { ...harness, store, service, account, messages, sent };
 }
 
-export async function createEmptyTestHarness(options: {
-  imapFailure?: Error;
-  smtpFailure?: Error;
-  duplicateDelivery?: boolean;
-} = {}) {
+export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
   const store = new Store(":memory:");
   const sent: SendMessageInput[] = [];
   const connections: ImapAccountCredentials[] = [];
@@ -66,7 +75,12 @@ export async function createEmptyTestHarness(options: {
     new MailSenderRegistry(),
     new CredentialVault(testMasterKey),
     (accountId) => {
-      const provider = new TestMailProvider(accountId, options.imapFailure, options.duplicateDelivery ?? false);
+      const provider = new TestMailProvider(
+        accountId,
+        options.imapFailure,
+        options.duplicateDelivery ?? false,
+        options.missingMessageId ?? false,
+      );
       providers.set(accountId, provider);
       return provider;
     },
@@ -92,10 +106,22 @@ class TestMailProvider implements MailProvider {
     ["Trash", { name: "Trash", specialUse: "trash" }],
   ]);
   readonly #verificationFailure: Error | undefined;
+  readonly #moveChangesUid: boolean;
 
-  constructor(accountId: string, verificationFailure: Error | undefined, duplicateDelivery: boolean) {
+  constructor(
+    accountId: string,
+    verificationFailure: Error | undefined,
+    duplicateDelivery: boolean,
+    missingMessageId: boolean,
+  ) {
     this.#accountId = accountId;
     this.#messages = testMessages(accountId, duplicateDelivery);
+    this.#moveChangesUid = missingMessageId;
+    if (missingMessageId) {
+      this.#messages[0]!.messageId = "missing-message-id";
+      this.#messages[0]!.inReplyTo = "<parent@example.test>";
+      this.#messages[0]!.references = ["<root@example.test>", "<parent@example.test>"];
+    }
     this.#verificationFailure = verificationFailure;
   }
 
@@ -192,22 +218,28 @@ class TestMailProvider implements MailProvider {
       case "move":
         message.mailbox = action.destination;
         message.ref.mailbox = action.destination;
+        if (this.#moveChangesUid) message.ref.uid += 100;
         break;
       case "trash":
         message.mailbox = "Trash";
         message.ref.mailbox = "Trash";
+        if (this.#moveChangesUid) message.ref.uid += 100;
         break;
     }
     message.ref.modseq = String(Number(message.ref.modseq ?? "0") + 1);
     return { current: structuredClone(message.ref), previous, action, previousRead };
   }
 
-  async undo(applied: AppliedMailAction): Promise<void> {
+  async undo(applied: AppliedMailAction): Promise<ProviderLocationMove | null> {
     const message = this.#find(applied.current);
     if (!message) throw new Error(`Applied message UID ${applied.current.uid} changed or no longer exists`);
+    const previous = structuredClone(message.ref);
     message.mailbox = applied.previous.mailbox;
     message.read = applied.previousRead;
     message.ref = { ...applied.previous, modseq: String(Number(message.ref.modseq ?? "0") + 1) };
+    return applied.action.type === "move" || applied.action.type === "trash"
+      ? { previous, current: structuredClone(message.ref) }
+      : null;
   }
 
   appendSent(input: SendMessageInput, messageId: string, sentAt: string): void {
