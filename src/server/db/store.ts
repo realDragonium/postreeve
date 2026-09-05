@@ -1195,10 +1195,12 @@ function repairConversations(
       .map(({ id }) => id))
     : collectAffectedMessageIds(sqlite, tenantId, affectedMessageIds);
   if (messageIds.size === 0) return;
-  const values = affectedMessageIds === undefined ? [] : [...messageIds];
-  const messageFilter = affectedMessageIds === undefined ? "" : ` AND id IN (${placeholders(values.length)})`;
+  const messageIdsJson = affectedMessageIds === undefined ? null : JSON.stringify([...messageIds]);
+  const messageFilter = affectedMessageIds === undefined
+    ? ""
+    : " AND id IN (SELECT value FROM json_each(?))";
   const messages = sqlite.query(`SELECT * FROM messages WHERE tenant_id = ?${messageFilter}`)
-    .all(tenantId, ...values) as MessageRow[];
+    .all(tenantId, ...optionalParameter(messageIdsJson)) as MessageRow[];
   const memberships = sqlite.query(`
     SELECT membership.message_id, membership.conversation_id,
       conversation.created_at AS conversation_created_at
@@ -1207,8 +1209,8 @@ function repairConversations(
       ON conversation.tenant_id = membership.tenant_id AND conversation.id = membership.conversation_id
     WHERE membership.tenant_id = ?${affectedMessageIds === undefined
       ? ""
-      : ` AND membership.message_id IN (${placeholders(values.length)})`}
-  `).all(tenantId, ...values) as MembershipRow[];
+      : " AND membership.message_id IN (SELECT value FROM json_each(?))"}
+  `).all(tenantId, ...optionalParameter(messageIdsJson)) as MembershipRow[];
   const membershipByMessage = new Map(memberships.map((membership) => [membership.message_id, membership]));
   if (messages.some(({ id }) => !membershipByMessage.has(id))) {
     throw new Error("Conversation resolver found a message without membership");
@@ -1258,8 +1260,8 @@ function repairConversations(
     SELECT message_id, referenced_message_id FROM message_thread_edges
     WHERE tenant_id = ?${affectedMessageIds === undefined
       ? ""
-      : ` AND message_id IN (${placeholders(values.length)})`} ORDER BY referenced_message_id, message_id
-  `).all(tenantId, ...values) as Array<{ message_id: string; referenced_message_id: string }>;
+      : " AND message_id IN (SELECT value FROM json_each(?))"} ORDER BY referenced_message_id, message_id
+  `).all(tenantId, ...optionalParameter(messageIdsJson)) as Array<{ message_id: string; referenced_message_id: string }>;
   const unresolvedRoots = new Map<string, string>();
   for (const edge of threadEdges) {
     const linked = byMessageId.get(edge.referenced_message_id);
@@ -1271,12 +1273,14 @@ function repairConversations(
 
   const providerLinks = sqlite.query(`
     SELECT account_id, provider, provider_conversation_id, message_id
-    FROM message_provider_conversations
+    FROM message_provider_conversations${affectedMessageIds === undefined
+      ? ""
+      : " INDEXED BY message_provider_conversations_message_id_idx"}
     WHERE tenant_id = ?${affectedMessageIds === undefined
       ? ""
-      : ` AND message_id IN (${placeholders(values.length)})`}
+      : " AND message_id IN (SELECT value FROM json_each(?))"}
     ORDER BY account_id, provider, provider_conversation_id, message_id
-  `).all(tenantId, ...values) as Array<{
+  `).all(tenantId, ...optionalParameter(messageIdsJson)) as Array<{
     account_id: string;
     provider: MailProviderKind;
     provider_conversation_id: string;
@@ -1387,53 +1391,55 @@ function collectAffectedMessageIds(
   let frontier = [...seeds];
   while (frontier.length > 0) {
     const discovered = new Set<string>();
-    const parameters = placeholders(frontier.length);
+    const frontierJson = JSON.stringify(frontier);
     const add = (id: string): void => {
       if (!affected.has(id)) discovered.add(id);
     };
 
     const memberships = sqlite.query(`
       SELECT message_id, conversation_id FROM conversation_messages
-      WHERE tenant_id = ? AND message_id IN (${parameters})
-    `).all(tenantId, ...frontier) as Array<{ message_id: string; conversation_id: string }>;
+      WHERE tenant_id = ? AND message_id IN (SELECT value FROM json_each(?))
+    `).all(tenantId, frontierJson) as Array<{ message_id: string; conversation_id: string }>;
     const conversationIds = [...new Set(memberships.map(({ conversation_id }) => conversation_id))];
     if (conversationIds.length > 0) {
-      const conversationParameters = placeholders(conversationIds.length);
       const members = sqlite.query(`
-        SELECT message_id FROM conversation_messages
-        WHERE tenant_id = ? AND conversation_id IN (${conversationParameters})
-      `).all(tenantId, ...conversationIds) as Array<{ message_id: string }>;
+        SELECT message_id FROM conversation_messages INDEXED BY conversation_messages_conversation_id_idx
+        WHERE tenant_id = ? AND conversation_id IN (SELECT value FROM json_each(?))
+      `).all(tenantId, JSON.stringify(conversationIds)) as Array<{ message_id: string }>;
       for (const member of members) add(member.message_id);
     }
 
     const messageRows = sqlite.query(`
-      SELECT message_id FROM messages WHERE tenant_id = ? AND id IN (${parameters})
-    `).all(tenantId, ...frontier) as Array<{ message_id: string | null }>;
+      SELECT message_id FROM messages
+      WHERE tenant_id = ? AND id IN (SELECT value FROM json_each(?))
+    `).all(tenantId, frontierJson) as Array<{ message_id: string | null }>;
     const edges = sqlite.query(`
       SELECT referenced_message_id FROM message_thread_edges
-      WHERE tenant_id = ? AND message_id IN (${parameters})
-    `).all(tenantId, ...frontier) as Array<{ referenced_message_id: string }>;
+      WHERE tenant_id = ? AND message_id IN (SELECT value FROM json_each(?))
+    `).all(tenantId, frontierJson) as Array<{ referenced_message_id: string }>;
     const tokens = [...new Set([
       ...messageRows.flatMap(({ message_id }) => message_id ? [message_id] : []),
       ...edges.map(({ referenced_message_id }) => referenced_message_id),
     ])];
     if (tokens.length > 0) {
-      const tokenParameters = placeholders(tokens.length);
+      const tokensJson = JSON.stringify(tokens);
       const linkedMessages = sqlite.query(`
-        SELECT id FROM messages WHERE tenant_id = ? AND message_id IN (${tokenParameters})
-      `).all(tenantId, ...tokens) as Array<{ id: string }>;
+        SELECT id FROM messages
+        WHERE tenant_id = ? AND message_id IN (SELECT value FROM json_each(?))
+      `).all(tenantId, tokensJson) as Array<{ id: string }>;
       const linkedEdges = sqlite.query(`
-        SELECT message_id FROM message_thread_edges
-        WHERE tenant_id = ? AND referenced_message_id IN (${tokenParameters})
-      `).all(tenantId, ...tokens) as Array<{ message_id: string }>;
+        SELECT message_id FROM message_thread_edges INDEXED BY message_thread_edges_reference_idx
+        WHERE tenant_id = ? AND referenced_message_id IN (SELECT value FROM json_each(?))
+      `).all(tenantId, tokensJson) as Array<{ message_id: string }>;
       for (const message of linkedMessages) add(message.id);
       for (const edge of linkedEdges) add(edge.message_id);
     }
 
     const providerLinks = sqlite.query(`
-      SELECT account_id, provider, provider_conversation_id FROM message_provider_conversations
-      WHERE tenant_id = ? AND message_id IN (${parameters})
-    `).all(tenantId, ...frontier) as Array<{
+      SELECT account_id, provider, provider_conversation_id
+      FROM message_provider_conversations INDEXED BY message_provider_conversations_message_id_idx
+      WHERE tenant_id = ? AND message_id IN (SELECT value FROM json_each(?))
+    `).all(tenantId, frontierJson) as Array<{
       account_id: string;
       provider: MailProviderKind;
       provider_conversation_id: string;
@@ -1442,14 +1448,15 @@ function collectAffectedMessageIds(
       JSON.stringify([link.account_id, link.provider, link.provider_conversation_id]), link,
     ])).values()];
     if (providerKeys.length > 0) {
-      const predicates = providerKeys.map(() =>
-        "(account_id = ? AND provider = ? AND provider_conversation_id = ?)").join(" OR ");
-      const providerValues = providerKeys.flatMap((link) =>
-        [link.account_id, link.provider, link.provider_conversation_id]);
       const peers = sqlite.query(`
-        SELECT message_id FROM message_provider_conversations
-        WHERE tenant_id = ? AND (${predicates})
-      `).all(tenantId, ...providerValues) as Array<{ message_id: string }>;
+        SELECT link.message_id
+        FROM json_each(?) provider_key
+        CROSS JOIN message_provider_conversations link
+        WHERE link.tenant_id = ?
+          AND link.account_id = json_extract(provider_key.value, '$.account_id')
+          AND link.provider = json_extract(provider_key.value, '$.provider')
+          AND link.provider_conversation_id = json_extract(provider_key.value, '$.provider_conversation_id')
+      `).all(JSON.stringify(providerKeys), tenantId) as Array<{ message_id: string }>;
       for (const peer of peers) add(peer.message_id);
     }
 
@@ -1459,8 +1466,8 @@ function collectAffectedMessageIds(
   return affected;
 }
 
-function placeholders(count: number): string {
-  return Array.from({ length: count }, () => "?").join(", ");
+function optionalParameter(value: string | null): [] | [string] {
+  return value === null ? [] : [value];
 }
 
 function parseStoredReferences(value: string): string[] {

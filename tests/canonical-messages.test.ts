@@ -979,6 +979,41 @@ describe("canonical message persistence", () => {
     expect(otherAccount!.conversationId).not.toBe(first!.conversationId);
   });
 
+  test("repairs an affected component with 1,100 distinct provider thread keys", async () => {
+    const store = await createStore();
+    const observations = Array.from({ length: 1_100 }, (_, index) => ({
+      tenantId: "tenant-a",
+      messageId: `<provider-key-${index}@example.test>`,
+      inReplyTo: null,
+      references: ["<shared-unresolved-root@example.test>"],
+      providerConversationId: `thread-${index}`,
+      location: {
+        accountId: "gmail-account",
+        provider: "gmail" as const,
+        mailbox: "INBOX",
+        uidValidity: "gmail",
+        uid: index + 1,
+        modseq: null,
+        providerId: `gmail-provider-key-${index}`,
+        read: false,
+        flagged: false,
+      },
+    }));
+    const messages = await store.reconcileMailbox({
+      tenantId: "tenant-a",
+      accountId: "gmail-account",
+      provider: "gmail",
+      mailbox: "INBOX",
+      observations,
+      authoritative: false,
+    });
+
+    expect(messages).toHaveLength(observations.length);
+    expect(new Set(messages.map(({ conversationId }) => conversationId))).toHaveLength(1);
+    expect((await store.getConversation("tenant-a", messages[0]!.conversationId))?.messages)
+      .toHaveLength(observations.length);
+  });
+
   test("keeps duplicate delivery singular and malformed or missing threading deterministic", async () => {
     const store = await createStore();
     const malformed = observation({ messageId: null, inReplyTo: "not-an-id", references: ["also invalid"] });

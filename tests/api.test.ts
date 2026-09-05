@@ -106,6 +106,78 @@ describe("Hono RPC API", () => {
     store.close();
   });
 
+  test("persists a complete 100,000-ID References observation beyond SQLite's binding limit", async () => {
+    const { store, service } = await createEmptyTestHarness();
+    const account = await service.createAccount(testAccountInput());
+    const referenceCount = 100_000;
+    const references = Array.from({ length: referenceCount }, (_, index) =>
+      `<reference-${index.toString().padStart(6, "0")}@example.test>`);
+    const lateParentMessageId = references[referenceCount - 1]!;
+    const location = (uid: number) => ({
+      accountId: account.id,
+      provider: "imap" as const,
+      mailbox: "INBOX",
+      uidValidity: "large-references",
+      uid,
+      modseq: null,
+      providerId: null,
+      read: false,
+      flagged: false,
+    });
+    const childObservation = {
+      tenantId: "test-tenant",
+      messageId: "<large-child@example.test>",
+      inReplyTo: null,
+      references,
+      location: location(1),
+    };
+    const [child] = await store.reconcileMailbox({
+      tenantId: "test-tenant",
+      accountId: account.id,
+      provider: "imap",
+      mailbox: "INBOX",
+      observations: [childObservation],
+      authoritative: false,
+    });
+
+    await store.reconcileMailbox({
+      tenantId: "test-tenant",
+      accountId: account.id,
+      provider: "imap",
+      mailbox: "INBOX",
+      observations: [{ ...childObservation, references: [] }],
+      authoritative: false,
+    });
+    const [lateParent] = await store.reconcileMailbox({
+      tenantId: "test-tenant",
+      accountId: account.id,
+      provider: "imap",
+      mailbox: "INBOX",
+      observations: [{
+        tenantId: "test-tenant",
+        messageId: lateParentMessageId,
+        inReplyTo: null,
+        references: [],
+        location: location(2),
+      }],
+      authoritative: false,
+    });
+    const response = await createApi(service).request(`/api/conversations/${child!.conversationId}`);
+    const conversation = canonicalConversationSchema.parse(await response.json());
+    const persistedChild = conversation.messages.find(({ id }) => id === child!.id);
+
+    expect(response.status).toBe(200);
+    expect(lateParent!.conversationId).toBe(child!.conversationId);
+    expect(conversation.id).toBe(child!.conversationId);
+    expect(conversation.messages.map(({ messageId }) => messageId)).toEqual([
+      lateParentMessageId,
+      "<large-child@example.test>",
+    ]);
+    expect(persistedChild?.references).toHaveLength(referenceCount);
+    expect(persistedChild?.references).toEqual(references);
+    store.close();
+  });
+
   test("manages custom folders through typed routes", async () => {
     const { store, service } = await createTestHarness();
     const app = createApi(service);
