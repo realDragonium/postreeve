@@ -36,6 +36,7 @@ const messageRef: MessageDetail["ref"] = {
 };
 
 const message: MessageDetail = {
+  canonicalId: "canonical-message",
   ref: messageRef,
   messageId: "message@example.com",
   subject: "Quarterly planning notes",
@@ -352,6 +353,7 @@ test("reads a message and returns to the list on a narrow screen", async ({ page
 test("keyboard shortcuts open, move through and archive mail", async ({ page }) => {
   const second: MessageDetail = {
     ...message,
+    canonicalId: "canonical-second",
     ref: { ...messageRef, uid: 42 },
     messageId: "second@example.com",
     subject: "Budget review",

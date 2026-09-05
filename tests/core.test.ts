@@ -40,6 +40,7 @@ describe("Postreeve core workflow", () => {
 
     expect(secondMessages[0]?.ref.accountId).toBe(second.id);
     expect(messages[0]?.ref.accountId).toBe(account.id);
+    expect(secondMessages[0]?.canonicalId).toBe(messages[0]?.canonicalId);
     await expect(service.readMessages([messages[0]!.ref, secondMessages[0]!.ref]))
       .rejects.toThrow("different accounts");
     store.close();
@@ -77,6 +78,11 @@ describe("Postreeve core workflow", () => {
     const messages = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 1 });
 
     expect(messages.map(({ ref }) => ref.uid)).toEqual([103]);
+    expect(messages[0]?.canonicalId).toBe(listed!.id);
+    expect((await service.listMessages({ accountId: account.id, mailbox: "INBOX", query: "planning", limit: 1 }))[0]?.canonicalId)
+      .toBe(listed!.id);
+    expect((await service.searchMessages({ accountId: account.id, mailbox: "INBOX", query: "planning", limit: 1 }))[0]?.canonicalId)
+      .toBe(listed!.id);
     expect(await store.listMessageLocations("test-tenant", listed!.id)).toMatchObject([{ read: false, flagged: true }]);
     expect(await store.listMessageLocations("test-tenant", unseen!.id)).toHaveLength(1);
     store.close();
@@ -175,8 +181,9 @@ describe("Postreeve core workflow", () => {
     expect(batch.status).toBe("applied");
     expect((await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 }))
       .some(({ ref }) => ref.uid === message.ref.uid)).toBe(false);
-    expect((await service.listMessages({ accountId: account.id, mailbox: "Archive", limit: 50 }))
-      .some(({ ref }) => ref.uid === message.ref.uid)).toBe(true);
+    const [moved] = await service.listMessages({ accountId: account.id, mailbox: "Archive", limit: 50 });
+    expect(moved?.ref.uid).toBe(message.ref.uid);
+    expect(moved?.canonicalId).toBe(message.canonicalId);
     expect((await service.getProposal(batch.proposalId)).approvedAt).not.toBeNull();
     store.close();
   });

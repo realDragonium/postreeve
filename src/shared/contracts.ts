@@ -61,6 +61,7 @@ export const messageAddressSchema = z.object({
 });
 
 export const messageSummarySchema = z.object({
+  canonicalId: z.string().min(1).optional(),
   ref: messageRefSchema,
   messageId: z.string(),
   inReplyTo: z.string().nullable().optional(),
@@ -75,6 +76,8 @@ export const messageSummarySchema = z.object({
   read: z.boolean(),
   flagged: z.boolean(),
 });
+
+export const canonicalMessageSummarySchema = messageSummarySchema.required({ canonicalId: true });
 
 export const mailProviderKindSchema = z.enum(["imap", "gmail"]);
 
@@ -260,6 +263,7 @@ export type RenameFolderInput = z.infer<typeof renameFolderInputSchema>;
 export type DeleteFolderInput = z.infer<typeof deleteFolderInputSchema>;
 export type MessageRef = z.infer<typeof messageRefSchema>;
 export type MessageSummary = z.infer<typeof messageSummarySchema>;
+export type CanonicalMessageSummary = z.infer<typeof canonicalMessageSummarySchema>;
 export type MessageDetail = z.infer<typeof messageDetailSchema>;
 export type MailProviderKind = z.infer<typeof mailProviderKindSchema>;
 export type CanonicalMessageObservation = z.infer<typeof canonicalMessageObservationSchema>;

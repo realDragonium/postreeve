@@ -77,6 +77,33 @@ describe("mergeMessages", () => {
   test("keeps the same uid from two different accounts apart", () => {
     expect(mergeMessages([[message({ uid: 1, accountId: "a" }), message({ uid: 1, accountId: "b" })]])).toHaveLength(2);
   });
+
+  test("deduplicates one canonical message across accounts and overlapping locations", () => {
+    const inbox = message({ uid: 1, accountId: "a", canonicalId: "canonical-1" });
+    const overlapping = message({
+      uid: 9,
+      accountId: "b",
+      canonicalId: "canonical-1",
+      ref: { accountId: "b", mailbox: "All Mail", uidValidity: "2", uid: 9, modseq: null },
+    });
+
+    expect(mergeMessages([[inbox], [overlapping]])).toEqual([inbox]);
+  });
+
+  test("keeps client identity stable when a canonical message moves", () => {
+    const before = message({ uid: 1, canonicalId: "canonical-1" });
+    const after = message({
+      uid: 8,
+      canonicalId: "canonical-1",
+      ref: { accountId: "a", mailbox: "Archive", uidValidity: "2", uid: 8, modseq: null },
+    });
+
+    expect(messageKey(after)).toBe(messageKey(before));
+  });
+
+  test("falls back to the exact provider location before persistence", () => {
+    expect(messageKey(message({ uid: 1 }))).toBe("a:INBOX:1:1");
+  });
 });
 
 describe("sortMessages", () => {

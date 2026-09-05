@@ -296,19 +296,19 @@ function testMessages(accountId: string): TestMessage[] {
   const recipient = [{ name: "Test user", address: "person@example.test" }];
   return [
     {
-      ref: ref(103), mailbox: "INBOX", messageId: "message-103@example.test", subject: "Quarterly planning notes",
+      ref: ref(103), mailbox: "INBOX", messageId: "<message-103@example.test>", subject: "Quarterly planning notes",
       from: [{ name: "Sam Rivera", address: "sam@example.test" }], to: recipient,
       receivedAt: "2026-08-29T09:30:00.000Z", preview: "Here are the decisions and follow-ups.",
       text: "Here are the decisions and follow-ups.", html: null, read: false, flagged: true,
     },
     {
-      ref: ref(102), mailbox: "INBOX", messageId: "message-102@example.test", subject: "Engineering newsletter",
+      ref: ref(102), mailbox: "INBOX", messageId: "<message-102@example.test>", subject: "Engineering newsletter",
       from: [{ name: "Engineering Weekly", address: "digest@example.test" }], to: recipient,
       receivedAt: "2026-08-28T16:00:00.000Z", preview: "This week's engineering stories.",
       text: "This week's engineering stories.", html: null, read: false, flagged: false,
     },
     {
-      ref: ref(101), mailbox: "INBOX", messageId: "message-101@example.test", subject: "August receipt",
+      ref: ref(101), mailbox: "INBOX", messageId: "<message-101@example.test>", subject: "August receipt",
       from: [{ name: "Hosting", address: "billing@example.test" }], to: recipient,
       receivedAt: "2026-08-27T11:15:00.000Z", preview: "Your payment was successful.",
       text: "Your payment was successful.", html: null, read: true, flagged: false,

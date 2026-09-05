@@ -351,7 +351,7 @@ describe("canonical message persistence", () => {
     expect(await store.listMessageLocations("tenant-a", replacementCanonical!.id)).toHaveLength(1);
   });
 
-  test("returns only the surviving canonical for ordered fallback and valid observations", async () => {
+  test("returns the surviving canonical for every ordered fallback and valid observation", async () => {
     const store = await createStore();
     const missing = observation({ messageId: null, inReplyTo: null, references: [] });
     const valid = observation();
@@ -360,7 +360,8 @@ describe("canonical message persistence", () => {
       observations: [missing, valid, missing], authoritative: true,
     });
 
-    expect(reconciled).toHaveLength(1);
+    expect(reconciled).toHaveLength(3);
+    expect(new Set(reconciled.map(({ id }) => id))).toEqual(new Set([reconciled[0]!.id]));
     expect(reconciled[0]).toMatchObject({
       messageId: "<message@example.test>",
       inReplyTo: "<parent@example.test>",

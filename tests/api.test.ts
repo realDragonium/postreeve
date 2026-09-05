@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { hc } from "hono/client";
-import { accountSchema, folderSchema, messageSummarySchema, proposalSchema } from "../src/shared/contracts";
+import { accountSchema, canonicalMessageSummarySchema, folderSchema, messageSummarySchema, proposalSchema } from "../src/shared/contracts";
 import { createApi, oauthResultUrl, type AppType } from "../src/server/api";
 import { createTestHarness } from "./support/test-mail";
 
@@ -27,7 +27,7 @@ describe("Hono RPC API", () => {
       param: { accountId: account.id },
       query: { mailbox: "INBOX", limit: "20" },
     });
-    expect(messageSummarySchema.array().parse(await messagesResponse.json()).length).toBeGreaterThan(0);
+    expect(canonicalMessageSummarySchema.array().parse(await messagesResponse.json()).length).toBeGreaterThan(0);
     store.close();
   });
 

@@ -1,6 +1,7 @@
 import type {
   Account,
   AccountSettings,
+  CanonicalMessageSummary,
   CreateAccountInput,
   CreateFolderInput,
   CreateProposalInput,
@@ -238,26 +239,23 @@ export class PostreeveService {
     return provider.listFolders(input.accountId);
   }
 
-  async listMessages(input: ListMessagesInput): Promise<MessageSummary[]> {
+  async listMessages(input: ListMessagesInput): Promise<CanonicalMessageSummary[]> {
     const account = await this.#requireAccount(input.accountId);
     const provider = this.#providers.forAccount(input.accountId);
     if (input.query) {
       const messages = await provider.searchMessages(input.accountId, input.mailbox, input.query, input.limit);
-      await this.#persistObservedMessages(account, input.mailbox, messages, false);
-      return messages;
+      return this.#persistObservedMessages(account, input.mailbox, messages, false);
     }
 
     const page = await provider.listMessagePage(input.accountId, input.mailbox, input.limit);
-    await this.#persistObservedMessages(account, input.mailbox, page.messages, page.complete);
-    return page.messages;
+    return this.#persistObservedMessages(account, input.mailbox, page.messages, page.complete);
   }
 
-  async searchMessages(input: ListMessagesInput & { query: string }): Promise<MessageSummary[]> {
+  async searchMessages(input: ListMessagesInput & { query: string }): Promise<CanonicalMessageSummary[]> {
     const account = await this.#requireAccount(input.accountId);
     const messages = await this.#providers.forAccount(input.accountId)
       .searchMessages(input.accountId, input.mailbox, input.query, input.limit);
-    await this.#persistObservedMessages(account, input.mailbox, messages, false);
-    return messages;
+    return this.#persistObservedMessages(account, input.mailbox, messages, false);
   }
 
   async readMessages(references: MessageRef[]): Promise<MessageDetail[]> {
@@ -469,8 +467,8 @@ export class PostreeveService {
     mailbox: string,
     messages: MessageSummary[],
     authoritative: boolean,
-  ): Promise<void> {
-    await this.#store.reconcileMailbox({
+  ): Promise<CanonicalMessageSummary[]> {
+    const canonical = await this.#store.reconcileMailbox({
       tenantId: this.#context.tenantId,
       accountId: account.id,
       provider: account.kind,
@@ -478,6 +476,8 @@ export class PostreeveService {
       observations: messages.map((message) => toCanonicalObservation(this.#context.tenantId, account.kind, message)),
       authoritative,
     });
+    if (canonical.length !== messages.length) throw new Error("Canonical reconciliation result count does not match observations");
+    return messages.map((message, index) => ({ ...message, canonicalId: canonical[index]!.id }));
   }
 
   #credentialsFor(account: StoredAccount): AccountCredentials {

@@ -296,15 +296,14 @@ export class Store {
         const remove = this.#sqlite.query("DELETE FROM message_locations WHERE id = ?");
         for (const location of locations) if (!retained.has(location.id)) remove.run(location.id);
       }
-      const canonicalIds = observedLocationIds.flatMap((id) => {
+      return observedLocationIds.map((id) => {
         const location = this.#sqlite.query(
           "SELECT message_id FROM message_locations WHERE tenant_id = ? AND id = ?",
         ).get(value.tenantId, id) as { message_id: string } | null;
-        return location ? [location.message_id] : [];
-      });
-      return [...new Set(canonicalIds)].flatMap((id) => {
-        const message = this.#getMessage(value.tenantId, id);
-        return message ? [message] : [];
+        if (!location) throw new Error("Reconciled message location is missing");
+        const message = this.#getMessage(value.tenantId, location.message_id);
+        if (!message) throw new Error("Reconciled canonical message is missing");
+        return message;
       });
     });
     return reconcile(snapshot);

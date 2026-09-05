@@ -70,7 +70,7 @@ export function unifiedFolders(foldersByAccount: ReadonlyMap<string, readonly Fo
 }
 
 export function messageKey(message: MessageSummary): string {
-  return `${message.ref.accountId}:${message.ref.mailbox}:${message.ref.uidValidity}:${message.ref.uid}`;
+  return message.canonicalId ?? `${message.ref.accountId}:${message.ref.mailbox}:${message.ref.uidValidity}:${message.ref.uid}`;
 }
 
 export function senderName(message: MessageSummary): string {
@@ -92,7 +92,7 @@ export function sortMessages(messages: readonly MessageSummary[], sort: MessageS
   return sorted.sort((left, right) => right.receivedAt.localeCompare(left.receivedAt));
 }
 
-/** Merges per-account result sets into one list, dropping refs seen twice. */
+/** Merges per-account result sets into one list, dropping canonical messages seen twice. */
 export function mergeMessages(lists: readonly (readonly MessageSummary[])[]): MessageSummary[] {
   const seen = new Set<string>();
   const merged: MessageSummary[] = [];
