@@ -479,6 +479,21 @@ export class Store {
     }
     const orderedIds = orderConversationMessages(rows.map((row) =>
       toConversationMessageForOrder(row, edgesByMessage.get(row.id)))).map(({ id }) => id);
+    const messageAliasRows = this.#sqlite.query(`
+      SELECT alias.message_id, alias.alias_id
+      FROM conversation_messages membership INDEXED BY conversation_messages_conversation_id_idx
+      INNER JOIN message_aliases alias INDEXED BY message_aliases_message_id_idx
+        ON alias.tenant_id = membership.tenant_id AND alias.message_id = membership.message_id
+      WHERE membership.tenant_id = ? AND membership.conversation_id = ?
+      ORDER BY alias.message_id, alias.created_at, alias.alias_id
+    `).all(tenantId, conversation.id) as Array<{ message_id: string; alias_id: string }>;
+    const aliasesByMessage = new Map<string, string[]>();
+    for (const alias of messageAliasRows) {
+      const messageAliases = aliasesByMessage.get(alias.message_id) ?? [];
+      messageAliases.push(alias.alias_id);
+      aliasesByMessage.set(alias.message_id, messageAliases);
+    }
+    const messageById = new Map(rows.map((row) => [row.id, row]));
     const aliases = this.#sqlite.query(`
       SELECT alias_id FROM conversation_aliases
       WHERE tenant_id = ? AND conversation_id = ? ORDER BY created_at, alias_id
@@ -488,9 +503,9 @@ export class Store {
       aliases: aliases.map(({ alias_id }) => alias_id),
       tenantId: conversation.tenant_id,
       messages: orderedIds.map((messageId) => {
-        const message = this.#getMessage(tenantId, messageId);
+        const message = messageById.get(messageId);
         if (!message) throw new Error("Conversation contains a missing canonical message");
-        return message;
+        return toCanonicalMessage(message, conversation.id, aliasesByMessage.get(messageId) ?? []);
       }),
       createdAt: conversation.created_at,
       updatedAt: conversation.updated_at,
@@ -522,13 +537,9 @@ export class Store {
       SELECT conversation_id FROM conversation_messages WHERE tenant_id = ? AND message_id = ?
     `).get(tenantId, row.id) as { conversation_id: string } | null : null;
     if (row && !membership) throw new Error("Canonical message conversation is missing");
-    return row ? {
-      id: row.id, aliases: aliases.map(({ alias_id }) => alias_id), tenantId: row.tenant_id,
-      conversationId: membership!.conversation_id,
-      messageId: row.message_id, inReplyTo: row.in_reply_to,
-      references: parseStoredReferences(row.references), receivedAt: row.received_at,
-      createdAt: row.created_at, updatedAt: row.updated_at,
-    } : null;
+    return row
+      ? toCanonicalMessage(row, membership!.conversation_id, aliases.map(({ alias_id }) => alias_id))
+      : null;
   }
 
   #toStoredBatch(row: typeof batches.$inferSelect): StoredBatch {
@@ -1029,6 +1040,25 @@ export class Store {
 interface MessageRow { id: string; tenant_id: string; identity_key: string; message_id: string | null; in_reply_to: string | null; references: string; received_at: string | null; created_at: string; updated_at: string }
 interface LocationRow { id: string; message_id: string; tenant_id: string; account_id: string; provider: MailProviderKind; mailbox: string; uid_validity: string; uid: number; modseq: string | null; provider_id: string | null; read: number; flagged: number; observed_at: string }
 interface ConversationRow { id: string; tenant_id: string; created_at: string; updated_at: string }
+
+function toCanonicalMessage(
+  row: MessageRow,
+  conversationId: string,
+  aliases: readonly string[],
+): CanonicalMessage {
+  return {
+    id: row.id,
+    aliases: [...aliases],
+    tenantId: row.tenant_id,
+    conversationId,
+    messageId: row.message_id,
+    inReplyTo: row.in_reply_to,
+    references: parseStoredReferences(row.references),
+    receivedAt: row.received_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
 
 function associateProviderConversation(
   sqlite: Database,

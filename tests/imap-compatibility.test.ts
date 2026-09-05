@@ -315,7 +315,11 @@ describe("Bun IMAP compatibility", () => {
         tenantId: "tenant-a", accountId: config.accountId, provider: "imap", mailbox: "INBOX", authoritative: false,
         observations: messages.map((message) => toCanonicalObservation("tenant-a", "imap", message)),
       });
-      expect(stored.map(({ receivedAt }) => receivedAt)).toEqual(["1970-01-01T00:00:00.000Z", null, null]);
+      expect(new Map(stored.map(({ messageId, receivedAt }) => [messageId, receivedAt]))).toEqual(new Map([
+        ["<undated-1@example.test>", null],
+        ["<undated-2@example.test>", null],
+        ["<undated-3@example.test>", "1970-01-01T00:00:00.000Z"],
+      ]));
     } finally {
       store.close();
     }

@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { hc } from "hono/client";
 import {
   accountSchema,
@@ -210,6 +211,73 @@ describe("Hono RPC API", () => {
     expect(conversation.messages.map(({ messageId }) => messageId)).toEqual([
       "<root@example.test>", "<parent@example.test>", "<child@example.test>",
     ]);
+    store.close();
+  });
+
+  test("materializes a wide aliased conversation with bounded retrieval queries", async () => {
+    const { store, service } = await createEmptyTestHarness();
+    const account = await service.createAccount(testAccountInput());
+    const location = (mailbox: string, uid: number) => ({
+      accountId: account.id, provider: "imap" as const, mailbox, uidValidity: "wide-conversation", uid,
+      modseq: null, providerId: null, read: false, flagged: false,
+    });
+    const [root] = await store.reconcileMailbox({
+      tenantId: "test-tenant", accountId: account.id, provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{ tenantId: "test-tenant", messageId: "<wide-root@example.test>", inReplyTo: null,
+        references: [], receivedAt: "2026-09-02T00:00:00.000Z", location: location("INBOX", 1) }],
+    });
+    const [fallback] = await store.reconcileMailbox({
+      tenantId: "test-tenant", accountId: account.id, provider: "imap", mailbox: "Archive", authoritative: false,
+      observations: [{ tenantId: "test-tenant", messageId: null, inReplyTo: null, references: [],
+        receivedAt: null, location: location("Archive", 2) }],
+    });
+    expect(await store.recordProviderMove("test-tenant", "imap", {
+      accountId: account.id, mailbox: "INBOX", uidValidity: "wide-conversation", uid: 1, modseq: null,
+    }, {
+      accountId: account.id, mailbox: "Archive", uidValidity: "wide-conversation", uid: 2, modseq: null,
+    })).toBe(true);
+
+    const childCount = 256;
+    const childIds = Array.from({ length: childCount }, (_, index) =>
+      `wide-child-${index.toString().padStart(4, "0")}`);
+    await store.reconcileMailbox({
+      tenantId: "test-tenant", accountId: account.id, provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: childIds.map((id, index) => ({
+        tenantId: "test-tenant", messageId: `<${id}@example.test>`, inReplyTo: "<wide-root@example.test>",
+        references: ["<wide-root@example.test>"], receivedAt: "2026-09-01T00:00:00.000Z",
+        location: location("INBOX", index + 3),
+      })),
+    });
+
+    const querySpy = spyOn(Database.prototype, "query");
+    let response: Response;
+    let retrievalQueryCount = 0;
+    try {
+      response = await createApi(service).request(`/api/conversations/${fallback!.conversationId}`);
+    } finally {
+      retrievalQueryCount = querySpy.mock.calls.length;
+      querySpy.mockRestore();
+    }
+    const conversation = canonicalConversationSchema.parse(await response.json());
+
+    expect(retrievalQueryCount).toBe(5);
+    expect(conversation.id).toBe(root!.conversationId);
+    expect(conversation.messages.map(({ messageId }) => messageId)).toEqual([
+      "<wide-root@example.test>", ...childIds.map((id) => `<${id}@example.test>`),
+    ]);
+    expect(conversation.messages[0]).toMatchObject({
+      id: root!.id,
+      aliases: [fallback!.id],
+      conversationId: root!.conversationId,
+      inReplyTo: null,
+      references: [],
+      receivedAt: "2026-09-02T00:00:00.000Z",
+    });
+    expect(conversation.messages[1]).toMatchObject({
+      inReplyTo: "<wide-root@example.test>",
+      references: ["<wide-root@example.test>"],
+      receivedAt: "2026-09-01T00:00:00.000Z",
+    });
     store.close();
   });
 
