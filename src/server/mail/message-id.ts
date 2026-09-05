@@ -2,6 +2,7 @@ const dotAtom = "[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\\.[A-Za-z0-9!#$%&'*+/=?^_`{|
 const quotedLocal = '"(?:[\\x20-\\x21\\x23-\\x5b\\x5d-\\x7e]|\\\\[\\x20-\\x7e])*"';
 const domainLiteral = "\\[(?:[\\x21-\\x5a\\x5e-\\x7e]|\\\\[\\x20-\\x7e])*\\]";
 const messageIdPattern = new RegExp(`^<(${dotAtom}|${quotedLocal})@(${dotAtom}|${domainLiteral})>$`);
+const atextPattern = /^[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]$/;
 
 function isWsp(character: string | undefined): boolean {
   return character === " " || character === "\t";
@@ -73,21 +74,92 @@ function consumeCfws(value: string, start: number): number {
   return index;
 }
 
+function parseMessageIdAt(value: string, start: number): { id: string; end: number } | null {
+  for (let end = start; end < value.length; end += 1) {
+    if (value[end] !== ">") continue;
+    const match = messageIdPattern.exec(value.slice(start, end + 1));
+    if (match) return { id: `<${match[1]}@${match[2]!.toLowerCase()}>`, end: end + 1 };
+  }
+  return null;
+}
+
+function consumeQuotedString(value: string, start: number): number | null {
+  let index = start + 1;
+  while (index < value.length) {
+    const foldingWhitespaceEnd = consumeFoldingWhitespace(value, index);
+    if (foldingWhitespaceEnd !== null) {
+      index = foldingWhitespaceEnd;
+      continue;
+    }
+    const character = value[index]!;
+    if (character === '"') return index + 1;
+    if (character === "\\") {
+      const escaped = value[index + 1];
+      if (escaped === undefined || !(isWsp(escaped) || (escaped >= "!" && escaped <= "~"))) return null;
+      index += 2;
+      continue;
+    }
+    const code = character.charCodeAt(0);
+    if (code === 33 || (code >= 35 && code <= 91) || (code >= 93 && code <= 126)) {
+      index += 1;
+      continue;
+    }
+    return null;
+  }
+  return null;
+}
+
 function parseMessageIds(value: string | null | undefined): string[] | null {
   if (!value) return [];
   const result: string[] = [];
   let messageIdStart = consumeCfws(value, 0);
   while (messageIdStart < value.length) {
-    let match: RegExpExecArray | null = null;
-    let messageIdEnd = messageIdStart;
-    for (; messageIdEnd < value.length; messageIdEnd += 1) {
-      if (value[messageIdEnd] !== ">") continue;
-      match = messageIdPattern.exec(value.slice(messageIdStart, messageIdEnd + 1));
-      if (match) break;
+    const parsed = parseMessageIdAt(value, messageIdStart);
+    if (!parsed) return null;
+    result.push(parsed.id);
+    messageIdStart = consumeCfws(value, parsed.end);
+  }
+  return result;
+}
+
+function parseThreadingMessageIds(value: string | null | undefined): string[] | null {
+  if (!value) return [];
+  const result: string[] = [];
+  let index = 0;
+  let phraseHasWord = false;
+  while (index < value.length) {
+    const cfwsEnd = consumeCfws(value, index);
+    if (cfwsEnd > index) {
+      index = cfwsEnd;
+      continue;
     }
-    if (!match) return null;
-    result.push(`<${match[1]}@${match[2]!.toLowerCase()}>`);
-    messageIdStart = consumeCfws(value, messageIdEnd + 1);
+    const character = value[index]!;
+    if (character === "<") {
+      const parsed = parseMessageIdAt(value, index);
+      if (!parsed) return null;
+      result.push(parsed.id);
+      index = parsed.end;
+      phraseHasWord = false;
+      continue;
+    }
+    if (character === '"') {
+      const quotedEnd = consumeQuotedString(value, index);
+      if (quotedEnd === null) return null;
+      index = quotedEnd;
+      phraseHasWord = true;
+      continue;
+    }
+    if (atextPattern.test(character)) {
+      do index += 1;
+      while (index < value.length && atextPattern.test(value[index]!));
+      phraseHasWord = true;
+      continue;
+    }
+    if (character === "." && phraseHasWord) {
+      index += 1;
+      continue;
+    }
+    return null;
   }
   return result;
 }
@@ -98,7 +170,7 @@ export function normalizeMessageId(value: string | null | undefined): string | n
 }
 
 export function normalizeMessageIdList(value: string | null | undefined): string[] {
-  return [...new Set(parseMessageIds(value) ?? [])];
+  return [...new Set(parseThreadingMessageIds(value) ?? [])];
 }
 
 export function normalizeMessageIdLists(values: readonly (string | null | undefined)[]): string[] {

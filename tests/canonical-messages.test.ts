@@ -1073,11 +1073,26 @@ test("normalizes complete RFC 5322 Message-ID lists without extracting from malf
   expect(normalizeMessageIdList(
     '(first) <"quoted local"@Example.Test>\r\n\t(second) <local@[IPv6:2001:DB8::1]> <"quoted local"@Example.Test>',
   )).toEqual(['<"quoted local"@example.test>', "<local@[ipv6:2001:db8::1]>"]);
-  expect(normalizeMessageIdList("<one@example.test> garbage <two@example.test>")).toEqual([]);
-  expect(normalizeMessageIdList("comment <one@example.test>")).toEqual([]);
+  expect(normalizeMessageIdList("<one@example.test> garbage, <two@example.test>")).toEqual([]);
+  expect(normalizeMessageIdList("Your message of Friday <one@example.test>")).toEqual(["<one@example.test>"]);
+  expect(normalizeMessageIdList("Your message no. one <one@example.test>")).toEqual(["<one@example.test>"]);
+  expect(normalizeMessageIdList('"quoted <fake@example.test>" <one@example.test>'))
+    .toEqual(["<one@example.test>"]);
   expect(normalizeMessageIdList("(ignore <fake@example.test>)")).toEqual([]);
   expect(normalizeMessageIdList('(ignore <fake@example.test>) <"a>b<c"@Example.Test>'))
     .toEqual(['<"a>b<c"@example.test>']);
+  expect(normalizeMessageIdList("First <one@example.test> then <two@example.test> and <one@example.test>"))
+    .toEqual(["<one@example.test>", "<two@example.test>"]);
+  for (const malformed of [
+    '<one@example.test> "unterminated <fake@example.test>',
+    "<one@example.test> (unterminated <fake@example.test>",
+    "<one@example.test> illegal @ phrase",
+    "<one@example.test> unbalanced <fragment",
+  ]) {
+    expect(normalizeMessageIdList(malformed)).toEqual([]);
+  }
+  expect(normalizeMessageId("Your message of Friday <one@example.test>")).toBeNull();
+  expect(normalizeMessageId('"quoted phrase" <one@example.test>')).toBeNull();
   expect(normalizeMessageId("<one@example.test> <two@example.test>")).toBeNull();
 });
 

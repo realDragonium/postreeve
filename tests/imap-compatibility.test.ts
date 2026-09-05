@@ -200,7 +200,9 @@ describe("Bun IMAP compatibility", () => {
     inbox.messages.clear();
     for (const uid of [1, 2, 3]) {
       const message = fakeMessage(uid, BigInt(uid), "Thread", "Body", new Set());
-      const inReplyTo = uid === 3 ? "<message-1@example.test> <message-2@example.test>" : undefined;
+      const inReplyTo = uid === 3
+        ? "Your messages of Friday <message-1@example.test> and Saturday <message-2@example.test>"
+        : undefined;
       const { inReplyTo: _existing, ...envelope } = message.envelope!;
       inbox.messages.set(uid, {
         ...message,
@@ -210,6 +212,7 @@ describe("Bun IMAP compatibility", () => {
           "To: Human <human@example.test>",
           `Message-ID: <message-${uid}@example.test>`,
           ...(inReplyTo ? [`In-Reply-To: ${inReplyTo}`] : []),
+          ...(inReplyTo ? [`References: First <message-1@example.test> then <message-2@example.test>`] : []),
           "Subject: Thread",
           "Date: Fri, 29 Aug 2025 12:00:00 +0000",
           "Content-Type: text/plain; charset=utf-8",
@@ -246,6 +249,10 @@ describe("Bun IMAP compatibility", () => {
       expect(conversation.messages.map(({ messageId }) => messageId)).toEqual([
         "<message-1@example.test>", "<message-2@example.test>", "<message-3@example.test>",
       ]);
+      expect(conversation.messages[2]).toMatchObject({
+        inReplyTo: "<message-1@example.test> <message-2@example.test>",
+        references: ["<message-1@example.test>", "<message-2@example.test>"],
+      });
     } finally {
       store.close();
     }
