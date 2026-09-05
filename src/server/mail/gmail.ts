@@ -3,16 +3,22 @@ import { z, type ZodType } from "zod";
 import type {
   Account,
   Folder,
-  MessageDetail,
   MessageRef,
-  MessageSummary,
   OutboundAddress,
   SendMessageInput,
   SendReceipt,
   TriageAction,
 } from "../../shared/contracts";
 import type { GmailAccountCredentials } from "../security/credentials";
-import type { AppliedMailAction, MailboxPage, MailProvider, ProviderLocationMove } from "./provider";
+import type {
+  AppliedMailAction,
+  MailboxPage,
+  MailProvider,
+  ProviderLocationMove,
+  ProviderMessageDetail,
+  ProviderMessageSummary,
+} from "./provider";
+import { normalizeIdentificationFields, normalizeReferenceSequences } from "./message-id";
 import type { MailSender } from "./sender";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -38,7 +44,7 @@ const messageListSchema = z.object({
 });
 const gmailMessageSchema = z.object({
   id: z.string().min(1),
-  threadId: z.string().optional(),
+  threadId: z.string().min(1).optional(),
   labelIds: z.array(z.string()).default([]),
   snippet: z.string().default(""),
   historyId: z.string().min(1).optional(),
@@ -133,7 +139,7 @@ export class GmailMailClient implements MailProvider, MailSender {
     await this.#request(`/labels/${encodeURIComponent(path)}`, z.null(), { method: "DELETE" });
   }
 
-  async listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]> {
+  async listMessages(accountId: string, mailbox: string, limit: number): Promise<ProviderMessageSummary[]> {
     return (await this.listMessagePage(accountId, mailbox, limit)).messages;
   }
 
@@ -142,12 +148,12 @@ export class GmailMailClient implements MailProvider, MailSender {
     return this.#listPage(mailbox, "", limit);
   }
 
-  async searchMessages(accountId: string, mailbox: string, query: string, limit: number): Promise<MessageSummary[]> {
+  async searchMessages(accountId: string, mailbox: string, query: string, limit: number): Promise<ProviderMessageSummary[]> {
     this.#assertAccount(accountId);
     return (await this.#listPage(mailbox, query.trim(), limit)).messages;
   }
 
-  async readMessages(accountId: string, references: MessageRef[]): Promise<MessageDetail[]> {
+  async readMessages(accountId: string, references: MessageRef[]): Promise<ProviderMessageDetail[]> {
     this.#assertAccount(accountId);
     return Promise.all(references.map(async (reference) => {
       this.#assertReference(reference);
@@ -394,19 +400,30 @@ function folderOrder(left: Folder, right: Folder): number {
   return order.indexOf(left.specialUse) - order.indexOf(right.specialUse) || left.name.localeCompare(right.name);
 }
 
-function toSummary(accountId: string, mailbox: string, message: z.infer<typeof gmailMessageSchema>): MessageSummary {
-  const headers = new Map((message.payload?.headers ?? []).map(({ name, value }) => [name.toLocaleLowerCase(), value]));
+function toSummary(accountId: string, mailbox: string, message: z.infer<typeof gmailMessageSchema>): ProviderMessageSummary {
+  const headerList = message.payload?.headers ?? [];
+  const headers = new Map(headerList.map(({ name, value }) => [name.trim().toLocaleLowerCase(), value]));
+  const rawReferences = headerValues(headerList, "references");
+  const identification = normalizeIdentificationFields({
+    messageId: headerValues(headerList, "message-id"),
+    inReplyTo: headerValues(headerList, "in-reply-to"),
+    references: rawReferences,
+  });
+  const canonicalReceivedAt = receivedAt(message, headers.get("date"));
   return {
+    ...(message.threadId ? { providerConversationId: message.threadId } : {}),
     ref: toReference(accountId, mailbox, message),
-    messageId: headers.get("message-id") ?? message.id,
-    inReplyTo: headers.get("in-reply-to") ?? null,
-    references: parseReferences(headers.get("references")),
+    messageId: identification.messageId ?? (identification.messageIdPresent ? "" : message.id),
+    inReplyTo: identification.inReplyTo,
+    references: identification.references,
+    referenceSequences: normalizeReferenceSequences(rawReferences),
     subject: headers.get("subject") ?? "(no subject)",
     from: parseAddresses(headers.get("from")),
     to: parseAddresses(headers.get("to")),
     cc: parseAddresses(headers.get("cc")),
     deliveredTo: parseAddresses(headers.get("delivered-to")).map(({ address }) => address).filter(isEmail),
-    receivedAt: receivedAt(message, headers.get("date")),
+    canonicalReceivedAt,
+    receivedAt: canonicalReceivedAt ?? new Date(0).toISOString(),
     preview: message.snippet,
     read: !message.labelIds.includes("UNREAD"),
     flagged: message.labelIds.includes("STARRED"),
@@ -418,35 +435,29 @@ function toDetail(
   mailbox: string,
   message: z.infer<typeof gmailMessageSchema>,
   parsed: ParsedMail,
-): MessageDetail {
+): ProviderMessageDetail {
   const summary = toSummary(accountId, mailbox, {
     ...message,
     payload: {
       headers: [
-        ["Subject", parsed.subject],
-        ["From", parsed.from?.text],
-        ["To", addressText(parsed.to)],
-        ["Cc", addressText(parsed.cc)],
-        ["Delivered-To", headerString(parsed, "delivered-to")],
-        ["Message-ID", parsed.messageId],
-        ["In-Reply-To", headerString(parsed, "in-reply-to")],
-        ["Date", parsed.date?.toUTCString()],
-      ].flatMap(([name, value]) => value ? [{ name: name!, value }] : []),
+        ...optionalHeader("Subject", parsed.subject),
+        ...optionalHeader("From", parsed.from?.text),
+        ...optionalHeader("To", addressText(parsed.to)),
+        ...optionalHeader("Cc", addressText(parsed.cc)),
+        ...optionalHeader("Delivered-To", headerString(parsed, "delivered-to")),
+        ...optionalHeader("Date", rawHeaderValue(parsed, "date")),
+        ...identificationHeaderEntries(parsed),
+      ],
     },
   });
   return {
     ...summary,
-    references: parsedReferences(parsed),
     from: flattenAddresses(parsed.from).map(toAddress),
     to: flattenAddresses(parsed.to).map(toAddress),
     cc: flattenAddresses(parsed.cc).map(toAddress),
     text: parsed.text ?? "",
     html: typeof parsed.html === "string" ? parsed.html : null,
   };
-}
-
-function parseReferences(value?: string): string[] {
-  return value?.match(/<[^<>]+>/g) ?? [];
 }
 
 function toReference(accountId: string, mailbox: string, message: z.infer<typeof gmailMessageSchema>): MessageRef {
@@ -466,10 +477,17 @@ function numericId(value: string): number {
   return (hash >>> 0) || 1;
 }
 
-function receivedAt(message: z.infer<typeof gmailMessageSchema>, dateHeader?: string): string {
-  const internal = message.internalDate ? Number(message.internalDate) : Number.NaN;
-  const date = Number.isFinite(internal) ? new Date(internal) : new Date(dateHeader ?? 0);
-  return Number.isNaN(date.valueOf()) ? new Date(0).toISOString() : date.toISOString();
+function receivedAt(message: z.infer<typeof gmailMessageSchema>, dateHeader?: string): string | null {
+  const internal = message.internalDate === undefined || !/^\d+$/.test(message.internalDate)
+    ? null
+    : validDate(Number(message.internalDate));
+  const header = dateHeader === undefined ? null : validDate(dateHeader);
+  return (internal ?? header)?.toISOString() ?? null;
+}
+
+function validDate(value: string | number): Date | null {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? null : date;
 }
 
 function parseAddresses(value?: string): Array<{ name: string; address: string }> {
@@ -504,10 +522,36 @@ function headerString(parsed: ParsedMail, name: string): string | undefined {
     : undefined;
 }
 
-function parsedReferences(parsed: ParsedMail): string[] {
-  const references = parsed.references;
-  const values = Array.isArray(references) ? references : references ? [references] : [];
-  return values.flatMap((reference) => parseReferences(reference));
+function rawHeaderValue(parsed: ParsedMail, name: string): string | undefined {
+  return rawHeaderValues(parsed, name)[0];
+}
+
+function rawHeaderValues(parsed: ParsedMail, name: string): string[] {
+  return parsed.headerLines
+    .filter(({ key }) => key.toLowerCase() === name)
+    .flatMap(({ line }) => {
+      const separator = line.indexOf(":");
+      return separator < 0 ? [] : [line.slice(separator + 1).trim()];
+    });
+}
+
+function headerValues(headers: readonly { name: string; value: string }[], name: string): string[] {
+  return headers
+    .filter((header) => header.name.trim().toLowerCase() === name)
+    .map(({ value }) => value);
+}
+
+function identificationHeaderEntries(parsed: ParsedMail): Array<{ name: string; value: string }> {
+  const names: ReadonlyArray<readonly [string, string]> = [
+    ["Message-ID", "message-id"],
+    ["In-Reply-To", "in-reply-to"],
+    ["References", "references"],
+  ];
+  return names.flatMap(([name, key]) => rawHeaderValues(parsed, key).map((value) => ({ name, value })));
+}
+
+function optionalHeader(name: string, value: string | undefined): Array<{ name: string; value: string }> {
+  return value ? [{ name, value }] : [];
 }
 
 function isEmail(value: string): boolean {

@@ -23,7 +23,15 @@ import type {
   MessageSummary,
   TriageAction,
 } from "../../shared/contracts";
-import type { AppliedMailAction, MailboxPage, MailProvider, ProviderLocationMove } from "./provider";
+import type {
+  AppliedMailAction,
+  MailboxPage,
+  MailProvider,
+  ProviderLocationMove,
+  ProviderMessageDetail,
+  ProviderMessageSummary,
+} from "./provider";
+import { normalizeIdentificationFields, normalizeReferenceSequences } from "./message-id";
 
 export interface ImapAccountConfig {
   accountId: string;
@@ -373,12 +381,14 @@ export class ImapMailProvider implements MailProvider {
         flags: true,
         envelope: true,
         internalDate: true,
+        headers: ["Message-ID", "In-Reply-To", "References"],
         source: { maxLength: SUMMARY_SOURCE_BYTES },
       },
       { uid: true },
     )) {
       const parsed = message.source ? await parseMessage(message.source) : undefined;
-      summaries.push(toSummary(this.#config.accountId, mailbox.path, mailbox, message, parsed));
+      const threadingHeaders = message.headers ? await parseMessage(message.headers) : undefined;
+      summaries.push(toSummary(this.#config.accountId, mailbox.path, mailbox, message, parsed, threadingHeaders));
     }
 
     const order = new Map(uids.map((uid, index) => [uid, index]));
@@ -583,20 +593,39 @@ function toSummary(
   mailbox: MailboxObject,
   message: FetchMessageObject,
   parsed?: ParsedMail,
-): MessageSummary {
-  const receivedAt = toDate(message.internalDate) ?? message.envelope?.date ?? parsed?.date ?? new Date(0);
+  threadingHeaders?: ParsedMail,
+): ProviderMessageSummary {
+  const canonicalReceivedAt = [message.internalDate, message.envelope?.date, parsedDate(parsed)]
+    .map(toDate)
+    .find((date): date is Date => date !== undefined)
+    ?.toISOString() ?? null;
   const deliveredTo = deliveryAddresses(parsed);
+  const threading = threadingHeaders ?? parsed;
+  const rawMessageIds = rawHeaderValues(threading, "message-id");
+  const rawInReplyTo = rawHeaderValues(threading, "in-reply-to");
+  const rawReferences = rawHeaderValues(threading, "references");
+  const identification = normalizeIdentificationFields({
+    messageId: rawMessageIds.length > 0 || !message.envelope?.messageId
+      ? rawMessageIds
+      : [message.envelope.messageId],
+    inReplyTo: rawInReplyTo.length > 0 || !message.envelope?.inReplyTo
+      ? rawInReplyTo
+      : [message.envelope.inReplyTo],
+    references: rawReferences,
+  });
   return {
     ref: referenceFor(accountId, mailboxPath, mailbox, message),
-    messageId: message.envelope?.messageId ?? headerString(parsed, "message-id") ?? "",
-    inReplyTo: message.envelope?.inReplyTo ?? headerString(parsed, "in-reply-to") ?? null,
-    references: parseReferences(parsed),
+    messageId: identification.messageId ?? "",
+    inReplyTo: identification.inReplyTo,
+    references: identification.references,
+    referenceSequences: normalizeReferenceSequences(rawReferences),
     subject: message.envelope?.subject ?? parsed?.subject ?? "(no subject)",
     from: message.envelope?.from?.map(toEnvelopeAddress) ?? parsedAddresses(parsed?.from?.value),
     to: message.envelope?.to?.map(toEnvelopeAddress) ?? parsedAddresses(flattenAddresses(parsed?.to)),
     cc: message.envelope?.cc?.map(toEnvelopeAddress) ?? parsedAddresses(flattenAddresses(parsed?.cc)),
     ...(deliveredTo.length === 0 ? {} : { deliveredTo }),
-    receivedAt: receivedAt.toISOString(),
+    canonicalReceivedAt,
+    receivedAt: canonicalReceivedAt ?? new Date(0).toISOString(),
     preview: previewFor(parsed?.text),
     read: hasFlag(message.flags, SEEN_FLAG),
     flagged: hasFlag(message.flags, "\\Flagged"),
@@ -624,7 +653,7 @@ function toDetail(
   mailbox: MailboxObject,
   message: FetchMessageObject,
   parsed: ParsedMail,
-): MessageDetail {
+): ProviderMessageDetail {
   return {
     ...toSummary(accountId, mailboxPath, mailbox, message, parsed),
     text: parsed.text ?? "",
@@ -669,18 +698,20 @@ function flattenAddresses(value: ParsedMail["to"]): EmailAddress[] {
   return Array.isArray(value) ? value.flatMap((address) => address.value) : value.value;
 }
 
-function headerString(parsed: ParsedMail | undefined, name: string): string | undefined {
-  const value = parsed?.headers.get(name);
-  if (typeof value === "string") return value;
-  return Array.isArray(value) && value.every((entry): entry is string => typeof entry === "string")
-    ? value.join(" ")
-    : undefined;
+function parsedDate(parsed: ParsedMail | undefined): string | undefined {
+  const header = parsed?.headerLines.find(({ key }) => key.toLowerCase() === "date")?.line;
+  if (!header) return undefined;
+  const separator = header.indexOf(":");
+  return separator < 0 ? undefined : header.slice(separator + 1).trim();
 }
 
-function parseReferences(parsed: ParsedMail | undefined): string[] {
-  const references = parsed?.references;
-  const values = Array.isArray(references) ? references : references ? [references] : [];
-  return values.flatMap((reference) => reference.match(/<[^<>]+>/g) ?? []);
+function rawHeaderValues(parsed: ParsedMail | undefined, name: string): string[] {
+  return (parsed?.headerLines ?? [])
+    .filter(({ key }) => key.toLowerCase() === name)
+    .flatMap(({ line }) => {
+      const separator = line.indexOf(":");
+      return separator < 0 ? [] : [line.slice(separator + 1).trim()];
+    });
 }
 
 function previewFor(text: string | undefined): string {

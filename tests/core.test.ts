@@ -79,6 +79,8 @@ describe("Postreeve core workflow", () => {
 
     expect(messages.map(({ ref }) => ref.uid)).toEqual([103]);
     expect(messages[0]?.canonicalId).toBe(listed!.id);
+    expect((await service.getConversation(messages[0]!.conversationId)).messages.map(({ id }) => id))
+      .toEqual([listed!.id]);
     expect((await service.listMessages({ accountId: account.id, mailbox: "INBOX", query: "planning", limit: 1 }))[0]?.canonicalId)
       .toBe(listed!.id);
     expect((await service.searchMessages({ accountId: account.id, mailbox: "INBOX", query: "planning", limit: 1 }))[0]?.canonicalId)
@@ -151,6 +153,10 @@ describe("Postreeve core workflow", () => {
     expect(details[0]?.canonicalId).toBe(firstFallback!.id);
     expect(details[0]?.canonicalAliases).toContain(secondFallback!.id);
     expect(details[1]?.canonicalAliases).toEqual(details[0]?.canonicalAliases);
+    expect(new Set(details.map(({ conversationId }) => conversationId)).size).toBe(1);
+    for (const oldConversationId of [firstFallback!.conversationId, secondFallback!.conversationId]) {
+      expect((await service.getConversation(oldConversationId)).id).toBe(details[0]!.conversationId);
+    }
     expect(await store.getMessage("test-tenant", firstFallback!.id)).toMatchObject({
       id: firstFallback!.id,
       messageId: "<READ-103@example.test>",
@@ -164,6 +170,13 @@ describe("Postreeve core workflow", () => {
     ]);
     expect(await store.listMessageLocations("test-tenant", unseen!.id)).toHaveLength(1);
     expect(await store.getMessage("another-tenant", firstFallback!.id)).toBeNull();
+    const listedAfterMerge = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 });
+    const searchedAfterMerge = await service.searchMessages({
+      accountId: account.id, mailbox: "INBOX", query: "planning", limit: 50,
+    });
+    expect(listedAfterMerge.find(({ canonicalId }) => canonicalId === details[0]!.canonicalId)?.conversationId)
+      .toBe(details[0]!.conversationId);
+    expect(searchedAfterMerge[0]?.conversationId).toBe(details[0]!.conversationId);
     store.close();
   });
 

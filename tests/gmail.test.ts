@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { GmailMailClient, type HttpFetch } from "../src/server/mail/gmail";
+import { MailProviderRegistry, toCanonicalObservation } from "../src/server/mail/provider";
+import { MailSenderRegistry } from "../src/server/mail/sender";
+import { Store } from "../src/server/db/store";
 import { GoogleOAuth, type OAuthFetch } from "../src/server/google/oauth";
+import { PostreeveService } from "../src/server/core/postreeve";
+import { CredentialVault } from "../src/server/security/credentials";
+import { createApi } from "../src/server/api";
+import { canonicalConversationSchema } from "../src/shared/contracts";
+import { repeatedIdentification } from "./fixtures/repeated-identification";
 
 const account = {
   id: "gmail-account",
@@ -74,8 +82,8 @@ describe("Gmail compatibility", () => {
           { name: "From", value: "Sender <sender@example.test>" },
           { name: "To", value: "Person <person@example.test>" },
           { name: "Message-ID", value: "<gmail-test@example.test>" },
-          { name: "In-Reply-To", value: "<parent@example.test>" },
-          { name: "References", value: "<root@example.test> <parent@example.test>" },
+          { name: "In-Reply-To", value: "Your messages <parent-a@example.test> and <parent-b@example.test>" },
+          { name: "References", value: "First <root@example.test> then <parent@example.test>" },
           { name: "Date", value: "Sat, 29 Aug 2026 10:00:00 +0200" },
         ] },
       }));
@@ -105,10 +113,14 @@ describe("Gmail compatibility", () => {
     expect(page.complete).toBe(false);
     expect(summaries[0]?.subject).toBe("Gmail test");
     expect(summaries[0]?.ref.providerId).toBe("18fabc123");
-    expect(summaries[0]?.inReplyTo).toBe("<parent@example.test>");
+    expect(summaries[0]?.providerConversationId).toBe("thread-1");
+    expect(summaries[0]?.inReplyTo).toBe("Your messages <parent-a@example.test> and <parent-b@example.test>");
     expect(summaries[0]?.references).toEqual(["<root@example.test>", "<parent@example.test>"]);
+    expect(toCanonicalObservation("tenant-a", "gmail", summaries[0]!).inReplyTo)
+      .toBe("<parent-a@example.test> <parent-b@example.test>");
     const details = await client.readMessages(account.id, [summaries[0]!.ref]);
     expect(details[0]?.text.trim()).toBe("Hello from Gmail.");
+    expect(details[0]?.providerConversationId).toBe("thread-1");
     expect(details[0]?.html).toContain("data:image/png;base64,");
     const applied = await client.apply(summaries[0]!.ref, { type: "mark_read" });
     expect(applied.previousRead).toBe(false);
@@ -130,6 +142,7 @@ describe("Gmail compatibility", () => {
     function message(extra: Record<string, unknown> = {}) {
       return {
         id: "18fabc123",
+        threadId: "thread-1",
         labelIds,
         snippet: "Hello from Gmail.",
         historyId: String(historyId),
@@ -145,8 +158,8 @@ describe("Gmail compatibility", () => {
       "To: Person <person@example.test>",
       "Subject: Threaded Gmail message",
       "Message-ID: <threaded@example.test>",
-      "In-Reply-To: <parent@example.test>",
-      "References: <root@example.test> <parent@example.test>",
+      "In-Reply-To: Your messages of Friday <parent-a@example.test> and Saturday <parent-b@example.test>",
+      'References: "quoted <fake@example.test>" <root@example.test> then <"a>b<c"@Example.Test> <root@example.test>',
       "Date: Sat, 29 Aug 2026 10:00:00 +0200",
       "Content-Type: text/plain; charset=UTF-8",
       "",
@@ -184,8 +197,183 @@ describe("Gmail compatibility", () => {
       providerId: "threaded",
     }]);
 
-    expect(detail?.inReplyTo).toBe("<parent@example.test>");
-    expect(detail?.references).toEqual(["<root@example.test>", "<parent@example.test>"]);
+    if (!detail) throw new Error("Expected a Gmail message detail");
+    expect(toCanonicalObservation("tenant-a", "gmail", detail).inReplyTo)
+      .toBe("<parent-a@example.test> <parent-b@example.test>");
+    expect(detail?.references).toEqual(["<root@example.test>", '<"a>b<c"@example.test>']);
+    expect(detail?.providerConversationId).toBeUndefined();
+  });
+
+  test("keeps repeated identification fields stable from metadata through raw read and the conversation API", async () => {
+    const metadataHeaders = [
+      { name: "Subject", value: "Repeated identification fields" },
+      { name: "From", value: "Sender <sender@example.test>" },
+      { name: "To", value: "Person <person@example.test>" },
+      { name: "Message-ID", value: repeatedIdentification.messageId },
+      ...repeatedIdentification.inReplyTo.map((value) => ({ name: "In-Reply-To", value })),
+      ...repeatedIdentification.references.map((value) => ({ name: "References", value })),
+      { name: "Date", value: "Sat, 29 Aug 2026 10:00:00 +0200" },
+    ];
+    const request: HttpFetch = async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://oauth2.googleapis.com/token") return json({ access_token: "access", expires_in: 3600 });
+      if (url.includes("/messages?") && !url.includes("/messages/repeated")) {
+        return json({ messages: [{ id: "repeated" }] });
+      }
+      if (url.includes("/messages/repeated?format=metadata")) {
+        return json({
+          id: "repeated", threadId: "thread-repeated", labelIds: ["INBOX"], snippet: "Repeated body.",
+          historyId: "1", internalDate: "1787990400000", payload: { headers: metadataHeaders },
+        });
+      }
+      if (url.includes("/messages/repeated?format=raw")) {
+        return json({
+          id: "repeated", threadId: "thread-repeated", labelIds: ["INBOX"], historyId: "1",
+          internalDate: "1787990400000", raw: Buffer.from(repeatedIdentification.raw).toString("base64url"),
+        });
+      }
+      return new Response(null, { status: 404 });
+    };
+    const provider = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "stored-refresh-token" },
+      clientId: "desktop-client-id",
+      fetch: request,
+    });
+    const [summary] = await provider.listMessages(account.id, "INBOX", 1);
+    if (!summary) throw new Error("Expected Gmail metadata summary");
+    const [detail] = await provider.readMessages(account.id, [summary.ref]);
+    if (!detail) throw new Error("Expected Gmail raw detail");
+    const listedObservation = toCanonicalObservation("tenant-a", "gmail", summary);
+    const readObservation = toCanonicalObservation("tenant-a", "gmail", detail);
+    expect(summary.referenceSequences).toEqual([
+      ["<branch-a@example.test>", "<root@example.test>"],
+      ["<branch-b@example.test>", "<root@example.test>"],
+    ]);
+    expect(detail.referenceSequences).toEqual(summary.referenceSequences);
+    expect(listedObservation).toMatchObject({
+      messageId: repeatedIdentification.normalizedMessageId,
+      inReplyTo: repeatedIdentification.normalizedInReplyTo,
+      references: repeatedIdentification.normalizedReferences,
+      referenceSequences: [
+        ["<branch-a@example.test>", "<root@example.test>"],
+        ["<branch-b@example.test>", "<root@example.test>"],
+      ],
+    });
+    expect(readObservation).toMatchObject({
+      messageId: listedObservation.messageId,
+      inReplyTo: listedObservation.inReplyTo,
+      references: listedObservation.references,
+    });
+
+    const providers = new MailProviderRegistry();
+    providers.register(account.id, provider);
+    const store = new Store(":memory:");
+    try {
+      await store.insertAccount({ ...account, encryptedCredentials: null });
+      const unavailable = () => { throw new Error("Factory is not used by this fixture"); };
+      const service = new PostreeveService(
+        store,
+        { tenantId: "tenant-a" },
+        providers,
+        new MailSenderRegistry(),
+        new CredentialVault(Buffer.alloc(32, 7).toString("base64")),
+        unavailable,
+        unavailable,
+      );
+      const [listed] = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 1 });
+      if (!listed) throw new Error("Expected canonical Gmail summary");
+      const [read] = await service.readMessages([listed.ref]);
+      if (!read) throw new Error("Expected canonical Gmail detail");
+      expect("referenceSequences" in listed).toBe(false);
+      expect("referenceSequences" in read).toBe(false);
+      const api = createApi(service);
+      const listResponse = await api.request(`/api/accounts/${account.id}/messages?mailbox=INBOX&limit=1`);
+      const publicSummaries: unknown = await listResponse.json();
+      expect(Array.isArray(publicSummaries) && publicSummaries.every((message) =>
+        typeof message === "object" && message !== null && !("referenceSequences" in message))).toBe(true);
+      const readResponse = await api.request("/api/messages/read", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ references: [listed.ref] }),
+      });
+      const publicDetails: unknown = await readResponse.json();
+      expect(Array.isArray(publicDetails) && publicDetails.every((message) =>
+        typeof message === "object" && message !== null && !("referenceSequences" in message))).toBe(true);
+      await store.reconcileMailbox({
+        tenantId: "tenant-a", accountId: account.id, provider: "gmail", mailbox: "INBOX", authoritative: false,
+        observations: ["branch-a", "branch-b", "root"].map((name, index) => ({
+          tenantId: "tenant-a", messageId: `<${name}@example.test>`, inReplyTo: null, references: [],
+          receivedAt: `2026-09-0${3 - index}T00:00:00.000Z`,
+          location: { accountId: account.id, provider: "gmail" as const, mailbox: "INBOX", uidValidity: "gmail",
+            uid: 20 + index, modseq: null, providerId: `parent-${name}`, read: false, flagged: false },
+        })),
+      });
+      const response = await api.request(`/api/conversations/${listed.conversationId}`);
+      const conversation = canonicalConversationSchema.parse(await response.json());
+
+      expect(read).toMatchObject({ canonicalId: listed.canonicalId, conversationId: listed.conversationId });
+      expect(conversation.messages).toContainEqual(expect.objectContaining({
+        id: listed.canonicalId,
+        messageId: repeatedIdentification.normalizedMessageId,
+        inReplyTo: repeatedIdentification.normalizedInReplyTo,
+        references: ["<branch-a@example.test>", "<branch-b@example.test>", "<root@example.test>"],
+      }));
+      const messageIds = conversation.messages.map(({ messageId }) => messageId);
+      expect(messageIds.indexOf("<branch-a@example.test>")).toBeLessThan(messageIds.indexOf("<root@example.test>"));
+      expect(messageIds.indexOf("<branch-b@example.test>")).toBeLessThan(messageIds.indexOf("<root@example.test>"));
+      expect(messageIds.indexOf("<root@example.test>")).toBeLessThan(
+        messageIds.indexOf(repeatedIdentification.normalizedMessageId));
+    } finally {
+      store.close();
+    }
+  });
+
+  test("keeps missing and malformed Gmail dates out of canonical ordering", async () => {
+    const request: HttpFetch = async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return json({ access_token: "access", expires_in: 3600 });
+      }
+      if (url.includes("/messages?")) return json({ messages: [{ id: "missing" }, { id: "malformed" }, { id: "epoch" }] });
+      const id = /\/messages\/([^?]+)/.exec(url)?.[1];
+      if (id) return json({
+        id,
+        labelIds: ["INBOX"],
+        snippet: id,
+        ...(id === "malformed" ? { internalDate: "not-a-time", payload: { headers: [{ name: "Date", value: "not-a-date" }] } } : {}),
+        ...(id === "epoch" ? { internalDate: "0" } : {}),
+      });
+      return new Response(null, { status: 404 });
+    };
+    const client = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "stored-refresh-token" },
+      clientId: "desktop-client-id",
+      fetch: request,
+    });
+
+    const messages = await client.listMessages(account.id, "INBOX", 3);
+    const canonicalTimes = messages.map((message) =>
+      toCanonicalObservation("tenant-a", "gmail", message).receivedAt);
+    expect(messages.map(({ receivedAt }) => receivedAt)).toEqual([
+      "1970-01-01T00:00:00.000Z",
+      "1970-01-01T00:00:00.000Z",
+      "1970-01-01T00:00:00.000Z",
+    ]);
+    expect(canonicalTimes).toEqual([null, null, "1970-01-01T00:00:00.000Z"]);
+
+    const store = new Store(":memory:");
+    try {
+      await store.insertAccount({ ...account, encryptedCredentials: null });
+      const stored = await store.reconcileMailbox({
+        tenantId: "tenant-a", accountId: account.id, provider: "gmail", mailbox: "INBOX", authoritative: false,
+        observations: messages.map((message) => toCanonicalObservation("tenant-a", "gmail", message)),
+      });
+      expect(stored.map(({ receivedAt }) => receivedAt)).toEqual([null, null, "1970-01-01T00:00:00.000Z"]);
+    } finally {
+      store.close();
+    }
   });
 
   test("uses a state-bound PKCE desktop authorization flow", async () => {

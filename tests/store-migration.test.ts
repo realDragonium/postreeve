@@ -16,6 +16,276 @@ afterEach(() => {
 });
 
 describe("Store migrations", () => {
+  test("atomically backfills a genuine pre-477 store and preserves it across reopen", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const old = new Database(path, { create: true });
+    old.exec(`
+      CREATE TABLE messages (
+        id TEXT PRIMARY KEY NOT NULL, tenant_id TEXT NOT NULL, identity_key TEXT NOT NULL,
+        message_id TEXT, in_reply_to TEXT, "references" TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (tenant_id, identity_key)
+      );
+      INSERT INTO messages VALUES
+        ('parent', 'tenant-a', 'message-id:<parent@example.test>', '<parent@example.test>', NULL, '[]',
+          '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z'),
+        ('child', 'tenant-a', 'message-id:<child@example.test>', '<child@example.test>', '<parent@example.test>',
+          '["<parent@example.test>"]', '2026-09-01T00:01:00.000Z', '2026-09-01T00:01:00.000Z'),
+        ('quoted', 'tenant-a', 'message-id:<"legacy"@example.test>', '<"legacy"@example.test>', NULL, '[]',
+          '2026-09-01T00:02:00.000Z', '2026-09-01T00:02:00.000Z'),
+        ('escaped', 'tenant-a', 'message-id:<"l\\egacy"@example.test>', '<"l\\egacy"@example.test>', NULL, '[]',
+          '2026-09-01T00:03:00.000Z', '2026-09-01T00:03:00.000Z');
+    `);
+    old.close();
+
+    const migrated = new Store(path);
+    const parent = await migrated.getMessage("tenant-a", "parent");
+    expect(parent?.receivedAt).toBeNull();
+    expect((await migrated.getConversation("tenant-a", parent!.conversationId))?.messages.map(({ messageId }) => messageId))
+      .toEqual(["<parent@example.test>", "<child@example.test>"]);
+    expect((await migrated.getMessage("tenant-a", "quoted"))?.id).toBe("quoted");
+    expect((await migrated.getMessage("tenant-a", "escaped"))?.id).toBe("quoted");
+    expect((await migrated.getMessage("tenant-a", "quoted"))?.messageId).toBe("<legacy@example.test>");
+    migrated.close();
+
+    const inspected = new Database(path);
+    expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 477").get()).toEqual({ version: 477 });
+    expect(inspected.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    inspected.exec(`
+      CREATE TRIGGER reject_healthy_conversation_rebuild
+      BEFORE INSERT ON conversations
+      BEGIN SELECT RAISE(ABORT, 'healthy startup rebuilt conversations'); END;
+    `);
+    inspected.close();
+
+    const reopened = new Store(path);
+    expect((await reopened.getConversation("tenant-a", parent!.conversationId))?.messages.map(({ id }) => id))
+      .toEqual(["parent", "child"]);
+    reopened.close();
+  });
+
+  test("recovers messages inserted without DRA-477 memberships after the migration marker", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    new Store(path).close();
+    const fixture = new Database(path);
+    fixture.query(`
+      INSERT INTO messages
+        (id, tenant_id, identity_key, message_id, in_reply_to, "references", received_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+    `).run("late-fixture", "tenant-a", "message-id:<late-fixture@example.test>",
+      "<late-fixture@example.test>", null, "[]", "2026-09-01T00:00:00.000Z", "2026-09-01T00:00:00.000Z");
+    fixture.close();
+
+    const recovered = new Store(path);
+    const message = await recovered.getMessage("tenant-a", "late-fixture");
+    expect((await recovered.getConversation("tenant-a", message!.conversationId))?.messages.map(({ id }) => id))
+      .toEqual(["late-fixture"]);
+    recovered.close();
+  });
+
+  test("recovers every missing edge from a stored multi-parent In-Reply-To field", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const store = new Store(path);
+    await store.insertAccount({
+      id: "imap-account", name: "IMAP", email: "person@example.test", kind: "imap", encryptedCredentials: null,
+    });
+    const [child] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{
+        tenantId: "tenant-a", messageId: "<child@example.test>",
+        inReplyTo: "<parent-a@example.test> <parent-b@example.test>", references: [],
+        location: { accountId: "imap-account", provider: "imap", mailbox: "INBOX", uidValidity: "1", uid: 1,
+          modseq: null, providerId: null, read: false, flagged: false },
+      }],
+    });
+    store.close();
+
+    const damaged = new Database(path);
+    damaged.query(`
+      DELETE FROM message_thread_edges
+      WHERE tenant_id = ? AND message_id = ? AND referenced_message_id = ?
+    `).run("tenant-a", child!.id, "<parent-b@example.test>");
+    damaged.close();
+
+    new Store(path).close();
+    const recovered = new Database(path);
+    expect(recovered.query(`
+      SELECT referenced_message_id FROM message_thread_edges
+      WHERE tenant_id = ? AND message_id = ? ORDER BY referenced_message_id
+    `).all("tenant-a", child!.id)).toEqual([
+      { referenced_message_id: "<parent-a@example.test>" },
+      { referenced_message_id: "<parent-b@example.test>" },
+    ]);
+    recovered.close();
+  });
+
+  test("retains historical edge ordering without restoring removed public threading metadata", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const store = new Store(path);
+    await store.insertAccount({
+      id: "imap-account", name: "IMAP", email: "person@example.test", kind: "imap", encryptedCredentials: null,
+    });
+    const location = (uid: number) => ({
+      accountId: "imap-account", provider: "imap" as const, mailbox: "INBOX", uidValidity: "historic-order", uid,
+      modseq: null, providerId: null, read: false, flagged: false,
+    });
+    const [child] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{
+        tenantId: "tenant-a", messageId: "<child@example.test>", inReplyTo: "<parent@example.test>",
+        references: [], receivedAt: "2026-09-01T00:00:00.000Z", location: location(1),
+      }],
+    });
+    store.close();
+
+    const fixture = new Database(path);
+    fixture.query(`
+      UPDATE messages SET in_reply_to = NULL, "references" = '[]' WHERE tenant_id = ? AND id = ?
+    `).run("tenant-a", child!.id);
+    fixture.close();
+
+    const repaired = new Store(path);
+    const [parent] = await repaired.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{
+        tenantId: "tenant-a", messageId: "<parent@example.test>", inReplyTo: null, references: [],
+        receivedAt: "2026-09-02T00:00:00.000Z", location: location(2),
+      }],
+    });
+    const repairedConversation = await repaired.getConversation("tenant-a", child!.conversationId);
+    expect(parent!.conversationId).toBe(child!.conversationId);
+    expect(repairedConversation?.messages.map(({ messageId }) => messageId)).toEqual([
+      "<parent@example.test>", "<child@example.test>",
+    ]);
+    expect(repairedConversation?.messages.find(({ id }) => id === child!.id)).toMatchObject({
+      inReplyTo: null,
+      references: [],
+    });
+    repaired.close();
+
+    const reopened = new Store(path);
+    const reopenedConversation = await reopened.getConversation("tenant-a", child!.conversationId);
+    expect(reopenedConversation?.messages.map(({ messageId }) => messageId)).toEqual([
+      "<parent@example.test>", "<child@example.test>",
+    ]);
+    expect(reopenedConversation?.messages.find(({ id }) => id === child!.id)).toMatchObject({
+      inReplyTo: null,
+      references: [],
+    });
+    reopened.close();
+  });
+
+  test("repairs only the RFC component affected by a late parent", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const store = new Store(path);
+    await store.insertAccount({
+      id: "imap-account", name: "IMAP", email: "person@example.test", kind: "imap", encryptedCredentials: null,
+    });
+    const location = (uid: number) => ({
+      accountId: "imap-account", provider: "imap" as const, mailbox: "INBOX", uidValidity: "1", uid,
+      modseq: null, providerId: null, read: false, flagged: false,
+    });
+    const [unrelated] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{ tenantId: "tenant-a", messageId: "<unrelated@example.test>", inReplyTo: null,
+        references: [], location: location(1) }],
+    });
+    const [child] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{ tenantId: "tenant-a", messageId: "<child@example.test>",
+        inReplyTo: "<late-parent@example.test>", references: [], location: location(2) }],
+    });
+    store.close();
+
+    const fixture = new Database(path);
+    const unrelatedConversationId = unrelated!.conversationId.replaceAll("'", "''");
+    fixture.exec(`
+      CREATE TRIGGER reject_unrelated_conversation_reinsert
+      BEFORE INSERT ON conversations WHEN NEW.id = '${unrelatedConversationId}'
+      BEGIN SELECT RAISE(ABORT, 'unrelated conversation was rebuilt'); END
+    `);
+    fixture.close();
+
+    const reopened = new Store(path);
+    const [parent] = await reopened.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{ tenantId: "tenant-a", messageId: "<late-parent@example.test>", inReplyTo: null,
+        references: [], location: location(3) }],
+    });
+    expect(parent!.conversationId).toBe(child!.conversationId);
+    expect((await reopened.getConversation("tenant-a", unrelated!.conversationId))?.messages.map(({ id }) => id))
+      .toEqual([unrelated!.id]);
+    reopened.close();
+  });
+
+  test("records a location-only provider move without graph repair", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const store = new Store(path);
+    await store.insertAccount({
+      id: "imap-account", name: "IMAP", email: "person@example.test", kind: "imap", encryptedCredentials: null,
+    });
+    const [message] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{
+        tenantId: "tenant-a", messageId: "<moved@example.test>", inReplyTo: null, references: [],
+        location: { accountId: "imap-account", provider: "imap", mailbox: "INBOX", uidValidity: "1", uid: 1,
+          modseq: null, providerId: null, read: false, flagged: false },
+      }],
+    });
+    store.close();
+    const fixture = new Database(path);
+    fixture.exec(`
+      CREATE TRIGGER reject_move_conversation_rebuild
+      BEFORE INSERT ON conversations
+      BEGIN SELECT RAISE(ABORT, 'location move rebuilt conversations'); END;
+    `);
+    fixture.close();
+
+    const reopened = new Store(path);
+    expect(await reopened.recordProviderMove("tenant-a", "imap", {
+      accountId: "imap-account", mailbox: "INBOX", uidValidity: "1", uid: 1, modseq: null,
+    }, {
+      accountId: "imap-account", mailbox: "Archive", uidValidity: "1", uid: 2, modseq: null,
+    })).toBe(true);
+    expect((await reopened.getMessage("tenant-a", message!.id))?.conversationId).toBe(message!.conversationId);
+    reopened.close();
+  });
+
+  test("rolls back every DRA-477 schema and backfill change after a later tenant fails", () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const old = new Database(path, { create: true });
+    old.exec(`
+      CREATE TABLE messages (
+        id TEXT PRIMARY KEY NOT NULL, tenant_id TEXT NOT NULL, identity_key TEXT NOT NULL,
+        message_id TEXT, in_reply_to TEXT, "references" TEXT NOT NULL,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE (tenant_id, identity_key)
+      );
+      INSERT INTO messages VALUES
+        ('valid', 'tenant-a', 'message-id:<valid@example.test>', '<valid@example.test>', NULL, '[]',
+          '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z'),
+        ('broken', 'tenant-z', 'message-id:<broken@example.test>', '<broken@example.test>', NULL, '{bad json',
+          '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z');
+    `);
+    old.close();
+
+    expect(() => new Store(path)).toThrow();
+    const rolledBack = new Database(path);
+    expect((rolledBack.query("PRAGMA table_info('messages')").all() as Array<{ name: string }>)
+      .some(({ name }) => name === "received_at")).toBe(false);
+    for (const table of ["conversations", "conversation_messages", "conversation_aliases",
+      "message_provider_conversations", "message_thread_edges"]) {
+      expect(rolledBack.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)).toBeNull();
+    }
+    expect(rolledBack.query("SELECT 1 FROM schema_migrations WHERE version = 477").get()).toBeNull();
+    rolledBack.close();
+  });
+
   test("removes legacy synthetic accounts while preserving real accounts", async () => {
     const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
     paths.push(path);
@@ -575,5 +845,346 @@ describe("Store migrations", () => {
     expect(retried.query("PRAGMA foreign_key_check('message_locations')").all()).toEqual([]);
     expect(retried.query("PRAGMA foreign_key_check('message_provider_associations')").all()).toEqual([]);
     retried.close();
+  });
+
+  test("merges stored semantic Message-ID duplicates without losing aliases, relations, or historical edges", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    new Store(path).close();
+    const fixture = new Database(path);
+    fixture.exec(`
+      DELETE FROM schema_migrations WHERE version = 477001;
+      INSERT INTO accounts VALUES
+        ('imap-account', 'IMAP', 'person@example.test', 'imap', NULL, '2026-09-01T00:00:00.000Z');
+      INSERT INTO messages
+        (id, tenant_id, identity_key, message_id, in_reply_to, "references", received_at, created_at, updated_at)
+      VALUES
+        ('plain', 'tenant-a', 'message-id:<ab@example.test>', '<ab@example.test>', NULL, '[]', NULL,
+          '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z'),
+        ('quoted', 'tenant-a', 'message-id:<"ab"@example.test>', '<"ab"@example.test>', NULL, '[]', NULL,
+          '2026-09-01T00:01:00.000Z', '2026-09-01T00:01:00.000Z'),
+        ('escaped', 'tenant-a', 'message-id:<"a\\b"@example.test>', '<"a\\b"@example.test>', NULL, '[]', NULL,
+          '2026-09-01T00:02:00.000Z', '2026-09-01T00:02:00.000Z'),
+        ('child', 'tenant-a', 'message-id:<child@example.test>', '<child@example.test>', '<"a\\b"@example.test>',
+          json_array('<"ab"@example.test>'), NULL, '2026-09-01T00:03:00.000Z', '2026-09-01T00:03:00.000Z'),
+        ('other-tenant', 'tenant-b', 'message-id:<"a\\b"@example.test>', '<"a\\b"@example.test>', NULL, '[]', NULL,
+          '2026-09-01T00:04:00.000Z', '2026-09-01T00:04:00.000Z');
+      INSERT INTO conversations (id, tenant_id, created_at, updated_at) VALUES
+        ('conversation-plain', 'tenant-a', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z'),
+        ('conversation-quoted', 'tenant-a', '2026-09-01T00:01:00.000Z', '2026-09-01T00:01:00.000Z'),
+        ('conversation-escaped', 'tenant-a', '2026-09-01T00:02:00.000Z', '2026-09-01T00:02:00.000Z'),
+        ('conversation-child', 'tenant-a', '2026-09-01T00:03:00.000Z', '2026-09-01T00:03:00.000Z'),
+        ('conversation-other', 'tenant-b', '2026-09-01T00:04:00.000Z', '2026-09-01T00:04:00.000Z');
+      INSERT INTO conversation_messages VALUES
+        ('tenant-a', 'conversation-plain', 'plain'),
+        ('tenant-a', 'conversation-quoted', 'quoted'),
+        ('tenant-a', 'conversation-escaped', 'escaped'),
+        ('tenant-a', 'conversation-child', 'child'),
+        ('tenant-b', 'conversation-other', 'other-tenant');
+      INSERT INTO message_aliases VALUES
+        ('quoted-old-alias', 'tenant-a', 'quoted', '2026-09-01T00:01:00.000Z'),
+        ('escaped-old-alias', 'tenant-a', 'escaped', '2026-09-01T00:02:00.000Z');
+      INSERT INTO conversation_aliases VALUES
+        ('quoted-conversation-alias', 'tenant-a', 'conversation-quoted', '2026-09-01T00:01:00.000Z');
+      INSERT INTO message_locations
+        (id, message_id, tenant_id, account_id, provider, mailbox, location_key, uid_validity, uid,
+          modseq, provider_id, read, flagged, observed_at)
+      VALUES
+        ('plain-location', 'plain', 'tenant-a', 'imap-account', 'imap', 'INBOX', '["imap","INBOX","1",1]',
+          '1', 1, NULL, NULL, 0, 0, '2026-09-01T00:00:00.000Z'),
+        ('quoted-location', 'quoted', 'tenant-a', 'imap-account', 'imap', 'Archive', '["imap","Archive","1",2]',
+          '1', 2, NULL, NULL, 0, 0, '2026-09-01T00:01:00.000Z'),
+        ('escaped-location', 'escaped', 'tenant-a', 'imap-account', 'imap', 'Sent', '["imap","Sent","1",3]',
+          '1', 3, NULL, NULL, 0, 0, '2026-09-01T00:02:00.000Z');
+      INSERT INTO message_provider_associations
+        (tenant_id, account_id, provider, provider_id, mailbox, uid_validity, uid, message_id)
+      VALUES
+        ('tenant-a', 'imap-account', 'imap', 'provider-plain', NULL, NULL, NULL, 'plain'),
+        ('tenant-a', 'imap-account', 'imap', 'provider-quoted', NULL, NULL, NULL, 'quoted'),
+        ('tenant-a', 'imap-account', 'imap', 'provider-escaped', NULL, NULL, NULL, 'escaped');
+      INSERT INTO message_provider_conversations VALUES
+        ('tenant-a', 'imap-account', 'imap', 'thread-plain', 'plain'),
+        ('tenant-a', 'imap-account', 'imap', 'thread-quoted', 'quoted'),
+        ('tenant-a', 'imap-account', 'imap', 'thread-escaped', 'escaped');
+      INSERT INTO message_thread_edges VALUES
+        ('tenant-a', 'child', '<"a\\b"@example.test>'),
+        ('tenant-a', 'quoted', '<"h\\istoric"@example.test>');
+    `);
+    fixture.close();
+
+    const migrated = new Store(path);
+    const canonical = await migrated.getMessage("tenant-a", "plain");
+    expect(canonical).toMatchObject({ id: "plain", messageId: "<ab@example.test>" });
+    for (const alias of ["quoted", "escaped", "quoted-old-alias", "escaped-old-alias"]) {
+      expect((await migrated.getMessage("tenant-a", alias))?.id).toBe("plain");
+    }
+    expect(await migrated.listMessageLocations("tenant-a", "plain")).toHaveLength(3);
+    const conversationAliases = ["conversation-plain", "conversation-quoted", "conversation-escaped",
+      "conversation-child", "quoted-conversation-alias"];
+    const conversations = await Promise.all(conversationAliases.map((id) => migrated.getConversation("tenant-a", id)));
+    expect(new Set(conversations.map((conversation) => conversation?.id))).toHaveLength(1);
+    expect(conversations[0]!.messages.map(({ messageId }) => messageId)).toEqual([
+      "<ab@example.test>", "<child@example.test>",
+    ]);
+    expect((await migrated.getMessage("tenant-b", "other-tenant"))?.messageId).toBe("<ab@example.test>");
+    expect(await migrated.getMessage("tenant-b", "plain")).toBeNull();
+    migrated.close();
+
+    const inspected = new Database(path);
+    expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 477001").get())
+      .toEqual({ version: 477001 });
+    expect(inspected.query(`
+      SELECT identity_key FROM messages WHERE identity_key LIKE 'message-id:%\\\\%' ESCAPE '\\'
+    `).all()).toEqual([]);
+    expect(inspected.query(`
+      SELECT referenced_message_id FROM message_thread_edges WHERE tenant_id = 'tenant-a' ORDER BY referenced_message_id
+    `).all()).toEqual([
+      { referenced_message_id: "<ab@example.test>" },
+      { referenced_message_id: "<historic@example.test>" },
+    ]);
+    expect(inspected.query(`
+      SELECT COUNT(*) AS count FROM message_provider_associations WHERE tenant_id = 'tenant-a' AND message_id = 'plain'
+    `).get()).toEqual({ count: 3 });
+    expect(inspected.query(`
+      SELECT COUNT(*) AS count FROM message_provider_conversations WHERE tenant_id = 'tenant-a' AND message_id = 'plain'
+    `).get()).toEqual({ count: 3 });
+    inspected.exec(`
+      CREATE TRIGGER reject_repeated_semantic_migration BEFORE UPDATE ON messages
+      BEGIN SELECT RAISE(ABORT, 'semantic migration repeated'); END;
+    `);
+    inspected.close();
+    new Store(path).close();
+  });
+
+  test("repairs fallback-only conversations after semantic threading edges converge", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const store = new Store(path);
+    await store.insertAccount({
+      id: "imap-account", name: "IMAP", email: "person@example.test", kind: "imap", encryptedCredentials: null,
+    });
+    const messages = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [1, 2].map((uid) => ({
+        tenantId: "tenant-a", messageId: null, inReplyTo: null, references: [],
+        location: { accountId: "imap-account", provider: "imap" as const, mailbox: "INBOX", uidValidity: "1", uid,
+          modseq: null, providerId: null, read: false, flagged: false },
+      })),
+    });
+    const messageIds = messages.map(({ id }) => id);
+    const oldConversationIds = messages.map(({ conversationId }) => conversationId);
+    expect(new Set(oldConversationIds).size).toBe(2);
+    store.close();
+
+    const fixture = new Database(path);
+    fixture.query("DELETE FROM schema_migrations WHERE version = 477001").run();
+    const references = ['<"ab"@x.test>', '<"a\\b"@x.test>'];
+    for (const [index, messageId] of messageIds.entries()) {
+      fixture.query(`UPDATE messages SET "references" = json_array(?) WHERE tenant_id = ? AND id = ?`)
+        .run(references[index]!, "tenant-a", messageId);
+      fixture.query(`
+        INSERT INTO message_thread_edges (tenant_id, message_id, referenced_message_id) VALUES (?, ?, ?)
+      `).run("tenant-a", messageId, references[index]!);
+    }
+    fixture.close();
+
+    const migrated = new Store(path);
+    const migratedConversations = await Promise.all(oldConversationIds.map((id) =>
+      migrated.getConversation("tenant-a", id)));
+    expect(new Set(migratedConversations.map((conversation) => conversation?.id)).size).toBe(1);
+    for (const conversation of migratedConversations) {
+      expect(new Set(conversation?.messages.map(({ id }) => id))).toEqual(new Set(messageIds));
+    }
+    migrated.close();
+
+    const reopened = new Store(path);
+    const reopenedConversations = await Promise.all(oldConversationIds.map((id) =>
+      reopened.getConversation("tenant-a", id)));
+    expect(new Set(reopenedConversations.map((conversation) => conversation?.id)).size).toBe(1);
+    for (const conversation of reopenedConversations) {
+      expect(new Set(conversation?.messages.map(({ id }) => id))).toEqual(new Set(messageIds));
+    }
+    reopened.close();
+  });
+
+  test("preserves observed References evidence across every arrival order, canonical merge, and reopen", async () => {
+    const sequences = [
+      ["<b@order.test>"],
+      ["<c@order.test>"],
+      ["<c@order.test>", "<a@order.test>", "<b@order.test>"],
+    ];
+    const permutations = <T>(values: readonly T[]): T[][] => values.length === 0
+      ? [[]]
+      : values.flatMap((value, index) => permutations(values.filter((_, candidate) => candidate !== index))
+        .map((rest) => [value, ...rest]));
+
+    for (const arrivals of permutations(sequences)) {
+      const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+      paths.push(path);
+      const store = new Store(path);
+      await store.insertAccount({
+        id: "imap-account", name: "IMAP", email: "person@example.test", kind: "imap", encryptedCredentials: null,
+      });
+      await store.insertAccount({
+        id: "gmail-account", name: "Gmail", email: "person@example.test", kind: "gmail", encryptedCredentials: null,
+      });
+      for (const [index, references] of arrivals.entries()) {
+        await store.reconcileMailbox({
+          tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+          observations: [{
+            tenantId: "tenant-a", messageId: "<child@order.test>", inReplyTo: null, references,
+            location: { accountId: "imap-account", provider: "imap", mailbox: "INBOX", uidValidity: "1",
+              uid: index + 1, modseq: null, providerId: null, read: false, flagged: false },
+          }],
+        });
+      }
+      const [fallback] = await store.reconcileMailbox({
+        tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "INBOX", authoritative: false,
+        observations: [{
+          tenantId: "tenant-a", messageId: null, inReplyTo: null, references: [],
+          location: { accountId: "gmail-account", provider: "gmail", mailbox: "INBOX", uidValidity: "gmail",
+            uid: 1, modseq: null, providerId: "fallback-child", read: false, flagged: false },
+        }],
+      });
+      const [merged] = await store.reconcileMailbox({
+        tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "Archive", authoritative: false,
+        observations: [{
+          tenantId: "tenant-a", messageId: "<child@order.test>", inReplyTo: null, references: [],
+          location: { accountId: "gmail-account", provider: "gmail", mailbox: "Archive", uidValidity: "gmail",
+            uid: 2, modseq: null, providerId: "fallback-child", read: false, flagged: false },
+        }],
+      });
+      expect(merged!.references).toEqual(["<c@order.test>", "<a@order.test>", "<b@order.test>"]);
+      expect((await store.getMessage("tenant-a", fallback!.id))?.id).toBe(merged!.id);
+      await store.reconcileMailbox({
+        tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+        observations: ["a", "b", "c"].map((name, index) => ({
+          tenantId: "tenant-a", messageId: `<${name}@order.test>`, inReplyTo: null, references: [],
+          receivedAt: `2026-09-0${3 - index}T00:00:00.000Z`,
+          location: { accountId: "imap-account", provider: "imap" as const, mailbox: "INBOX", uidValidity: "1",
+            uid: index + 10, modseq: null, providerId: null, read: false, flagged: false },
+        })),
+      });
+      expect((await store.getConversation("tenant-a", merged!.conversationId))?.messages.map(({ messageId }) => messageId))
+        .toEqual(["<c@order.test>", "<a@order.test>", "<b@order.test>", "<child@order.test>"]);
+      store.close();
+
+      const reopened = new Store(path);
+      const child = await reopened.getMessage("tenant-a", merged!.id);
+      expect(child?.references).toEqual(["<c@order.test>", "<a@order.test>", "<b@order.test>"]);
+      expect((await reopened.getConversation("tenant-a", child!.conversationId))?.messages.map(({ messageId }) => messageId))
+        .toEqual(["<c@order.test>", "<a@order.test>", "<b@order.test>", "<child@order.test>"]);
+      reopened.close();
+    }
+  });
+
+  test("migrates flattened legacy References as unordered parents until genuine evidence arrives", async () => {
+    for (const legacyReferences of [
+      ["<a@legacy.test>", "<b@legacy.test>", "<c@legacy.test>"],
+      ["<c@legacy.test>", "<a@legacy.test>", "<b@legacy.test>"],
+    ]) {
+      const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+      paths.push(path);
+      const store = new Store(path);
+      await store.insertAccount({
+        id: "imap-account", name: "IMAP", email: "person@example.test", kind: "imap", encryptedCredentials: null,
+      });
+      const [child] = await store.reconcileMailbox({
+        tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+        observations: [{
+          tenantId: "tenant-a", messageId: "<child@legacy.test>", inReplyTo: null, references: legacyReferences,
+          location: { accountId: "imap-account", provider: "imap", mailbox: "INBOX", uidValidity: "1", uid: 1,
+            modseq: null, providerId: null, read: false, flagged: false },
+        }],
+      });
+      await store.reconcileMailbox({
+        tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+        observations: ["a", "b", "c"].map((name, index) => ({
+          tenantId: "tenant-a", messageId: `<${name}@legacy.test>`, inReplyTo: null, references: [],
+          receivedAt: `2026-09-0${3 - index}T00:00:00.000Z`,
+          location: { accountId: "imap-account", provider: "imap" as const, mailbox: "INBOX", uidValidity: "1",
+            uid: index + 2, modseq: null, providerId: null, read: false, flagged: false },
+        })),
+      });
+      store.close();
+
+      const legacy = new Database(path);
+      legacy.exec(`DROP TABLE message_reference_sequences; DELETE FROM schema_migrations WHERE version = 477002;`);
+      legacy.close();
+
+      const migrated = new Store(path);
+      expect((await migrated.getConversation("tenant-a", child!.conversationId))?.messages.map(({ messageId }) => messageId))
+        .toEqual(["<c@legacy.test>", "<b@legacy.test>", "<a@legacy.test>", "<child@legacy.test>"]);
+      await migrated.reconcileMailbox({
+        tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+        observations: [{
+          tenantId: "tenant-a", messageId: "<child@legacy.test>", inReplyTo: null,
+          references: ["<b@legacy.test>", "<a@legacy.test>", "<c@legacy.test>"],
+          location: { accountId: "imap-account", provider: "imap", mailbox: "INBOX", uidValidity: "1", uid: 9,
+            modseq: null, providerId: null, read: false, flagged: false },
+        }],
+      });
+      migrated.close();
+
+      const reopened = new Store(path);
+      expect((await reopened.getConversation("tenant-a", child!.conversationId))?.messages.map(({ messageId }) => messageId))
+        .toEqual(["<b@legacy.test>", "<a@legacy.test>", "<c@legacy.test>", "<child@legacy.test>"]);
+      reopened.close();
+    }
+  });
+
+  test("rolls back reference sequence schema before recording its marker", () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    new Store(path).close();
+    const fixture = new Database(path);
+    fixture.exec(`
+      DROP TABLE message_reference_sequences;
+      DELETE FROM schema_migrations WHERE version = 477002;
+      CREATE TRIGGER reject_reference_sequence_marker
+      BEFORE INSERT ON schema_migrations WHEN NEW.version = 477002
+      BEGIN SELECT RAISE(ABORT, 'reference sequence fixture failure'); END;
+    `);
+    fixture.close();
+
+    expect(() => new Store(path)).toThrow("reference sequence fixture failure");
+    const rolledBack = new Database(path);
+    expect(rolledBack.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'message_reference_sequences'")
+      .get()).toBeNull();
+    expect(rolledBack.query("SELECT 1 FROM schema_migrations WHERE version = 477002").get()).toBeNull();
+    rolledBack.close();
+  });
+
+  test("rolls back semantic Message-ID normalization before recording its marker", () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    new Store(path).close();
+    const fixture = new Database(path);
+    fixture.exec(`
+      DELETE FROM schema_migrations WHERE version = 477001;
+      INSERT INTO messages
+        (id, tenant_id, identity_key, message_id, in_reply_to, "references", received_at, created_at, updated_at)
+      VALUES
+        ('stale', 'tenant-a', 'message-id:<"a\\b"@example.test>', '<"a\\b"@example.test>', NULL, '[]', NULL,
+          '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z'),
+        ('broken', 'tenant-z', 'message-id:<broken@example.test>', '<broken@example.test>', NULL, '[]', NULL,
+          '2026-09-01T00:01:00.000Z', '2026-09-01T00:01:00.000Z');
+      INSERT INTO message_thread_edges VALUES
+        ('tenant-a', 'stale', '<"r\\ollback"@example.test>');
+      CREATE TRIGGER reject_semantic_message_update BEFORE UPDATE ON messages WHEN OLD.id = 'broken'
+      BEGIN SELECT RAISE(ABORT, 'semantic fixture failure'); END;
+    `);
+    fixture.close();
+
+    expect(() => new Store(path)).toThrow("semantic fixture failure");
+    const rolledBack = new Database(path);
+    expect(rolledBack.query("SELECT identity_key, message_id FROM messages WHERE id = 'stale'").get()).toEqual({
+      identity_key: 'message-id:<"a\\b"@example.test>', message_id: '<"a\\b"@example.test>',
+    });
+    expect(rolledBack.query(`
+      SELECT referenced_message_id FROM message_thread_edges WHERE tenant_id = 'tenant-a' AND message_id = 'stale'
+    `).get()).toEqual({ referenced_message_id: '<"r\\ollback"@example.test>' });
+    expect(rolledBack.query("SELECT version FROM schema_migrations WHERE version = 477001").get()).toBeNull();
+    rolledBack.close();
   });
 });

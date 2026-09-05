@@ -1,28 +1,47 @@
 import type {
   Folder,
-  MessageDetail,
   MessageRef,
   MessageSummary,
+  MessageDetail,
   CanonicalMessageObservation,
   MailProviderKind,
   TriageAction,
 } from "../../shared/contracts";
-import { normalizeMessageId } from "./message-id";
+import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "./message-id";
+
+interface ProviderMessageMetadata {
+  providerConversationId?: string;
+  canonicalReceivedAt?: string | null;
+  referenceSequences?: readonly (readonly string[])[];
+}
+
+export type ProviderMessageSummary = MessageSummary & ProviderMessageMetadata;
+export type ProviderMessageDetail = MessageDetail & ProviderMessageMetadata;
+export type ProviderMessageObservation = CanonicalMessageObservation & {
+  providerConversationId?: string;
+  referenceSequences?: readonly (readonly string[])[];
+};
 
 export function toCanonicalObservation(
   tenantId: string,
   provider: MailProviderKind,
-  message: MessageSummary,
-): CanonicalMessageObservation {
+  message: ProviderMessageSummary,
+): ProviderMessageObservation {
   const messageId = normalizeMessageId(message.messageId);
+  const inReplyTo = normalizeMessageIdList(message.inReplyTo);
+  const references = normalizeMessageIdLists(message.references ?? []);
+  const referenceSequences = message.referenceSequences?.map((sequence) => normalizeMessageIdLists(sequence))
+    .filter((sequence) => sequence.length > 0);
   return {
     tenantId,
+    receivedAt: message.canonicalReceivedAt === undefined
+      ? message.receivedAt
+      : message.canonicalReceivedAt,
     messageId,
-    inReplyTo: normalizeMessageId(message.inReplyTo),
-    references: (message.references ?? []).flatMap((reference) => {
-      const normalized = normalizeMessageId(reference);
-      return normalized ? [normalized] : [];
-    }),
+    inReplyTo: inReplyTo.length > 0 ? inReplyTo.join(" ") : null,
+    references,
+    ...(referenceSequences ? { referenceSequences } : {}),
+    ...(message.providerConversationId ? { providerConversationId: message.providerConversationId } : {}),
     location: {
       accountId: message.ref.accountId,
       provider,
@@ -50,7 +69,7 @@ export interface ProviderLocationMove {
 }
 
 export interface MailboxPage {
-  messages: MessageSummary[];
+  messages: ProviderMessageSummary[];
   complete: boolean;
 }
 
@@ -61,9 +80,9 @@ export interface MailProvider {
   renameFolder(accountId: string, path: string, name: string): Promise<void>;
   deleteFolder(accountId: string, path: string): Promise<void>;
   listMessagePage(accountId: string, mailbox: string, limit: number): Promise<MailboxPage>;
-  listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]>;
-  readMessages(accountId: string, references: MessageRef[]): Promise<MessageDetail[]>;
-  searchMessages(accountId: string, mailbox: string, query: string, limit: number): Promise<MessageSummary[]>;
+  listMessages(accountId: string, mailbox: string, limit: number): Promise<ProviderMessageSummary[]>;
+  readMessages(accountId: string, references: MessageRef[]): Promise<ProviderMessageDetail[]>;
+  searchMessages(accountId: string, mailbox: string, query: string, limit: number): Promise<ProviderMessageSummary[]>;
   revalidate(reference: MessageRef): Promise<boolean>;
   apply(reference: MessageRef, action: TriageAction): Promise<AppliedMailAction>;
   undo(applied: AppliedMailAction): Promise<ProviderLocationMove | null>;

@@ -55,6 +55,7 @@ const messageRef: MessageRef = {
 const message: CanonicalMessageSummary = {
   canonicalId: "canonical-message-1",
   canonicalAliases: [],
+  conversationId: "conversation-1",
   ref: messageRef,
   messageId: "message-1@example.test",
   subject: "Untrusted message subject",
