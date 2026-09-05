@@ -2,9 +2,10 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 import {
   createFolderInputSchema,
   createAccountInputSchema,
+  canonicalMessageSummarySchema,
   deleteFolderInputSchema,
   directActionInputSchema,
-  messageSummarySchema,
+  messageRefSchema,
   renameFolderInputSchema,
   sendMessageInputSchema,
   type Account,
@@ -212,7 +213,7 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
       sort: "oldest",
     });
   });
-  expect(searchResult).toEqual([messageSummarySchema.parse(message)]);
+  expect(searchResult).toEqual([canonicalMessageSummarySchema.parse(message)]);
   expect(lastMessageQuery).toBe("quarterly planning");
   await expect(page.getByLabel("Search messages")).toHaveValue("quarterly planning");
   await expect(page.getByRole("button", { name: "Unread", exact: true }).first()).toHaveAttribute("aria-pressed", "true");
@@ -417,6 +418,149 @@ test("keyboard shortcuts open, move through and archive mail", async ({ page }) 
   await expect(page.locator(".side")).toBeVisible();
   await page.keyboard.press("/");
   await expect(page.getByLabel("Search messages")).toBeFocused();
+});
+
+test("refreshes an open canonical message when its provider representative changes", async ({ page }) => {
+  const secondAccount: Account = { id: "account-second", name: "Second", email: "second@example.com", kind: "imap" };
+  const oldMessage: MessageDetail = {
+    ...message,
+    canonicalId: "fallback-canonical",
+    canonicalAliases: [],
+    subject: "Old representative",
+    text: "Detail from the old representative",
+    html: null,
+  };
+  const newMessage: MessageDetail = {
+    ...oldMessage,
+    canonicalId: "surviving-canonical",
+    canonicalAliases: ["fallback-canonical"],
+    ref: { accountId: secondAccount.id, mailbox: "Second Inbox", uidValidity: "55", uid: 90, modseq: "12" },
+    subject: "New representative",
+    text: "Detail from the new representative",
+    read: true,
+  };
+  const actionCalls: Array<{ accountId: string; uid: number; action: string }> = [];
+  let useNewRepresentative = false;
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account, secondAccount]);
+    if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
+    if (request.method() === "GET" && url.pathname.endsWith("/folders")) {
+      const isSecond = url.pathname.includes(secondAccount.id);
+      return json(route, isSecond
+        ? [
+          { path: "Second Inbox", name: "Second Inbox", specialUse: "inbox", unread: 0, total: 1 },
+          { path: "Second Archive", name: "Second Archive", specialUse: "archive", unread: 0, total: 0 },
+        ]
+        : [
+          { path: "INBOX", name: "Inbox", specialUse: "inbox", unread: 1, total: 1 },
+          { path: "Old Archive", name: "Old Archive", specialUse: "archive", unread: 0, total: 0 },
+        ]);
+    }
+    if (request.method() === "GET" && url.pathname.endsWith("/messages")) {
+      const isSecond = url.pathname.includes(secondAccount.id);
+      return json(route, useNewRepresentative === isSecond ? [isSecond ? newMessage : oldMessage] : []);
+    }
+    if (request.method() === "POST" && url.pathname === "/api/messages/read") {
+      const body: unknown = request.postDataJSON();
+      const parsed = messageRefSchema.array().parse(
+        typeof body === "object" && body !== null && "references" in body ? body.references : [],
+      );
+      return json(route, [parsed[0]?.accountId === secondAccount.id ? newMessage : oldMessage]);
+    }
+    if (request.method() === "POST" && url.pathname === "/api/messages/actions") {
+      const input = directActionInputSchema.parse(request.postDataJSON());
+      const item = input.items[0]!;
+      actionCalls.push({ accountId: input.accountId, uid: item.message.uid, action: item.action.type });
+      useNewRepresentative = true;
+      return json(route, {
+        id: `batch-${actionCalls.length}`, proposalId: "direct", accountId: input.accountId, status: "applied",
+        operations: input.items.map((entry, index) => ({ itemId: `item-${index}`, message: entry.message, action: entry.action, status: "applied", error: null })),
+        createdAt: "2026-09-05T10:00:00.000Z", updatedAt: "2026-09-05T10:00:00.000Z",
+      });
+    }
+    if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
+    return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
+  });
+
+  await page.goto("/");
+  await page.getByText(oldMessage.subject, { exact: true }).click();
+  await expect(page.getByText(oldMessage.text, { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Mark read", exact: true }).click();
+
+  await expect(page.getByRole("heading", { name: newMessage.subject })).toBeVisible();
+  await expect(page.getByText(newMessage.text, { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Move message to").getByRole("option", { name: "Second Archive" })).toHaveCount(1);
+  await expect(page.getByLabel("Move message to").getByRole("option", { name: "Old Archive" })).toHaveCount(0);
+  await page.getByLabel("Move message to").selectOption("Second Archive");
+  await expect.poll(() => actionCalls).toEqual([
+    { accountId: account.id, uid: oldMessage.ref.uid, action: "mark_read" },
+    { accountId: secondAccount.id, uid: newMessage.ref.uid, action: "move" },
+  ]);
+});
+
+test("keeps a selected fallback identity attached to its surviving canonical summary", async ({ page }) => {
+  const secondAccount: Account = { id: "account-selected-second", name: "Selected second", email: "selected@example.com", kind: "imap" };
+  const fallback: MessageDetail = { ...message, canonicalId: "selected-fallback", canonicalAliases: [], subject: "Selected fallback", html: null };
+  const survivor: MessageDetail = {
+    ...fallback,
+    canonicalId: "selected-survivor",
+    canonicalAliases: ["selected-fallback"],
+    ref: { accountId: secondAccount.id, mailbox: "INBOX", uidValidity: "2", uid: 72, modseq: "3" },
+    subject: "Selected survivor",
+  };
+  const actionAccounts: string[] = [];
+  let useSurvivor = false;
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account, secondAccount]);
+    if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
+    if (request.method() === "GET" && url.pathname.endsWith("/folders")) {
+      return json(route, [{ path: "INBOX", name: "Inbox", specialUse: "inbox", unread: 1, total: 1 }]);
+    }
+    if (request.method() === "GET" && url.pathname.endsWith("/messages")) {
+      const isSecond = url.pathname.includes(secondAccount.id);
+      return json(route, useSurvivor === isSecond ? [isSecond ? survivor : fallback] : []);
+    }
+    if (request.method() === "POST" && url.pathname === "/api/messages/send") {
+      useSurvivor = true;
+      return json(route, {
+        id: "sent-refresh", accountId: account.id, messageId: "sent-refresh@example.com",
+        accepted: ["refresh@example.com"], rejected: [], submittedAt: "2026-09-05T10:00:00.000Z",
+      });
+    }
+    if (request.method() === "POST" && url.pathname === "/api/messages/actions") {
+      const input = directActionInputSchema.parse(request.postDataJSON());
+      actionAccounts.push(input.accountId);
+      return json(route, {
+        id: "selected-batch", proposalId: "direct", accountId: input.accountId, status: "applied",
+        operations: input.items.map((entry, index) => ({ itemId: `item-${index}`, message: entry.message, action: entry.action, status: "applied", error: null })),
+        createdAt: "2026-09-05T10:00:00.000Z", updatedAt: "2026-09-05T10:00:00.000Z",
+      });
+    }
+    if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
+    return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: new RegExp(fallback.subject) }).click({ modifiers: ["Meta"] });
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "New message" }).click();
+  await page.getByLabel("To", { exact: true }).fill("refresh@example.com");
+  await page.getByLabel("Message", { exact: true }).fill("Refresh selected canonical identity.");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.getByRole("button", { name: "Done" }).click();
+
+  await expect(page.getByText(survivor.subject, { exact: true })).toBeVisible();
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Mark read", exact: true }).click();
+  await expect.poll(() => actionAccounts).toEqual([secondAccount.id]);
 });
 
 test("shows and selects a newly connected account without a reload", async ({ page }) => {

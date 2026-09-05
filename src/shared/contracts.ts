@@ -62,6 +62,7 @@ export const messageAddressSchema = z.object({
 
 export const messageSummarySchema = z.object({
   canonicalId: z.string().min(1).optional(),
+  canonicalAliases: z.array(z.string().min(1)).optional(),
   ref: messageRefSchema,
   messageId: z.string(),
   inReplyTo: z.string().nullable().optional(),
@@ -77,7 +78,9 @@ export const messageSummarySchema = z.object({
   flagged: z.boolean(),
 });
 
-export const canonicalMessageSummarySchema = messageSummarySchema.required({ canonicalId: true });
+export const canonicalMessageSummarySchema = messageSummarySchema.required({ canonicalId: true }).extend({
+  canonicalAliases: z.array(z.string().min(1)).default([]),
+});
 
 export const mailProviderKindSchema = z.enum(["imap", "gmail"]);
 
@@ -101,6 +104,7 @@ export const canonicalMessageObservationSchema = z.object({
 
 export const canonicalMessageSchema = z.object({
   id: z.string().min(1),
+  aliases: z.array(z.string().min(1)),
   tenantId: z.string().min(1),
   messageId: z.string().nullable(),
   inReplyTo: z.string().nullable(),

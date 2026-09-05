@@ -241,6 +241,13 @@ export class Store {
             this.#sqlite.query(
               "UPDATE message_locations SET message_id = ? WHERE tenant_id = ? AND message_id = ?",
             ).run(canonical.id, value.tenantId, fallback.id);
+            this.#sqlite.query(
+              "UPDATE message_aliases SET message_id = ? WHERE tenant_id = ? AND message_id = ?",
+            ).run(canonical.id, value.tenantId, fallback.id);
+            this.#sqlite.query(`
+              INSERT INTO message_aliases (alias_id, tenant_id, message_id, created_at)
+              VALUES (?, ?, ?, ?)
+            `).run(fallback.id, value.tenantId, canonical.id, now);
             this.#sqlite.query("DELETE FROM messages WHERE tenant_id = ? AND id = ?")
               .run(value.tenantId, fallback.id);
           }
@@ -314,15 +321,29 @@ export class Store {
   }
 
   async listMessageLocations(tenantId: string, messageId: string): Promise<StoredMessageLocation[]> {
+    const message = this.#getMessage(tenantId, messageId);
+    if (!message) return [];
     const rows = this.#sqlite.query("SELECT * FROM message_locations WHERE tenant_id = ? AND message_id = ? ORDER BY account_id, mailbox, id")
-      .all(tenantId, messageId) as LocationRow[];
+      .all(tenantId, message.id) as LocationRow[];
     return rows.map(toStoredLocation);
   }
 
   #getMessage(tenantId: string, id: string): CanonicalMessage | null {
-    const row = this.#sqlite.query("SELECT * FROM messages WHERE tenant_id = ? AND id = ?").get(tenantId, id) as MessageRow | null;
+    const row = this.#sqlite.query(`
+      SELECT message.*
+      FROM messages message
+      LEFT JOIN message_aliases alias
+        ON alias.tenant_id = message.tenant_id AND alias.message_id = message.id
+      WHERE message.tenant_id = ? AND (message.id = ? OR alias.alias_id = ?)
+      LIMIT 1
+    `).get(tenantId, id, id) as MessageRow | null;
+    const aliases = row
+      ? this.#sqlite.query("SELECT alias_id FROM message_aliases WHERE tenant_id = ? AND message_id = ? ORDER BY created_at, alias_id")
+        .all(tenantId, row.id) as Array<{ alias_id: string }>
+      : [];
     return row ? {
-      id: row.id, tenantId: row.tenant_id, messageId: row.message_id, inReplyTo: row.in_reply_to,
+      id: row.id, aliases: aliases.map(({ alias_id }) => alias_id), tenantId: row.tenant_id,
+      messageId: row.message_id, inReplyTo: row.in_reply_to,
       references: JSON.parse(row.references) as string[], createdAt: row.created_at, updatedAt: row.updated_at,
     } : null;
   }
@@ -386,6 +407,15 @@ export class Store {
         UNIQUE (tenant_id, identity_key),
         UNIQUE (tenant_id, id)
       );
+      CREATE UNIQUE INDEX IF NOT EXISTS messages_tenant_id_id_unique ON messages(tenant_id, id);
+      CREATE TABLE IF NOT EXISTS message_aliases (
+        alias_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, alias_id),
+        FOREIGN KEY (tenant_id, message_id) REFERENCES messages(tenant_id, id)
+      );
       CREATE TABLE IF NOT EXISTS message_locations (
         id TEXT PRIMARY KEY NOT NULL,
         message_id TEXT NOT NULL,
@@ -407,6 +437,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS proposals_account_id_idx ON proposals(account_id);
       CREATE INDEX IF NOT EXISTS batches_account_id_idx ON operation_batches(account_id);
       CREATE INDEX IF NOT EXISTS message_locations_message_id_idx ON message_locations(message_id);
+      CREATE INDEX IF NOT EXISTS message_aliases_message_id_idx ON message_aliases(message_id);
     `);
     this.#migrateMessageLocationTenantForeignKey();
     const accountsTable = this.#sqlite.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
@@ -491,13 +522,9 @@ export class Store {
           INSERT INTO message_locations_with_tenant_fk
             (id, message_id, tenant_id, account_id, provider, mailbox, location_key,
               uid_validity, uid, modseq, provider_id, read, flagged, observed_at)
-          SELECT location.id, location.message_id, location.tenant_id, location.account_id,
-            location.provider, location.mailbox, location.location_key, location.uid_validity,
-            location.uid, location.modseq, location.provider_id, location.read,
-            location.flagged, location.observed_at
-          FROM message_locations location
-          INNER JOIN messages message
-            ON message.id = location.message_id AND message.tenant_id = location.tenant_id;
+          SELECT id, message_id, tenant_id, account_id, provider, mailbox, location_key,
+            uid_validity, uid, modseq, provider_id, read, flagged, observed_at
+          FROM message_locations;
           DROP TABLE message_locations;
           ALTER TABLE message_locations_with_tenant_fk RENAME TO message_locations;
           INSERT OR IGNORE INTO schema_migrations (version, applied_at)

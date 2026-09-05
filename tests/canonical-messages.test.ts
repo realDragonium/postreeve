@@ -252,11 +252,48 @@ describe("canonical message persistence", () => {
     });
 
     expect(merged!.id).toBe(canonical!.id);
-    expect(await store.getMessage("tenant-a", fallback!.id)).toBeNull();
+    expect(await store.getMessage("tenant-a", fallback!.id)).toEqual(merged!);
+    expect(merged!.aliases).toEqual([fallback!.id]);
+    expect(await store.getMessage("tenant-b", fallback!.id)).toBeNull();
+    expect(await store.listMessageLocations("tenant-a", fallback!.id))
+      .toEqual(await store.listMessageLocations("tenant-a", canonical!.id));
     expect((await store.listMessageLocations("tenant-a", canonical!.id)).map(({ mailbox }) => mailbox))
       .toEqual(["Archive", "INBOX", "INBOX"]);
     expect(merged!.inReplyTo).toBe(gmailFallback.inReplyTo);
     expect(merged!.references).toEqual(gmailFallback.references);
+  });
+
+  test("keeps every exposed fallback identity resolvable after repeated merges", async () => {
+    const store = await createStore();
+    const base = observation();
+    const [canonical] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [base], authoritative: true,
+    });
+    const firstMissing = observation({
+      messageId: null,
+      location: { ...base.location, accountId: "gmail-account", provider: "gmail", providerId: "gmail-first" },
+    });
+    const secondMissing = observation({
+      messageId: null,
+      location: { ...base.location, accountId: "gmail-account", provider: "gmail", providerId: "gmail-second", uid: 43 },
+    });
+    const fallbacks = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
+      observations: [firstMissing, secondMissing], authoritative: true,
+    });
+
+    for (const missing of [firstMissing, secondMissing]) {
+      await store.reconcileMailbox({
+        tenantId: "tenant-a", accountId: "gmail-account", provider: "gmail", mailbox: "INBOX",
+        observations: [{ ...missing, messageId: base.messageId }], authoritative: false,
+      });
+    }
+
+    const survivor = await store.getMessage("tenant-a", canonical!.id);
+    expect(new Set(survivor!.aliases)).toEqual(new Set(fallbacks.map(({ id }) => id)));
+    for (const fallback of fallbacks) expect(await store.getMessage("tenant-a", fallback.id)).toEqual(survivor);
+    expect(await store.listMessageLocations("tenant-a", canonical!.id)).toHaveLength(3);
   });
 
   test("retains threading metadata when an ordinary duplicate omits it", async () => {

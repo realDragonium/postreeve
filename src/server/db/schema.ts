@@ -1,4 +1,4 @@
-import { foreignKey, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { foreignKey, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import type {
   OperationResult,
   ProposalItem,
@@ -61,6 +61,20 @@ export const messages = sqliteTable("messages", {
 }, (table) => [
   uniqueIndex("messages_tenant_id_id_unique").on(table.tenantId, table.id),
   uniqueIndex("messages_tenant_id_identity_key_unique").on(table.tenantId, table.identityKey),
+]);
+
+export const messageAliases = sqliteTable("message_aliases", {
+  aliasId: text("alias_id").notNull(),
+  tenantId: text("tenant_id").notNull(),
+  messageId: text("message_id").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.tenantId, table.aliasId] }),
+  foreignKey({
+    columns: [table.tenantId, table.messageId],
+    foreignColumns: [messages.tenantId, messages.id],
+  }),
+  index("message_aliases_message_id_idx").on(table.messageId),
 ]);
 
 export const messageLocations = sqliteTable("message_locations", {

@@ -4,7 +4,9 @@ import {
   countLine,
   filterMessages,
   mergeMessages,
+  messageIsSelected,
   messageKey,
+  messageMatchesKey,
   scopeSources,
   senderName,
   sortMessages,
@@ -99,6 +101,89 @@ describe("mergeMessages", () => {
     });
 
     expect(messageKey(after)).toBe(messageKey(before));
+  });
+
+  test("recognizes an exposed fallback ID on the surviving canonical summary", () => {
+    const survivor = message({
+      uid: 8,
+      canonicalId: "canonical-survivor",
+      canonicalAliases: ["canonical-fallback"],
+    });
+
+    expect(messageMatchesKey(survivor, "canonical-fallback")).toBe(true);
+    expect(messageIsSelected(survivor, new Set(["canonical-fallback"]))).toBe(true);
+  });
+
+  test("replaces a stale fallback summary when its survivor arrives", () => {
+    const fallback = message({ uid: 1, canonicalId: "canonical-fallback" });
+    const survivor = message({
+      uid: 8,
+      canonicalId: "canonical-survivor",
+      canonicalAliases: ["canonical-fallback"],
+    });
+
+    expect(mergeMessages([[fallback], [survivor]])).toEqual([survivor]);
+    expect(mergeMessages([[survivor], [fallback]])).toEqual([survivor]);
+  });
+
+  test("retains aliases learned by a later summary with the same canonical ID", () => {
+    const first = message({ uid: 1, canonicalId: "canonical-survivor" });
+    const richer = message({
+      uid: 8,
+      canonicalId: "canonical-survivor",
+      canonicalAliases: ["canonical-fallback"],
+    });
+
+    const [merged] = mergeMessages([[first], [richer]]);
+    expect(merged).toMatchObject({
+      ref: first.ref,
+      canonicalId: "canonical-survivor",
+      canonicalAliases: ["canonical-fallback"],
+    });
+    expect(messageMatchesKey(merged!, "canonical-fallback")).toBe(true);
+    expect(messageIsSelected(merged!, new Set(["canonical-fallback"]))).toBe(true);
+  });
+
+  test("uses a bridge to collapse existing groups under the coherent representative", () => {
+    const fallback = message({ uid: 1, canonicalId: "canonical-fallback" });
+    const canonical = message({ uid: 2, canonicalId: "canonical-survivor" });
+    const bridge = message({
+      uid: 3,
+      canonicalId: "canonical-survivor",
+      canonicalAliases: ["canonical-fallback"],
+    });
+
+    for (const input of [
+      [fallback, canonical, bridge],
+      [canonical, fallback, bridge],
+      [bridge, fallback, canonical],
+    ]) {
+      const [merged] = mergeMessages([input]);
+      expect(mergeMessages([input])).toHaveLength(1);
+      expect(merged).toMatchObject({
+        canonicalId: "canonical-survivor",
+        canonicalAliases: ["canonical-fallback"],
+      });
+      expect(messageKey(merged!)).toBe("canonical-survivor");
+      expect(messageIsSelected(merged!, new Set(["canonical-fallback"]))).toBe(true);
+    }
+  });
+
+  test("collapses transitive aliases regardless of link order", () => {
+    const fallback = message({ uid: 1, canonicalId: "fallback" });
+    const middle = message({ uid: 2, canonicalId: "middle", canonicalAliases: ["fallback"] });
+    const survivor = message({ uid: 3, canonicalId: "survivor", canonicalAliases: ["middle"] });
+
+    for (const input of [
+      [fallback, middle, survivor],
+      [survivor, middle, fallback],
+      [middle, fallback, survivor],
+    ]) {
+      const [merged] = mergeMessages([input]);
+      expect(mergeMessages([input])).toHaveLength(1);
+      expect(messageKey(merged!)).toBe("survivor");
+      expect(new Set(merged!.canonicalAliases)).toEqual(new Set(["fallback", "middle"]));
+    }
   });
 
   test("falls back to the exact provider location before persistence", () => {

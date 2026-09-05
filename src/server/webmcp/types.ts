@@ -1,5 +1,6 @@
 import type {
   Account,
+  CanonicalMessageSummary,
   CreateFolderInput,
   DeleteFolderInput,
   DirectActionInput,
@@ -7,7 +8,6 @@ import type {
   ListMessagesInput,
   MessageDetail,
   MessageRef,
-  MessageSummary,
   OperationBatch,
   RenameFolderInput,
   SendMessageInput,
@@ -20,9 +20,9 @@ export interface WebMcpServices {
   createFolder(input: CreateFolderInput, signal: AbortSignal): Promise<readonly Folder[]>;
   renameFolder(input: RenameFolderInput, signal: AbortSignal): Promise<readonly Folder[]>;
   deleteFolder(input: DeleteFolderInput, signal: AbortSignal): Promise<readonly Folder[]>;
-  listMessages(input: WebMcpListMessagesInput, signal: AbortSignal): Promise<readonly MessageSummary[]>;
+  listMessages(input: WebMcpListMessagesInput, signal: AbortSignal): Promise<readonly CanonicalMessageSummary[]>;
   readMessages(messages: readonly MessageRef[], signal: AbortSignal): Promise<readonly MessageDetail[]>;
-  searchMessages(input: WebMcpSearchMessagesInput, signal: AbortSignal): Promise<readonly MessageSummary[]>;
+  searchMessages(input: WebMcpSearchMessagesInput, signal: AbortSignal): Promise<readonly CanonicalMessageSummary[]>;
   sendMessage(input: SendMessageInput, signal: AbortSignal): Promise<SendReceipt>;
   applyMessageActions(input: DirectActionInput, signal: AbortSignal): Promise<OperationBatch>;
   listActivity(accountId: string, signal: AbortSignal): Promise<readonly OperationBatch[]>;
@@ -44,7 +44,7 @@ export interface WebMcpSearchMessagesInput extends WebMcpListMessagesInput {
 
 export interface WebMcpMailboxView extends WebMcpListMessagesInput {
   readonly query: string;
-  readonly messages: readonly MessageSummary[];
+  readonly messages: readonly CanonicalMessageSummary[];
 }
 
 export interface WebMcpToolAnnotations {

@@ -174,4 +174,54 @@ describe("Store migrations", () => {
       .toEqual([["message_id", "id"]]);
     rolledBack.close();
   });
+
+  test("preserves a legacy tenant-mismatched location when the canonical rebuild rolls back", () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const old = new Database(path, { create: true });
+    old.exec(`
+      CREATE TABLE accounts (
+        id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, email TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('imap', 'gmail')), encrypted_credentials TEXT, created_at TEXT NOT NULL
+      );
+      CREATE TABLE messages (
+        id TEXT PRIMARY KEY NOT NULL, tenant_id TEXT NOT NULL, identity_key TEXT NOT NULL,
+        message_id TEXT, in_reply_to TEXT, "references" TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE (tenant_id, identity_key)
+      );
+      CREATE TABLE message_locations (
+        id TEXT PRIMARY KEY NOT NULL, message_id TEXT NOT NULL REFERENCES messages(id), tenant_id TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES accounts(id), provider TEXT NOT NULL, mailbox TEXT NOT NULL,
+        location_key TEXT NOT NULL, uid_validity TEXT NOT NULL, uid INTEGER NOT NULL, modseq TEXT,
+        provider_id TEXT, read INTEGER NOT NULL, flagged INTEGER NOT NULL, observed_at TEXT NOT NULL,
+        UNIQUE (tenant_id, account_id, provider, mailbox, location_key)
+      );
+      INSERT INTO accounts VALUES
+        ('account', 'Work', 'person@example.test', 'imap', NULL, '2026-09-03T00:00:00.000Z');
+      INSERT INTO messages VALUES
+        ('message', 'tenant-a', 'message-id:<one@example.test>', '<one@example.test>', NULL, '[]',
+          '2026-09-03T00:00:00.000Z', '2026-09-03T00:00:00.000Z');
+      INSERT INTO message_locations VALUES
+        ('wrong-tenant-location', 'message', 'tenant-b', 'account', 'imap', 'Archive', 'imap:Archive:2:9',
+          '2', 9, '11', 'provider-location', 1, 1, '2026-09-03T00:02:00.000Z');
+    `);
+    const originalLocation = old.query("SELECT * FROM message_locations").get();
+    const originalTable = old.query(`
+      SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'message_locations'
+    `).get();
+    old.close();
+
+    expect(() => new Store(path)).toThrow("Canonical message migration left invalid foreign keys");
+
+    const rolledBack = new Database(path);
+    expect(rolledBack.query("SELECT * FROM message_locations").get()).toEqual(originalLocation);
+    expect(rolledBack.query(`
+      SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'message_locations'
+    `).get()).toEqual(originalTable);
+    expect(rolledBack.query("SELECT version FROM schema_migrations WHERE version = 476").get()).toBeNull();
+    expect(rolledBack.query(`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'message_locations_with_tenant_fk'
+    `).get()).toBeNull();
+    rolledBack.close();
+  });
 });

@@ -73,6 +73,18 @@ export function messageKey(message: MessageSummary): string {
   return message.canonicalId ?? `${message.ref.accountId}:${message.ref.mailbox}:${message.ref.uidValidity}:${message.ref.uid}`;
 }
 
+export function messageIdentityKeys(message: MessageSummary): readonly string[] {
+  return [messageKey(message), ...(message.canonicalAliases ?? [])];
+}
+
+export function messageMatchesKey(message: MessageSummary, key: string | null): boolean {
+  return key !== null && messageIdentityKeys(message).includes(key);
+}
+
+export function messageIsSelected(message: MessageSummary, selected: ReadonlySet<string>): boolean {
+  return messageIdentityKeys(message).some((key) => selected.has(key));
+}
+
 export function senderName(message: MessageSummary): string {
   const first = message.from[0];
   return first?.name || first?.address || "Unknown sender";
@@ -92,17 +104,53 @@ export function sortMessages(messages: readonly MessageSummary[], sort: MessageS
   return sorted.sort((left, right) => right.receivedAt.localeCompare(left.receivedAt));
 }
 
-/** Merges per-account result sets into one list, dropping canonical messages seen twice. */
-export function mergeMessages(lists: readonly (readonly MessageSummary[])[]): MessageSummary[] {
-  const seen = new Set<string>();
-  const merged: MessageSummary[] = [];
-  for (const message of lists.flat()) {
-    const key = messageKey(message);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    merged.push(message);
+interface MessageIdentityGroup {
+  readonly message: MessageSummary;
+  readonly identities: ReadonlySet<string>;
+}
+
+function mergeIdentityGroups(
+  groups: readonly MessageIdentityGroup[],
+  message: MessageSummary,
+): MessageIdentityGroup[] {
+  const incomingIdentities = messageIdentityKeys(message);
+  const matched = groups
+    .map((group, index) => incomingIdentities.some((identity) => group.identities.has(identity)) ? index : -1)
+    .filter((index) => index >= 0);
+  if (matched.length === 0) {
+    return [...groups, { message, identities: new Set(incomingIdentities) }];
   }
-  return merged;
+
+  const identities = new Set<string>();
+  const candidates: MessageSummary[] = [];
+  for (const index of matched) {
+    const group = groups[index]!;
+    for (const identity of group.identities) identities.add(identity);
+    candidates.push(group.message);
+  }
+  for (const identity of incomingIdentities) identities.add(identity);
+  candidates.push(message);
+
+  const aliases = new Set(candidates.flatMap((candidate) => candidate.canonicalAliases ?? []));
+  const representative = candidates.find((candidate) => !aliases.has(messageKey(candidate))) ?? candidates[0]!;
+  const canonicalAliases = [...identities].filter((identity) => identity !== messageKey(representative));
+  const currentAliases = representative.canonicalAliases ?? [];
+  const coherentRepresentative = currentAliases.length === canonicalAliases.length
+      && currentAliases.every((alias, index) => alias === canonicalAliases[index])
+    ? representative
+    : { ...representative, canonicalAliases };
+
+  const first = matched[0]!;
+  const matchedSet = new Set(matched);
+  return groups.flatMap((group, index) => {
+    if (index === first) return [{ message: coherentRepresentative, identities }];
+    return matchedSet.has(index) ? [] : [group];
+  });
+}
+
+/** Merges per-account results by every known canonical identity and alias. */
+export function mergeMessages(lists: readonly (readonly MessageSummary[])[]): MessageSummary[] {
+  return lists.flat().reduce<MessageIdentityGroup[]>(mergeIdentityGroups, []).map(({ message }) => message);
 }
 
 export function countLine(

@@ -13,7 +13,10 @@ import { SettingsView, settingsSections, type SettingsSection } from "./Settings
 import { AccountSetup, ComposeModal, DraftsSheet, FolderSheet, IdentitySheet, type ComposeIntent } from "./panels";
 import {
   countLine,
+  messageIdentityKeys,
+  messageIsSelected,
   messageKey,
+  messageMatchesKey,
   mergeMessages,
   filterMessages,
   scopeSources,
@@ -164,9 +167,9 @@ function App() {
   const messagesError = messageResults.find((result) => result.error)?.error?.message ?? null;
   const busy = messageResults.some((result) => result.isFetching);
 
-  const openMessage = messages.find((message) => messageKey(message) === openKey) ?? null;
+  const openMessage = messages.find((message) => messageMatchesKey(message, openKey)) ?? null;
   const detailQuery = useQuery({
-    queryKey: ["message", openKey],
+    queryKey: ["message", openKey, openMessage?.ref],
     queryFn: async () => (await api.readMessages(openMessage ? [openMessage.ref] : []))[0] ?? null,
     enabled: Boolean(openMessage),
   });
@@ -254,7 +257,7 @@ function App() {
   }
 
   function targetsFor(fallback: MessageSummary | undefined): MessageSummary[] {
-    const chosen = messages.filter((message) => selected.has(messageKey(message)));
+    const chosen = messages.filter((message) => messageIsSelected(message, selected));
     return chosen.length ? chosen : fallback ? [fallback] : [];
   }
 
@@ -265,7 +268,7 @@ function App() {
 
   function openRow(message: MessageSummary): void {
     setOpenKey(messageKey(message));
-    setFocus(messages.findIndex((candidate) => messageKey(candidate) === messageKey(message)));
+    setFocus(messages.findIndex((candidate) => messageMatchesKey(candidate, messageKey(message))));
     setSelected(new Set());
   }
 
@@ -394,8 +397,9 @@ function App() {
         const key = messageKey(current);
         setSelected((currentSelection) => {
           const next = new Set(currentSelection);
-          if (next.has(key)) next.delete(key);
-          else next.add(key);
+          if (messageIsSelected(current, next)) {
+            for (const identity of messageIdentityKeys(current)) next.delete(identity);
+          } else next.add(key);
           return next;
         });
       }
@@ -518,7 +522,7 @@ function App() {
               onOpen={openRow}
               onSelect={(message, modifiers) => {
                 const key = messageKey(message);
-                const index = messages.findIndex((candidate) => messageKey(candidate) === key);
+                const index = messages.findIndex((candidate) => messageMatchesKey(candidate, key));
                 if (modifiers.range) {
                   const [from, to] = [Math.min(focus, index), Math.max(focus, index)];
                   setSelected(new Set(messages.slice(from, to + 1).map(messageKey)));
@@ -527,8 +531,9 @@ function App() {
                 setFocus(index);
                 setSelected((current) => {
                   const next = new Set(current);
-                  if (next.has(key)) next.delete(key);
-                  else next.add(key);
+                  if (messageIsSelected(message, next)) {
+                    for (const identity of messageIdentityKeys(message)) next.delete(identity);
+                  } else next.add(key);
                   return next;
                 });
               }}
