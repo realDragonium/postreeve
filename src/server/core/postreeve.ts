@@ -468,7 +468,15 @@ export class PostreeveService {
   async #recordProviderMove(accountId: string, move: ProviderLocationMove): Promise<string | null> {
     try {
       const account = await this.#requireAccount(accountId);
-      await this.#store.recordProviderMove(this.#context.tenantId, account.kind, move.previous, move.current);
+      const retained = await this.#store.recordProviderMove(
+        this.#context.tenantId,
+        account.kind,
+        move.previous,
+        move.current,
+      );
+      if (!retained) {
+        return "Provider action succeeded, but local message identity could not be retained: source identity is unknown";
+      }
       return null;
     } catch (error) {
       return `Provider action succeeded, but local message identity could not be retained: ${errorMessage(error)}`;

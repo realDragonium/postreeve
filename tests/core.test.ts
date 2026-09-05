@@ -288,6 +288,31 @@ describe("Postreeve core workflow", () => {
     store.close();
   });
 
+  test("warns without losing provider success or undoability when a move source is unknown", async () => {
+    const { store, service, account, messages } = await createTestHarness({ missingMessageId: true });
+    store.recordProviderMove = async () => false;
+    const message = messages[0]!;
+    const batch = await service.applyDirectActions({
+      accountId: account.id,
+      items: [{
+        message: message.ref,
+        subject: message.subject,
+        action: { type: "move", destination: "Archive" },
+      }],
+    });
+
+    expect(batch.status).toBe("applied");
+    expect(batch.operations[0]).toMatchObject({ status: "applied" });
+    expect(batch.operations[0]?.error).toContain("source identity is unknown");
+    const undone = await service.undoBatch(batch.id);
+    expect(undone.status).toBe("undone");
+    expect(undone.operations[0]).toMatchObject({ status: "undone" });
+    expect(undone.operations[0]?.error).toContain("source identity is unknown");
+    const restored = await service.listMessages({ accountId: account.id, mailbox: "INBOX", limit: 50 });
+    expect(restored.some(({ subject }) => subject === message.subject)).toBe(true);
+    store.close();
+  });
+
   test("sends from the selected account without crossing account boundaries", async () => {
     const { store, service, account, sent } = await createTestHarness();
     const receipt = await service.sendMessage({
