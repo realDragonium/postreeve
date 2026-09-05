@@ -1077,7 +1077,7 @@ test("normalizes modern and obsolete RFC 5322 Message-ID lexical forms", () => {
   const control = String.fromCharCode(1);
   expect(normalizeMessageId("<foo . bar@example.test>")).toBe("<foo.bar@example.test>");
   expect(normalizeMessageId("<foo@(comment) example.test>")).toBe("<foo@example.test>");
-  expect(normalizeMessageId('<"foo".bar@example.test>')).toBe('<"foo".bar@example.test>');
+  expect(normalizeMessageId('<"foo".bar@example.test>')).toBe("<foo.bar@example.test>");
   expect(normalizeMessageId("(outer (nested\\) comment)) <foo(comment).bar@(domain)Example.(part)Test>"))
     .toBe("<foo.bar@example.test>");
   expect(normalizeMessageId('<"folded\r\n local"@[IPv6:ABCD\r\n ::1]>'))
@@ -1085,7 +1085,7 @@ test("normalizes modern and obsolete RFC 5322 Message-ID lexical forms", () => {
   expect(normalizeMessageId('<"obsolete \r\n \r\n folding"@Example.Test>'))
     .toBe('<"obsolete   folding"@example.test>');
   expect(normalizeMessageId(`<"quoted\\${control}pair"@[literal${control}text]>`))
-    .toBe(`<"quoted\\${control}pair"@[literal${control}text]>`);
+    .toBe(`<"quoted${control}pair"@[literal\\${control}text]>`);
 
   for (const malformed of [
     "<foo..bar@example.test>",
@@ -1107,6 +1107,31 @@ test("normalizes modern and obsolete RFC 5322 Message-ID lexical forms", () => {
   ]) {
     expect(normalizeMessageId(malformed)).toBeNull();
   }
+});
+
+test("normalizes Message-IDs by decoded RFC semantic content", () => {
+  const control = String.fromCharCode(1);
+  const equivalentGroups = [
+    ['<"ab"@Example.Test>', '<"a\\b"@example.test>', "<ab@example.test>"],
+    ['<"a.b"@example.test>', "<a.b@example.test>", '<"a"."b"@example.test>'],
+    ['<local@[A\\B]>', "<local@[ab]>"],
+    [`<"a${control}b"@example.test>`, `<"a\\${control}b"@example.test>`],
+  ];
+  for (const values of equivalentGroups) {
+    const normalized = values.map(normalizeMessageId);
+    expect(new Set(normalized)).toHaveLength(1);
+    expect(normalizeMessageId(normalized[0]!)).toBe(normalized[0]!);
+  }
+
+  expect(normalizeMessageId('<"a\\"b"@example.test>')).toBe('<"a\\"b"@example.test>');
+  expect(normalizeMessageId('<"a\\\\b"@example.test>')).toBe('<"a\\\\b"@example.test>');
+  expect(normalizeMessageId("<local@[a\\]b]>")).toBe("<local@[a\\]b]>");
+  expect(normalizeMessageId("<local@[a\\\\b]>")).toBe("<local@[a\\\\b]>");
+  expect(normalizeMessageId('<"ab"@example.test>')).not.toBe(normalizeMessageId('<"a b"@example.test>'));
+  expect(normalizeMessageId('<"a\\"b"@example.test>')).not.toBe(normalizeMessageId('<"ab"@example.test>'));
+  expect(normalizeMessageId('<"a\\\\b"@example.test>')).not.toBe(normalizeMessageId('<"ab"@example.test>'));
+  expect(normalizeMessageId("<Ab@example.test>")).not.toBe(normalizeMessageId("<ab@example.test>"));
+  expect(normalizeMessageId("<ab@Example.Test>")).toBe(normalizeMessageId("<ab@example.test>"));
 });
 
 test("parses deeply nested comments without recursion", () => {

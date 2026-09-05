@@ -89,25 +89,25 @@ class Cursor {
       this.index = start;
       return null;
     }
-    let normalized = '"';
+    let content = "";
     this.index += 1;
     while (this.index < this.value.length) {
       const fws = this.consumeFws();
-      if (fws !== null) normalized += fws;
+      if (fws !== null) content += fws;
       const character = this.value[this.index];
       if (character === '"') {
         this.index += 1;
         this.consumeCfws();
-        return `${normalized}"`;
+        return content;
       }
       if (character === "\\") {
-        const pairStart = this.index;
-        if (!this.consumeQuotedPair()) break;
-        normalized += this.value.slice(pairStart, this.index);
+        const escaped = this.consumeQuotedPair();
+        if (escaped === null) break;
+        content += escaped;
         continue;
       }
       if (character !== undefined && isQuotedText(character)) {
-        normalized += character;
+        content += character;
         this.index += 1;
         continue;
       }
@@ -124,25 +124,25 @@ class Cursor {
       this.index = start;
       return null;
     }
-    let normalized = "[";
+    let content = "";
     this.index += 1;
     while (this.index < this.value.length) {
       const fws = this.consumeFws();
-      if (fws !== null) normalized += fws;
+      if (fws !== null) content += fws;
       const character = this.value[this.index];
       if (character === "]") {
         this.index += 1;
         this.consumeCfws();
-        return `${normalized}]`;
+        return content;
       }
       if (character === "\\") {
-        const pairStart = this.index;
-        if (!this.consumeQuotedPair()) break;
-        normalized += this.value.slice(pairStart, this.index);
+        const escaped = this.consumeQuotedPair();
+        if (escaped === null) break;
+        content += escaped;
         continue;
       }
       if (character !== undefined && isDomainText(character)) {
-        normalized += character;
+        content += character;
         this.index += 1;
         continue;
       }
@@ -152,11 +152,11 @@ class Cursor {
     return null;
   }
 
-  private consumeQuotedPair(): boolean {
+  private consumeQuotedPair(): string | null {
     const escaped = this.value[this.index + 1];
-    if (this.value[this.index] !== "\\" || escaped === undefined || escaped.charCodeAt(0) > 127) return false;
+    if (this.value[this.index] !== "\\" || escaped === undefined || escaped.charCodeAt(0) > 127) return null;
     this.index += 2;
-    return true;
+    return escaped;
   }
 }
 
@@ -204,7 +204,7 @@ function consumeWordSequence(cursor: Cursor): string | null {
     }
     words.push(word);
   }
-  return words.join(".");
+  return serializeLocalPart(words.join("."));
 }
 
 function consumeAtomSequence(cursor: Cursor): string | null {
@@ -224,6 +224,22 @@ function consumeAtomSequence(cursor: Cursor): string | null {
   return atoms.join(".");
 }
 
+function serializeLocalPart(content: string): string {
+  if (content.split(".").every((part) => part.length > 0 && [...part].every((character) => atextPattern.test(character)))) {
+    return content;
+  }
+  return `"${[...content].map((character) => isQuotedText(character) || isWsp(character)
+    ? character
+    : `\\${character}`).join("")}"`;
+}
+
+function serializeDomainLiteral(content: string): string {
+  return `[${[...content.toLowerCase()].map((character) =>
+    (isDomainText(character) && !isObsNoWsControl(character.charCodeAt(0))) || isWsp(character)
+      ? character
+      : `\\${character}`).join("")}]`;
+}
+
 function parseMessageId(cursor: Cursor): string | null {
   const start = cursor.index;
   cursor.consumeCfws();
@@ -238,7 +254,8 @@ function parseMessageId(cursor: Cursor): string | null {
     return null;
   }
   cursor.index += 1;
-  const right = cursor.consumeDomainLiteral() ?? consumeAtomSequence(cursor);
+  const literal = cursor.consumeDomainLiteral();
+  const right = literal === null ? consumeAtomSequence(cursor) : serializeDomainLiteral(literal);
   if (right === null || cursor.value[cursor.index] !== ">") {
     cursor.index = start;
     return null;

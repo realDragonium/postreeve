@@ -30,7 +30,11 @@ describe("Store migrations", () => {
         ('parent', 'tenant-a', 'message-id:<parent@example.test>', '<parent@example.test>', NULL, '[]',
           '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z'),
         ('child', 'tenant-a', 'message-id:<child@example.test>', '<child@example.test>', '<parent@example.test>',
-          '["<parent@example.test>"]', '2026-09-01T00:01:00.000Z', '2026-09-01T00:01:00.000Z');
+          '["<parent@example.test>"]', '2026-09-01T00:01:00.000Z', '2026-09-01T00:01:00.000Z'),
+        ('quoted', 'tenant-a', 'message-id:<"legacy"@example.test>', '<"legacy"@example.test>', NULL, '[]',
+          '2026-09-01T00:02:00.000Z', '2026-09-01T00:02:00.000Z'),
+        ('escaped', 'tenant-a', 'message-id:<"l\\egacy"@example.test>', '<"l\\egacy"@example.test>', NULL, '[]',
+          '2026-09-01T00:03:00.000Z', '2026-09-01T00:03:00.000Z');
     `);
     old.close();
 
@@ -39,6 +43,9 @@ describe("Store migrations", () => {
     expect(parent?.receivedAt).toBeNull();
     expect((await migrated.getConversation("tenant-a", parent!.conversationId))?.messages.map(({ messageId }) => messageId))
       .toEqual(["<parent@example.test>", "<child@example.test>"]);
+    expect((await migrated.getMessage("tenant-a", "quoted"))?.id).toBe("quoted");
+    expect((await migrated.getMessage("tenant-a", "escaped"))?.id).toBe("quoted");
+    expect((await migrated.getMessage("tenant-a", "quoted"))?.messageId).toBe("<legacy@example.test>");
     migrated.close();
 
     const inspected = new Database(path);
@@ -781,5 +788,198 @@ describe("Store migrations", () => {
     expect(retried.query("PRAGMA foreign_key_check('message_locations')").all()).toEqual([]);
     expect(retried.query("PRAGMA foreign_key_check('message_provider_associations')").all()).toEqual([]);
     retried.close();
+  });
+
+  test("merges stored semantic Message-ID duplicates without losing aliases, relations, or historical edges", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    new Store(path).close();
+    const fixture = new Database(path);
+    fixture.exec(`
+      DELETE FROM schema_migrations WHERE version = 477001;
+      INSERT INTO accounts VALUES
+        ('imap-account', 'IMAP', 'person@example.test', 'imap', NULL, '2026-09-01T00:00:00.000Z');
+      INSERT INTO messages
+        (id, tenant_id, identity_key, message_id, in_reply_to, "references", received_at, created_at, updated_at)
+      VALUES
+        ('plain', 'tenant-a', 'message-id:<ab@example.test>', '<ab@example.test>', NULL, '[]', NULL,
+          '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z'),
+        ('quoted', 'tenant-a', 'message-id:<"ab"@example.test>', '<"ab"@example.test>', NULL, '[]', NULL,
+          '2026-09-01T00:01:00.000Z', '2026-09-01T00:01:00.000Z'),
+        ('escaped', 'tenant-a', 'message-id:<"a\\b"@example.test>', '<"a\\b"@example.test>', NULL, '[]', NULL,
+          '2026-09-01T00:02:00.000Z', '2026-09-01T00:02:00.000Z'),
+        ('child', 'tenant-a', 'message-id:<child@example.test>', '<child@example.test>', '<"a\\b"@example.test>',
+          json_array('<"ab"@example.test>'), NULL, '2026-09-01T00:03:00.000Z', '2026-09-01T00:03:00.000Z'),
+        ('other-tenant', 'tenant-b', 'message-id:<"a\\b"@example.test>', '<"a\\b"@example.test>', NULL, '[]', NULL,
+          '2026-09-01T00:04:00.000Z', '2026-09-01T00:04:00.000Z');
+      INSERT INTO conversations (id, tenant_id, created_at, updated_at) VALUES
+        ('conversation-plain', 'tenant-a', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z'),
+        ('conversation-quoted', 'tenant-a', '2026-09-01T00:01:00.000Z', '2026-09-01T00:01:00.000Z'),
+        ('conversation-escaped', 'tenant-a', '2026-09-01T00:02:00.000Z', '2026-09-01T00:02:00.000Z'),
+        ('conversation-child', 'tenant-a', '2026-09-01T00:03:00.000Z', '2026-09-01T00:03:00.000Z'),
+        ('conversation-other', 'tenant-b', '2026-09-01T00:04:00.000Z', '2026-09-01T00:04:00.000Z');
+      INSERT INTO conversation_messages VALUES
+        ('tenant-a', 'conversation-plain', 'plain'),
+        ('tenant-a', 'conversation-quoted', 'quoted'),
+        ('tenant-a', 'conversation-escaped', 'escaped'),
+        ('tenant-a', 'conversation-child', 'child'),
+        ('tenant-b', 'conversation-other', 'other-tenant');
+      INSERT INTO message_aliases VALUES
+        ('quoted-old-alias', 'tenant-a', 'quoted', '2026-09-01T00:01:00.000Z'),
+        ('escaped-old-alias', 'tenant-a', 'escaped', '2026-09-01T00:02:00.000Z');
+      INSERT INTO conversation_aliases VALUES
+        ('quoted-conversation-alias', 'tenant-a', 'conversation-quoted', '2026-09-01T00:01:00.000Z');
+      INSERT INTO message_locations
+        (id, message_id, tenant_id, account_id, provider, mailbox, location_key, uid_validity, uid,
+          modseq, provider_id, read, flagged, observed_at)
+      VALUES
+        ('plain-location', 'plain', 'tenant-a', 'imap-account', 'imap', 'INBOX', '["imap","INBOX","1",1]',
+          '1', 1, NULL, NULL, 0, 0, '2026-09-01T00:00:00.000Z'),
+        ('quoted-location', 'quoted', 'tenant-a', 'imap-account', 'imap', 'Archive', '["imap","Archive","1",2]',
+          '1', 2, NULL, NULL, 0, 0, '2026-09-01T00:01:00.000Z'),
+        ('escaped-location', 'escaped', 'tenant-a', 'imap-account', 'imap', 'Sent', '["imap","Sent","1",3]',
+          '1', 3, NULL, NULL, 0, 0, '2026-09-01T00:02:00.000Z');
+      INSERT INTO message_provider_associations
+        (tenant_id, account_id, provider, provider_id, mailbox, uid_validity, uid, message_id)
+      VALUES
+        ('tenant-a', 'imap-account', 'imap', 'provider-plain', NULL, NULL, NULL, 'plain'),
+        ('tenant-a', 'imap-account', 'imap', 'provider-quoted', NULL, NULL, NULL, 'quoted'),
+        ('tenant-a', 'imap-account', 'imap', 'provider-escaped', NULL, NULL, NULL, 'escaped');
+      INSERT INTO message_provider_conversations VALUES
+        ('tenant-a', 'imap-account', 'imap', 'thread-plain', 'plain'),
+        ('tenant-a', 'imap-account', 'imap', 'thread-quoted', 'quoted'),
+        ('tenant-a', 'imap-account', 'imap', 'thread-escaped', 'escaped');
+      INSERT INTO message_thread_edges VALUES
+        ('tenant-a', 'child', '<"a\\b"@example.test>'),
+        ('tenant-a', 'quoted', '<"h\\istoric"@example.test>');
+    `);
+    fixture.close();
+
+    const migrated = new Store(path);
+    const canonical = await migrated.getMessage("tenant-a", "plain");
+    expect(canonical).toMatchObject({ id: "plain", messageId: "<ab@example.test>" });
+    for (const alias of ["quoted", "escaped", "quoted-old-alias", "escaped-old-alias"]) {
+      expect((await migrated.getMessage("tenant-a", alias))?.id).toBe("plain");
+    }
+    expect(await migrated.listMessageLocations("tenant-a", "plain")).toHaveLength(3);
+    const conversationAliases = ["conversation-plain", "conversation-quoted", "conversation-escaped",
+      "conversation-child", "quoted-conversation-alias"];
+    const conversations = await Promise.all(conversationAliases.map((id) => migrated.getConversation("tenant-a", id)));
+    expect(new Set(conversations.map((conversation) => conversation?.id))).toHaveLength(1);
+    expect(conversations[0]!.messages.map(({ messageId }) => messageId)).toEqual([
+      "<ab@example.test>", "<child@example.test>",
+    ]);
+    expect((await migrated.getMessage("tenant-b", "other-tenant"))?.messageId).toBe("<ab@example.test>");
+    expect(await migrated.getMessage("tenant-b", "plain")).toBeNull();
+    migrated.close();
+
+    const inspected = new Database(path);
+    expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 477001").get())
+      .toEqual({ version: 477001 });
+    expect(inspected.query(`
+      SELECT identity_key FROM messages WHERE identity_key LIKE 'message-id:%\\\\%' ESCAPE '\\'
+    `).all()).toEqual([]);
+    expect(inspected.query(`
+      SELECT referenced_message_id FROM message_thread_edges WHERE tenant_id = 'tenant-a' ORDER BY referenced_message_id
+    `).all()).toEqual([
+      { referenced_message_id: "<ab@example.test>" },
+      { referenced_message_id: "<historic@example.test>" },
+    ]);
+    expect(inspected.query(`
+      SELECT COUNT(*) AS count FROM message_provider_associations WHERE tenant_id = 'tenant-a' AND message_id = 'plain'
+    `).get()).toEqual({ count: 3 });
+    expect(inspected.query(`
+      SELECT COUNT(*) AS count FROM message_provider_conversations WHERE tenant_id = 'tenant-a' AND message_id = 'plain'
+    `).get()).toEqual({ count: 3 });
+    inspected.exec(`
+      CREATE TRIGGER reject_repeated_semantic_migration BEFORE UPDATE ON messages
+      BEGIN SELECT RAISE(ABORT, 'semantic migration repeated'); END;
+    `);
+    inspected.close();
+    new Store(path).close();
+  });
+
+  test("repairs fallback-only conversations after semantic threading edges converge", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const store = new Store(path);
+    await store.insertAccount({
+      id: "imap-account", name: "IMAP", email: "person@example.test", kind: "imap", encryptedCredentials: null,
+    });
+    const messages = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [1, 2].map((uid) => ({
+        tenantId: "tenant-a", messageId: null, inReplyTo: null, references: [],
+        location: { accountId: "imap-account", provider: "imap" as const, mailbox: "INBOX", uidValidity: "1", uid,
+          modseq: null, providerId: null, read: false, flagged: false },
+      })),
+    });
+    const messageIds = messages.map(({ id }) => id);
+    const oldConversationIds = messages.map(({ conversationId }) => conversationId);
+    expect(new Set(oldConversationIds).size).toBe(2);
+    store.close();
+
+    const fixture = new Database(path);
+    fixture.query("DELETE FROM schema_migrations WHERE version = 477001").run();
+    const references = ['<"ab"@x.test>', '<"a\\b"@x.test>'];
+    for (const [index, messageId] of messageIds.entries()) {
+      fixture.query(`UPDATE messages SET "references" = json_array(?) WHERE tenant_id = ? AND id = ?`)
+        .run(references[index]!, "tenant-a", messageId);
+      fixture.query(`
+        INSERT INTO message_thread_edges (tenant_id, message_id, referenced_message_id) VALUES (?, ?, ?)
+      `).run("tenant-a", messageId, references[index]!);
+    }
+    fixture.close();
+
+    const migrated = new Store(path);
+    const migratedConversations = await Promise.all(oldConversationIds.map((id) =>
+      migrated.getConversation("tenant-a", id)));
+    expect(new Set(migratedConversations.map((conversation) => conversation?.id)).size).toBe(1);
+    for (const conversation of migratedConversations) {
+      expect(new Set(conversation?.messages.map(({ id }) => id))).toEqual(new Set(messageIds));
+    }
+    migrated.close();
+
+    const reopened = new Store(path);
+    const reopenedConversations = await Promise.all(oldConversationIds.map((id) =>
+      reopened.getConversation("tenant-a", id)));
+    expect(new Set(reopenedConversations.map((conversation) => conversation?.id)).size).toBe(1);
+    for (const conversation of reopenedConversations) {
+      expect(new Set(conversation?.messages.map(({ id }) => id))).toEqual(new Set(messageIds));
+    }
+    reopened.close();
+  });
+
+  test("rolls back semantic Message-ID normalization before recording its marker", () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    new Store(path).close();
+    const fixture = new Database(path);
+    fixture.exec(`
+      DELETE FROM schema_migrations WHERE version = 477001;
+      INSERT INTO messages
+        (id, tenant_id, identity_key, message_id, in_reply_to, "references", received_at, created_at, updated_at)
+      VALUES
+        ('stale', 'tenant-a', 'message-id:<"a\\b"@example.test>', '<"a\\b"@example.test>', NULL, '[]', NULL,
+          '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z'),
+        ('broken', 'tenant-z', 'message-id:<broken@example.test>', '<broken@example.test>', NULL, '[]', NULL,
+          '2026-09-01T00:01:00.000Z', '2026-09-01T00:01:00.000Z');
+      INSERT INTO message_thread_edges VALUES
+        ('tenant-a', 'stale', '<"r\\ollback"@example.test>');
+      CREATE TRIGGER reject_semantic_message_update BEFORE UPDATE ON messages WHEN OLD.id = 'broken'
+      BEGIN SELECT RAISE(ABORT, 'semantic fixture failure'); END;
+    `);
+    fixture.close();
+
+    expect(() => new Store(path)).toThrow("semantic fixture failure");
+    const rolledBack = new Database(path);
+    expect(rolledBack.query("SELECT identity_key, message_id FROM messages WHERE id = 'stale'").get()).toEqual({
+      identity_key: 'message-id:<"a\\b"@example.test>', message_id: '<"a\\b"@example.test>',
+    });
+    expect(rolledBack.query(`
+      SELECT referenced_message_id FROM message_thread_edges WHERE tenant_id = 'tenant-a' AND message_id = 'stale'
+    `).get()).toEqual({ referenced_message_id: '<"r\\ollback"@example.test>' });
+    expect(rolledBack.query("SELECT version FROM schema_migrations WHERE version = 477001").get()).toBeNull();
+    rolledBack.close();
   });
 });

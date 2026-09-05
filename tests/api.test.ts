@@ -71,6 +71,41 @@ describe("Hono RPC API", () => {
     store.close();
   });
 
+  test("exposes one conversation for quoted-pair-equivalent IMAP deliveries and their reply", async () => {
+    const { store, service } = await createEmptyTestHarness();
+    const account = await service.createAccount(testAccountInput());
+    const location = (mailbox: string, uid: number) => ({
+      accountId: account.id, provider: "imap" as const, mailbox, uidValidity: "1", uid,
+      modseq: null, providerId: null, read: false, flagged: false,
+    });
+    const [plain] = await store.reconcileMailbox({
+      tenantId: "test-tenant", accountId: account.id, provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{ tenantId: "test-tenant", messageId: '<"ab"@Example.Test>', inReplyTo: null,
+        references: [], location: location("INBOX", 1) }],
+    });
+    const [escaped] = await store.reconcileMailbox({
+      tenantId: "test-tenant", accountId: account.id, provider: "imap", mailbox: "Archive", authoritative: false,
+      observations: [{ tenantId: "test-tenant", messageId: '<"a\\b"@example.test>', inReplyTo: null,
+        references: [], location: location("Archive", 2) }],
+    });
+    const [reply] = await store.reconcileMailbox({
+      tenantId: "test-tenant", accountId: account.id, provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [{ tenantId: "test-tenant", messageId: "<reply@example.test>",
+        inReplyTo: '<"a\\b"@example.test>', references: ['<"ab"@example.test>'],
+        location: location("INBOX", 3) }],
+    });
+    const response = await createApi(service).request(`/api/conversations/${reply!.conversationId}`);
+    const conversation = canonicalConversationSchema.parse(await response.json());
+
+    expect(response.status).toBe(200);
+    expect(escaped!.id).toBe(plain!.id);
+    expect(await store.listMessageLocations("test-tenant", plain!.id)).toHaveLength(2);
+    expect(conversation.messages.map(({ messageId }) => messageId)).toEqual([
+      "<ab@example.test>", "<reply@example.test>",
+    ]);
+    store.close();
+  });
+
   test("manages custom folders through typed routes", async () => {
     const { store, service } = await createTestHarness();
     const app = createApi(service);

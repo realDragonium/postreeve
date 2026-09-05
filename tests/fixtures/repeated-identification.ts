@@ -1,6 +1,6 @@
 export const repeatedIdentification = {
   messageId: '<"child" . part@(identity) Example.Test>',
-  normalizedMessageId: '<"child".part@example.test>',
+  normalizedMessageId: "<child.part@example.test>",
   inReplyTo: [
     "Old note <parent-a@example.test>",
     "broken, <discarded-parent@example.test>",
@@ -14,7 +14,7 @@ export const repeatedIdentification = {
     "",
     '"quoted <fake-reference@example.test>" <"ancestor" . node@Example.Test> <root@example.test>',
   ],
-  normalizedReferences: ["<root@example.test>", '<"ancestor".node@example.test>'],
+  normalizedReferences: ["<root@example.test>", "<ancestor.node@example.test>"],
   raw: [
     "From: Sender <sender@example.test>",
     "To: Person <person@example.test>",
