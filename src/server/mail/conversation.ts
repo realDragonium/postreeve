@@ -33,33 +33,16 @@ function mergeReferenceSequences(sequences: readonly (readonly string[])[]): str
   const uniqueSequences = sequences.map((sequence) => [...new Set(sequence)]);
   const values = [...new Set(uniqueSequences.flat())];
   const after = new Map(values.map((value) => [value, new Set<string>()]));
-  const incoming = new Map(values.map((value) => [value, 0]));
   for (const sequence of uniqueSequences) {
     for (let index = 0; index < sequence.length; index += 1) {
       for (const later of sequence.slice(index + 1)) {
         const earlier = sequence[index]!;
         if (earlier === later || after.get(earlier)!.has(later)) continue;
         after.get(earlier)!.add(later);
-        incoming.set(later, incoming.get(later)! + 1);
       }
     }
   }
-  const ready = values.filter((value) => incoming.get(value) === 0).sort();
-  const result: string[] = [];
-  while (ready.length > 0) {
-    const value = ready.shift()!;
-    result.push(value);
-    for (const later of [...after.get(value)!].sort()) {
-      const remaining = incoming.get(later)! - 1;
-      incoming.set(later, remaining);
-      if (remaining === 0) {
-        ready.push(later);
-        ready.sort();
-      }
-    }
-  }
-  const included = new Set(result);
-  return [...result, ...values.filter((value) => !included.has(value)).sort()];
+  return orderDirectedGraph(values, after, (left, right) => left.localeCompare(right));
 }
 
 export function orderConversationMessages<T extends ConversationMessageForOrder>(messages: readonly T[]): T[] {
@@ -75,54 +58,6 @@ export function orderConversationMessages<T extends ConversationMessageForOrder>
     }
   }
 
-  const indexById = new Map<string, number>();
-  const lowById = new Map<string, number>();
-  const stack: string[] = [];
-  const stacked = new Set<string>();
-  const components: string[][] = [];
-  let nextIndex = 0;
-  const visit = (id: string): void => {
-    indexById.set(id, nextIndex);
-    lowById.set(id, nextIndex);
-    nextIndex += 1;
-    stack.push(id);
-    stacked.add(id);
-    for (const childId of children.get(id)!) {
-      if (!indexById.has(childId)) {
-        visit(childId);
-        lowById.set(id, Math.min(lowById.get(id)!, lowById.get(childId)!));
-      } else if (stacked.has(childId)) {
-        lowById.set(id, Math.min(lowById.get(id)!, indexById.get(childId)!));
-      }
-    }
-    if (lowById.get(id) !== indexById.get(id)) return;
-    const component: string[] = [];
-    while (stack.length > 0) {
-      const member = stack.pop()!;
-      stacked.delete(member);
-      component.push(member);
-      if (member === id) break;
-    }
-    components.push(component);
-  };
-  for (const { id } of messages) if (!indexById.has(id)) visit(id);
-
-  const componentByMessage = new Map<string, number>();
-  components.forEach((component, index) => {
-    for (const id of component) componentByMessage.set(id, index);
-  });
-  const componentChildren = new Map(components.map((_, index) => [index, new Set<number>()]));
-  const incoming = new Map(components.map((_, index) => [index, 0]));
-  for (const [parentId, childIds] of children) {
-    const parentComponent = componentByMessage.get(parentId)!;
-    for (const childId of childIds) {
-      const childComponent = componentByMessage.get(childId)!;
-      if (parentComponent === childComponent || componentChildren.get(parentComponent)!.has(childComponent)) continue;
-      componentChildren.get(parentComponent)!.add(childComponent);
-      incoming.set(childComponent, incoming.get(childComponent)! + 1);
-    }
-  }
-
   const compareMessages = (leftId: string, rightId: string): number => {
     const left = byId.get(leftId)!;
     const right = byId.get(rightId)!;
@@ -131,19 +66,76 @@ export function orderConversationMessages<T extends ConversationMessageForOrder>
     return (left.receivedAt?.localeCompare(right.receivedAt ?? "") ?? 0)
       || left.identityKey.localeCompare(right.identityKey);
   };
-  const sortedComponents = components.map((component) => component.sort(compareMessages));
+  return orderDirectedGraph([...byId.keys()], children, compareMessages).map((id) => byId.get(id)!);
+}
+
+function orderDirectedGraph(
+  values: readonly string[],
+  after: ReadonlyMap<string, ReadonlySet<string>>,
+  compareValues: (left: string, right: string) => number,
+): string[] {
+  const indexByValue = new Map<string, number>();
+  const lowByValue = new Map<string, number>();
+  const stack: string[] = [];
+  const stacked = new Set<string>();
+  const components: string[][] = [];
+  let nextIndex = 0;
+  const visit = (value: string): void => {
+    indexByValue.set(value, nextIndex);
+    lowByValue.set(value, nextIndex);
+    nextIndex += 1;
+    stack.push(value);
+    stacked.add(value);
+    for (const later of after.get(value) ?? []) {
+      if (!indexByValue.has(later)) {
+        visit(later);
+        lowByValue.set(value, Math.min(lowByValue.get(value)!, lowByValue.get(later)!));
+      } else if (stacked.has(later)) {
+        lowByValue.set(value, Math.min(lowByValue.get(value)!, indexByValue.get(later)!));
+      }
+    }
+    if (lowByValue.get(value) !== indexByValue.get(value)) return;
+    const component: string[] = [];
+    while (stack.length > 0) {
+      const member = stack.pop()!;
+      stacked.delete(member);
+      component.push(member);
+      if (member === value) break;
+    }
+    components.push(component.sort(compareValues));
+  };
+  for (const value of values) if (!indexByValue.has(value)) visit(value);
+
+  const componentByValue = new Map<string, number>();
+  components.forEach((component, index) => {
+    for (const value of component) componentByValue.set(value, index);
+  });
+  const componentAfter = new Map(components.map((_, index) => [index, new Set<number>()]));
+  const incoming = new Map(components.map((_, index) => [index, 0]));
+  for (const [value, laterValues] of after) {
+    const component = componentByValue.get(value)!;
+    for (const later of laterValues) {
+      const laterComponent = componentByValue.get(later)!;
+      if (component === laterComponent || componentAfter.get(component)!.has(laterComponent)) continue;
+      componentAfter.get(component)!.add(laterComponent);
+      incoming.set(laterComponent, incoming.get(laterComponent)! + 1);
+    }
+  }
+
   const compareComponents = (left: number, right: number): number =>
-    compareMessages(sortedComponents[left]![0]!, sortedComponents[right]![0]!);
-  const ready = components.map((_, index) => index).filter((index) => incoming.get(index) === 0).sort(compareComponents);
-  const ordered: T[] = [];
+    compareValues(components[left]![0]!, components[right]![0]!);
+  const ready = components.map((_, index) => index)
+    .filter((index) => incoming.get(index) === 0)
+    .sort(compareComponents);
+  const ordered: string[] = [];
   while (ready.length > 0) {
     const component = ready.shift()!;
-    ordered.push(...sortedComponents[component]!.map((id) => byId.get(id)!));
-    for (const child of componentChildren.get(component)!) {
-      const remaining = incoming.get(child)! - 1;
-      incoming.set(child, remaining);
+    ordered.push(...components[component]!);
+    for (const later of componentAfter.get(component)!) {
+      const remaining = incoming.get(later)! - 1;
+      incoming.set(later, remaining);
       if (remaining === 0) {
-        ready.push(child);
+        ready.push(later);
         ready.sort(compareComponents);
       }
     }

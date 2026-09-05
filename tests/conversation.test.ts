@@ -38,6 +38,22 @@ describe("conversation resolution", () => {
     });
   });
 
+  test("keeps downstream reference precedence after collapsing conflicting cycles", () => {
+    const retained = {
+      inReplyTo: null,
+      references: ["<y@example.test>", "<z@example.test>", "<a@example.test>"],
+    };
+    const observed = ["<z@example.test>", "<y@example.test>"];
+    const expected = ["<y@example.test>", "<z@example.test>", "<a@example.test>"];
+
+    const merged = mergeThreadingMetadata(null, observed, retained, []);
+    expect(merged.references).toEqual(expected);
+    expect(mergeThreadingMetadata(null, retained.references, {
+      inReplyTo: null, references: observed,
+    }, []).references).toEqual(expected);
+    expect(mergeThreadingMetadata(null, observed, merged, []).references).toEqual(expected);
+  });
+
   test("orders causally, then chronologically with null timestamps last", () => {
     const message = (
       id: string,
