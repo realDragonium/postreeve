@@ -3,6 +3,7 @@ import {
   mergeThreadingMetadata,
   orderConversationMessages,
   type ConversationMessageForOrder,
+  type ThreadingMetadata,
 } from "../src/server/mail/conversation";
 
 describe("conversation resolution", () => {
@@ -59,6 +60,26 @@ describe("conversation resolution", () => {
     expect(forward.edges).toEqual([
       "<parent-a@example.test>", "<parent-b@example.test>", "<root@example.test>",
     ]);
+  });
+
+  test("does not reuse a deterministic References tie-break as causal evidence", () => {
+    const observations = [
+      ["<b@example.test>"],
+      ["<c@example.test>"],
+      ["<c@example.test>", "<a@example.test>", "<b@example.test>"],
+    ];
+    const permutations = <T>(values: readonly T[]): T[][] => values.length === 0
+      ? [[]]
+      : values.flatMap((value, index) => permutations(values.filter((_, candidate) => candidate !== index))
+        .map((rest) => [value, ...rest]));
+
+    for (const arrivals of permutations(observations)) {
+      let retained: ThreadingMetadata = { inReplyTo: null, references: [] };
+      for (const references of arrivals) retained = mergeThreadingMetadata(null, references, retained, []);
+      expect(retained.references).toEqual([
+        "<c@example.test>", "<a@example.test>", "<b@example.test>",
+      ]);
+    }
   });
 
   test("deduplicates each References sequence before retaining first-occurrence order", () => {
@@ -205,6 +226,29 @@ describe("conversation resolution", () => {
     expect(orderConversationMessages(messages).map(({ id }) => id)).toEqual(["root", "parent", "child"]);
   });
 
+  test("ignores self-reference per original sequence without bridging separate observations", () => {
+    const messages: ConversationMessageForOrder[] = [
+      { id: "child", identityKey: "child", messageId: "<child@example.test>", inReplyTo: null,
+        references: ["<b@example.test>", "<child@example.test>", "<c@example.test>"],
+        referenceSequences: [
+          ["<b@example.test>", "<child@example.test>"],
+          ["<child@example.test>", "<c@example.test>"],
+        ],
+        threadingEdges: ["<b@example.test>", "<child@example.test>", "<c@example.test>"],
+        receivedAt: "2026-09-01T00:00:00.000Z" },
+      { id: "b", identityKey: "b", messageId: "<b@example.test>", inReplyTo: null, references: [],
+        receivedAt: "2026-09-03T00:00:00.000Z" },
+      { id: "c", identityKey: "c", messageId: "<c@example.test>", inReplyTo: null, references: [],
+        receivedAt: "2026-09-02T00:00:00.000Z" },
+    ];
+
+    expect(orderConversationMessages(messages).map(({ id }) => id)).toEqual(["c", "b", "child"]);
+    messages[0] = { ...messages[0]!, referenceSequences: [[
+      "<b@example.test>", "<child@example.test>", "<c@example.test>",
+    ]] };
+    expect(orderConversationMessages(messages).map(({ id }) => id)).toEqual(["b", "c", "child"]);
+  });
+
   test("collapses a References cycle deterministically while keeping its descendant last", () => {
     const messages: ConversationMessageForOrder[] = [
       { id: "child", identityKey: "a", messageId: "<child@example.test>", inReplyTo: null,
@@ -256,7 +300,7 @@ describe("conversation resolution", () => {
   });
 
   test("merges a long References chain without recursive traversal", () => {
-    const references = Array.from({ length: 10_001 }, (_, index) => `<ref-${index}@example.test>`);
+    const references = Array.from({ length: 100_000 }, (_, index) => `<ref-${index}@example.test>`);
     const observed = [...references, references[5_000]!, references[0]!];
 
     const merged = mergeThreadingMetadata(null, observed, { inReplyTo: null, references: [] }, []);

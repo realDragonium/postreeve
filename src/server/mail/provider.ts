@@ -12,11 +12,15 @@ import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } f
 interface ProviderMessageMetadata {
   providerConversationId?: string;
   canonicalReceivedAt?: string | null;
+  referenceSequences?: readonly (readonly string[])[];
 }
 
 export type ProviderMessageSummary = MessageSummary & ProviderMessageMetadata;
 export type ProviderMessageDetail = MessageDetail & ProviderMessageMetadata;
-export type ProviderMessageObservation = CanonicalMessageObservation & { providerConversationId?: string };
+export type ProviderMessageObservation = CanonicalMessageObservation & {
+  providerConversationId?: string;
+  referenceSequences?: readonly (readonly string[])[];
+};
 
 export function toCanonicalObservation(
   tenantId: string,
@@ -25,6 +29,9 @@ export function toCanonicalObservation(
 ): ProviderMessageObservation {
   const messageId = normalizeMessageId(message.messageId);
   const inReplyTo = normalizeMessageIdList(message.inReplyTo);
+  const references = normalizeMessageIdLists(message.references ?? []);
+  const referenceSequences = message.referenceSequences?.map((sequence) => normalizeMessageIdLists(sequence))
+    .filter((sequence) => sequence.length > 0);
   return {
     tenantId,
     receivedAt: message.canonicalReceivedAt === undefined
@@ -32,7 +39,8 @@ export function toCanonicalObservation(
       : message.canonicalReceivedAt,
     messageId,
     inReplyTo: inReplyTo.length > 0 ? inReplyTo.join(" ") : null,
-    references: normalizeMessageIdLists(message.references ?? []),
+    references,
+    ...(referenceSequences ? { referenceSequences } : {}),
     ...(message.providerConversationId ? { providerConversationId: message.providerConversationId } : {}),
     location: {
       accountId: message.ref.accountId,

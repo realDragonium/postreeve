@@ -228,6 +228,10 @@ describe("Bun IMAP compatibility", () => {
       messageId: repeatedIdentification.normalizedMessageId,
       inReplyTo: repeatedIdentification.normalizedInReplyTo,
       references: repeatedIdentification.normalizedReferences,
+      referenceSequences: [
+        ["<branch-a@example.test>", "<root@example.test>"],
+        ["<branch-b@example.test>", "<root@example.test>"],
+      ],
     });
     expect(toCanonicalObservation("tenant-a", "imap", childDetail)).toMatchObject({
       messageId: repeatedIdentification.normalizedMessageId,
@@ -254,16 +258,28 @@ describe("Bun IMAP compatibility", () => {
         unavailable,
       );
       const listed = await service.listMessages({ accountId: config.accountId, mailbox: "INBOX", limit: 50 });
+      await store.reconcileMailbox({
+        tenantId: "tenant-a", accountId: config.accountId, provider: "imap", mailbox: "INBOX", authoritative: false,
+        observations: ["branch-a", "branch-b", "root"].map((name, index) => ({
+          tenantId: "tenant-a", messageId: `<${name}@example.test>`, inReplyTo: null, references: [],
+          receivedAt: `2026-09-0${3 - index}T00:00:00.000Z`,
+          location: { accountId: config.accountId, provider: "imap" as const, mailbox: "INBOX", uidValidity: "1",
+            uid: 20 + index, modseq: null, providerId: null, read: false, flagged: false },
+        })),
+      });
       const response = await createApi(service).request(`/api/conversations/${listed[0]!.conversationId}`);
       const conversation = canonicalConversationSchema.parse(await response.json());
 
       expect(response.status).toBe(200);
-      expect(conversation.messages.map(({ messageId }) => messageId)).toEqual([
-        "<parent-a@example.test>", "<parent-b@example.test>", repeatedIdentification.normalizedMessageId,
-      ]);
-      expect(conversation.messages[2]).toMatchObject({
+      const messageIds = conversation.messages.map(({ messageId }) => messageId);
+      expect(messageIds.indexOf("<branch-a@example.test>")).toBeLessThan(messageIds.indexOf("<root@example.test>"));
+      expect(messageIds.indexOf("<branch-b@example.test>")).toBeLessThan(messageIds.indexOf("<root@example.test>"));
+      expect(messageIds.indexOf("<root@example.test>")).toBeLessThan(
+        messageIds.indexOf(repeatedIdentification.normalizedMessageId));
+      expect(conversation.messages.find(({ messageId }) => messageId === repeatedIdentification.normalizedMessageId))
+        .toMatchObject({
         inReplyTo: repeatedIdentification.normalizedInReplyTo,
-        references: repeatedIdentification.normalizedReferences,
+        references: ["<branch-a@example.test>", "<branch-b@example.test>", "<root@example.test>"],
       });
     } finally {
       store.close();

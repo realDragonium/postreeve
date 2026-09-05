@@ -312,6 +312,7 @@ export class PostreeveService {
       const {
         providerConversationId: _providerConversationId,
         canonicalReceivedAt: _canonicalReceivedAt,
+        referenceSequences: _referenceSequences,
         ...publicDetail
       } = detail;
       return {
@@ -556,6 +557,7 @@ export class PostreeveService {
       const {
         providerConversationId: _providerConversationId,
         canonicalReceivedAt: _canonicalReceivedAt,
+        referenceSequences: _referenceSequences,
         ...publicMessage
       } = message;
       return {

@@ -18,7 +18,7 @@ import type {
   ProviderMessageDetail,
   ProviderMessageSummary,
 } from "./provider";
-import { normalizeIdentificationFields } from "./message-id";
+import { normalizeIdentificationFields, normalizeReferenceSequences } from "./message-id";
 import type { MailSender } from "./sender";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -403,10 +403,11 @@ function folderOrder(left: Folder, right: Folder): number {
 function toSummary(accountId: string, mailbox: string, message: z.infer<typeof gmailMessageSchema>): ProviderMessageSummary {
   const headerList = message.payload?.headers ?? [];
   const headers = new Map(headerList.map(({ name, value }) => [name.trim().toLocaleLowerCase(), value]));
+  const rawReferences = headerValues(headerList, "references");
   const identification = normalizeIdentificationFields({
     messageId: headerValues(headerList, "message-id"),
     inReplyTo: headerValues(headerList, "in-reply-to"),
-    references: headerValues(headerList, "references"),
+    references: rawReferences,
   });
   const canonicalReceivedAt = receivedAt(message, headers.get("date"));
   return {
@@ -415,6 +416,7 @@ function toSummary(accountId: string, mailbox: string, message: z.infer<typeof g
     messageId: identification.messageId ?? (identification.messageIdPresent ? "" : message.id),
     inReplyTo: identification.inReplyTo,
     references: identification.references,
+    referenceSequences: normalizeReferenceSequences(rawReferences),
     subject: headers.get("subject") ?? "(no subject)",
     from: parseAddresses(headers.get("from")),
     to: parseAddresses(headers.get("to")),

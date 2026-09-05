@@ -246,10 +246,19 @@ describe("Gmail compatibility", () => {
     if (!detail) throw new Error("Expected Gmail raw detail");
     const listedObservation = toCanonicalObservation("tenant-a", "gmail", summary);
     const readObservation = toCanonicalObservation("tenant-a", "gmail", detail);
+    expect(summary.referenceSequences).toEqual([
+      ["<branch-a@example.test>", "<root@example.test>"],
+      ["<branch-b@example.test>", "<root@example.test>"],
+    ]);
+    expect(detail.referenceSequences).toEqual(summary.referenceSequences);
     expect(listedObservation).toMatchObject({
       messageId: repeatedIdentification.normalizedMessageId,
       inReplyTo: repeatedIdentification.normalizedInReplyTo,
       references: repeatedIdentification.normalizedReferences,
+      referenceSequences: [
+        ["<branch-a@example.test>", "<root@example.test>"],
+        ["<branch-b@example.test>", "<root@example.test>"],
+      ],
     });
     expect(readObservation).toMatchObject({
       messageId: listedObservation.messageId,
@@ -276,7 +285,31 @@ describe("Gmail compatibility", () => {
       if (!listed) throw new Error("Expected canonical Gmail summary");
       const [read] = await service.readMessages([listed.ref]);
       if (!read) throw new Error("Expected canonical Gmail detail");
-      const response = await createApi(service).request(`/api/conversations/${listed.conversationId}`);
+      expect("referenceSequences" in listed).toBe(false);
+      expect("referenceSequences" in read).toBe(false);
+      const api = createApi(service);
+      const listResponse = await api.request(`/api/accounts/${account.id}/messages?mailbox=INBOX&limit=1`);
+      const publicSummaries: unknown = await listResponse.json();
+      expect(Array.isArray(publicSummaries) && publicSummaries.every((message) =>
+        typeof message === "object" && message !== null && !("referenceSequences" in message))).toBe(true);
+      const readResponse = await api.request("/api/messages/read", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ references: [listed.ref] }),
+      });
+      const publicDetails: unknown = await readResponse.json();
+      expect(Array.isArray(publicDetails) && publicDetails.every((message) =>
+        typeof message === "object" && message !== null && !("referenceSequences" in message))).toBe(true);
+      await store.reconcileMailbox({
+        tenantId: "tenant-a", accountId: account.id, provider: "gmail", mailbox: "INBOX", authoritative: false,
+        observations: ["branch-a", "branch-b", "root"].map((name, index) => ({
+          tenantId: "tenant-a", messageId: `<${name}@example.test>`, inReplyTo: null, references: [],
+          receivedAt: `2026-09-0${3 - index}T00:00:00.000Z`,
+          location: { accountId: account.id, provider: "gmail" as const, mailbox: "INBOX", uidValidity: "gmail",
+            uid: 20 + index, modseq: null, providerId: `parent-${name}`, read: false, flagged: false },
+        })),
+      });
+      const response = await api.request(`/api/conversations/${listed.conversationId}`);
       const conversation = canonicalConversationSchema.parse(await response.json());
 
       expect(read).toMatchObject({ canonicalId: listed.canonicalId, conversationId: listed.conversationId });
@@ -284,8 +317,13 @@ describe("Gmail compatibility", () => {
         id: listed.canonicalId,
         messageId: repeatedIdentification.normalizedMessageId,
         inReplyTo: repeatedIdentification.normalizedInReplyTo,
-        references: repeatedIdentification.normalizedReferences,
+        references: ["<branch-a@example.test>", "<branch-b@example.test>", "<root@example.test>"],
       }));
+      const messageIds = conversation.messages.map(({ messageId }) => messageId);
+      expect(messageIds.indexOf("<branch-a@example.test>")).toBeLessThan(messageIds.indexOf("<root@example.test>"));
+      expect(messageIds.indexOf("<branch-b@example.test>")).toBeLessThan(messageIds.indexOf("<root@example.test>"));
+      expect(messageIds.indexOf("<root@example.test>")).toBeLessThan(
+        messageIds.indexOf(repeatedIdentification.normalizedMessageId));
     } finally {
       store.close();
     }

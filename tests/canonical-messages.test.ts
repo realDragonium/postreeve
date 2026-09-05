@@ -413,6 +413,38 @@ describe("canonical message persistence", () => {
     });
   });
 
+  test("keeps same-sequence ancestry around self-reference through late Message-ID promotion", async () => {
+    const store = await createStore();
+    const futureMessageId = "<self-sequence-child@example.test>";
+    const sequence = ["<b-self@example.test>", futureMessageId, "<c-self@example.test>"];
+    const fallbackObservation = {
+      ...observation({ messageId: null, inReplyTo: null, references: sequence }),
+      referenceSequences: [sequence],
+    };
+    const [fallback] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [fallbackObservation], authoritative: false,
+    });
+    const [promoted] = await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: [{ ...fallbackObservation, messageId: futureMessageId, references: [], referenceSequences: [] }],
+      authoritative: false,
+    });
+    expect(promoted!.id).toBe(fallback!.id);
+
+    await store.reconcileMailbox({
+      tenantId: "tenant-a", accountId: "imap-account", provider: "imap", mailbox: "INBOX",
+      observations: ["b-self", "c-self"].map((name, index) => observation({
+        messageId: `<${name}@example.test>`, inReplyTo: null, references: [],
+        receivedAt: `2026-09-0${2 - index}T00:00:00.000Z`,
+        location: { ...fallbackObservation.location, uid: 50 + index },
+      })),
+      authoritative: false,
+    });
+    expect((await store.getConversation("tenant-a", promoted!.conversationId))?.messages.map(({ messageId }) => messageId))
+      .toEqual(["<b-self@example.test>", "<c-self@example.test>", futureMessageId]);
+  });
+
   test("retains a promoted provider association after every source location is removed", async () => {
     const store = await createStore();
     const missing = observation({

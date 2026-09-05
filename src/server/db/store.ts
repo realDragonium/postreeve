@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { and, desc, eq } from "drizzle-orm";
@@ -260,9 +261,12 @@ export class Store {
             canonicalCreated = true;
           }
 
+          const observedReferenceSequences = normalizedReferenceSequences(observation, normalizedReferences);
+          associateReferenceSequences(this.#sqlite, value.tenantId, canonical.id, observedReferenceSequences);
           const mergedMetadata = mergeThreadingMetadata(
-            normalizedInReplyTo, normalizedReferences, toThreadingMetadata(canonical),
-            fallbackRows.map(toThreadingMetadata),
+            normalizedInReplyTo, normalizedReferences, toThreadingMetadata(this.#sqlite, canonical),
+            fallbackRows.map((row) => toThreadingMetadata(this.#sqlite, row)),
+            observedReferenceSequences,
           );
           const receivedAt = earliestReceivedAt(observedReceivedAt, canonical, fallbackRows);
           const promotedMessageId = canonical.message_id === null;
@@ -314,8 +318,11 @@ export class Store {
             ).get(value.tenantId, fallbackIdentityKey) as MessageRow;
             canonicalCreated = canonical.id === id;
           }
+          const observedReferenceSequences = normalizedReferenceSequences(observation, normalizedReferences);
+          associateReferenceSequences(this.#sqlite, value.tenantId, canonical.id, observedReferenceSequences);
           const mergedMetadata = mergeThreadingMetadata(
-            normalizedInReplyTo, normalizedReferences, toThreadingMetadata(canonical), [],
+            normalizedInReplyTo, normalizedReferences, toThreadingMetadata(this.#sqlite, canonical), [],
+            observedReferenceSequences,
           );
           const receivedAt = earliestReceivedAt(observedReceivedAt, canonical, []);
           this.#sqlite.query(`
@@ -426,7 +433,7 @@ export class Store {
         canonical = merged.id === source.id ? destination : source;
         const now = new Date().toISOString();
         const metadata = mergeThreadingMetadata(
-          null, [], toThreadingMetadata(canonical), [toThreadingMetadata(merged)],
+          null, [], toThreadingMetadata(this.#sqlite, canonical), [toThreadingMetadata(this.#sqlite, merged)],
         );
         const receivedAt = earliestReceivedAt(null, canonical, [merged]);
         this.#sqlite.query(`
@@ -465,20 +472,46 @@ export class Store {
         ON message.tenant_id = membership.tenant_id AND message.id = membership.message_id
       WHERE membership.tenant_id = ? AND membership.conversation_id = ?
     `).all(tenantId, conversation.id) as MessageRow[];
-    const edgeRows = this.#sqlite.query(`
-      SELECT edge.message_id, edge.referenced_message_id FROM message_thread_edges edge
+    const threadingRows = this.#sqlite.query(`
+      SELECT edge.message_id, edge.referenced_message_id,
+        NULL AS sequence_key, NULL AS position
+      FROM message_thread_edges edge
       INNER JOIN conversation_messages membership
         ON membership.tenant_id = edge.tenant_id AND membership.message_id = edge.message_id
       WHERE membership.tenant_id = ? AND membership.conversation_id = ?
-    `).all(tenantId, conversation.id) as Array<{ message_id: string; referenced_message_id: string }>;
+      UNION ALL
+      SELECT sequence.message_id, sequence.referenced_message_id,
+        sequence.sequence_key, sequence.position
+      FROM message_reference_sequences sequence
+      INNER JOIN conversation_messages membership
+        ON membership.tenant_id = sequence.tenant_id AND membership.message_id = sequence.message_id
+      WHERE membership.tenant_id = ? AND membership.conversation_id = ?
+    `).all(tenantId, conversation.id, tenantId, conversation.id) as Array<{
+      message_id: string;
+      referenced_message_id: string | null;
+      sequence_key: string | null;
+      position: number | null;
+    }>;
     const edgesByMessage = new Map<string, string[]>();
-    for (const edge of edgeRows) {
-      const edges = edgesByMessage.get(edge.message_id) ?? [];
-      edges.push(edge.referenced_message_id);
-      edgesByMessage.set(edge.message_id, edges);
+    const sequencesByMessage = new Map<string, Map<string, string[]>>();
+    for (const row of threadingRows) {
+      if (row.sequence_key === null && row.referenced_message_id !== null) {
+        const edges = edgesByMessage.get(row.message_id) ?? [];
+        edges.push(row.referenced_message_id);
+        edgesByMessage.set(row.message_id, edges);
+      }
+      if (row.sequence_key !== null && row.position !== null && row.referenced_message_id !== null) {
+        const sequences = sequencesByMessage.get(row.message_id) ?? new Map<string, string[]>();
+        const sequence = sequences.get(row.sequence_key) ?? [];
+        sequence[row.position] = row.referenced_message_id;
+        sequences.set(row.sequence_key, sequence);
+        sequencesByMessage.set(row.message_id, sequences);
+      }
     }
     const orderedIds = orderConversationMessages(rows.map((row) =>
-      toConversationMessageForOrder(row, edgesByMessage.get(row.id)))).map(({ id }) => id);
+      toConversationMessageForOrder(row, edgesByMessage.get(row.id),
+        [...(sequencesByMessage.get(row.id)?.values() ?? [])])))
+      .map(({ id }) => id);
     const messageAliasRows = this.#sqlite.query(`
       SELECT alias.message_id, alias.alias_id
       FROM conversation_messages membership INDEXED BY conversation_messages_conversation_id_idx
@@ -644,6 +677,7 @@ export class Store {
     this.#migrateMessageLocationTenantForeignKey();
     this.#migrateMessageProviderAssociations();
     this.#migrateConversations();
+    this.#migrateReferenceSequences();
     this.#migrateSemanticMessageIds();
     const accountsTable = this.#sqlite.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
       .get() as { sql: string } | null;
@@ -950,6 +984,28 @@ export class Store {
     }
   }
 
+  #migrateReferenceSequences(): void {
+    if (this.#sqlite.query("SELECT 1 FROM schema_migrations WHERE version = 477002").get()) return;
+    const migrate = this.#sqlite.transaction(() => {
+      this.#sqlite.exec(`
+        CREATE TABLE message_reference_sequences (
+          tenant_id TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          sequence_key TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          referenced_message_id TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, message_id, sequence_key, position),
+          FOREIGN KEY (tenant_id, message_id) REFERENCES messages(tenant_id, id)
+        );
+      `);
+      const violations = this.#sqlite.query("PRAGMA foreign_key_check('message_reference_sequences')").all();
+      if (violations.length > 0) throw new Error("Reference sequence migration left invalid foreign keys");
+      this.#sqlite.query("INSERT INTO schema_migrations (version, applied_at) VALUES (477002, ?)")
+        .run(new Date().toISOString());
+    });
+    migrate();
+  }
+
   #migrateSemanticMessageIds(): void {
     if (this.#sqlite.query("SELECT 1 FROM schema_migrations WHERE version = 477001").get()) return;
     const migrate = this.#sqlite.transaction(() => {
@@ -973,7 +1029,6 @@ export class Store {
           `).run(edge.tenant_id, edge.message_id, edge.referenced_message_id);
         }
       }
-
       const messages = this.#sqlite.query("SELECT * FROM messages ORDER BY tenant_id, created_at, id")
         .all() as MessageRow[];
       const semanticGroups = new Map<string, MessageRow[]>();
@@ -1003,7 +1058,8 @@ export class Store {
           || left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id));
         const winner = ordered[0]!;
         const losers = ordered.slice(1);
-        const metadata = mergeThreadingMetadata(null, [], toThreadingMetadata(winner), losers.map(toThreadingMetadata));
+        const metadata = mergeThreadingMetadata(null, [], toThreadingMetadata(this.#sqlite, winner),
+          losers.map((row) => toThreadingMetadata(this.#sqlite, row)));
         const receivedAt = earliestReceivedAt(null, winner, losers);
         for (const loser of losers) {
           mergeCanonicalMessages(this.#sqlite, winner.tenant_id, winner.id, loser.id, now);
@@ -1025,7 +1081,8 @@ export class Store {
         return normalized !== null && (message_id !== normalized || identity_key !== `message-id:${normalized}`);
       });
       const violations = ["messages", "message_locations", "message_aliases", "message_provider_associations",
-        "conversation_messages", "conversation_aliases", "message_provider_conversations", "message_thread_edges"]
+        "conversation_messages", "conversation_aliases", "message_provider_conversations", "message_thread_edges",
+        "message_reference_sequences"]
         .flatMap((table) => this.#sqlite.query(`PRAGMA foreign_key_check('${table}')`).all());
       if (staleIdentity || violations.length > 0) {
         throw new Error("Semantic Message-ID migration failed integrity validation");
@@ -1093,6 +1150,27 @@ function associateThreadEdges(
   return changed;
 }
 
+function associateReferenceSequences(
+  sqlite: Database,
+  tenantId: string,
+  messageId: string,
+  sequences: readonly (readonly string[])[],
+): void {
+  const insert = sqlite.query(`
+    INSERT OR IGNORE INTO message_reference_sequences
+      (tenant_id, message_id, sequence_key, position, referenced_message_id)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+  for (const sequence of sequences) {
+    const unique = [...new Set(sequence)];
+    if (unique.length === 0) continue;
+    const sequenceKey = createHash("sha256").update(JSON.stringify(unique)).digest("hex");
+    for (const [position, reference] of unique.entries()) {
+      insert.run(tenantId, messageId, sequenceKey, position, reference);
+    }
+  }
+}
+
 function ensureMessageConversation(sqlite: Database, message: MessageRow): void {
   const membership = sqlite.query(`
     SELECT conversation_id FROM conversation_messages WHERE tenant_id = ? AND message_id = ?
@@ -1121,6 +1199,14 @@ function mergeMessageConversationRelations(
   retainedMessageId: string,
   removedMessageId: string,
 ): void {
+  sqlite.query(`
+    INSERT OR IGNORE INTO message_reference_sequences
+      (tenant_id, message_id, sequence_key, position, referenced_message_id)
+    SELECT tenant_id, ?, sequence_key, position, referenced_message_id FROM message_reference_sequences
+    WHERE tenant_id = ? AND message_id = ?
+  `).run(retainedMessageId, tenantId, removedMessageId);
+  sqlite.query("DELETE FROM message_reference_sequences WHERE tenant_id = ? AND message_id = ?")
+    .run(tenantId, removedMessageId);
   sqlite.query(`
     INSERT OR IGNORE INTO message_thread_edges (tenant_id, message_id, referenced_message_id)
     SELECT tenant_id, ?, referenced_message_id FROM message_thread_edges
@@ -1508,8 +1594,26 @@ function parseStoredReferences(value: string): string[] {
   return parsed;
 }
 
-function toThreadingMetadata(message: MessageRow): ThreadingMetadata {
-  return { inReplyTo: message.in_reply_to, references: parseStoredReferences(message.references) };
+function toThreadingMetadata(sqlite: Database, message: MessageRow): ThreadingMetadata {
+  const rows = sqlite.query(`
+    SELECT sequence_key, position, referenced_message_id FROM message_reference_sequences
+    WHERE tenant_id = ? AND message_id = ? ORDER BY sequence_key, position
+  `).all(message.tenant_id, message.id) as Array<{
+    sequence_key: string;
+    position: number;
+    referenced_message_id: string;
+  }>;
+  const sequences = new Map<string, string[]>();
+  for (const row of rows) {
+    const sequence = sequences.get(row.sequence_key) ?? [];
+    sequence[row.position] = row.referenced_message_id;
+    sequences.set(row.sequence_key, sequence);
+  }
+  return {
+    inReplyTo: message.in_reply_to,
+    references: parseStoredReferences(message.references),
+    referenceSequences: [...sequences.values()],
+  };
 }
 
 function earliestReceivedAt(
@@ -1522,7 +1626,11 @@ function earliestReceivedAt(
     .sort()[0] ?? null;
 }
 
-function toConversationMessageForOrder(message: MessageRow, threadingEdges: readonly string[] = []) {
+function toConversationMessageForOrder(
+  message: MessageRow,
+  threadingEdges: readonly string[] = [],
+  referenceSequences: readonly (readonly string[])[] = [],
+) {
   return {
     id: message.id,
     identityKey: message.identity_key,
@@ -1531,7 +1639,17 @@ function toConversationMessageForOrder(message: MessageRow, threadingEdges: read
     references: parseStoredReferences(message.references),
     receivedAt: message.received_at,
     threadingEdges,
+    referenceSequences,
   };
+}
+
+function normalizedReferenceSequences(
+  observation: ProviderMessageObservation,
+  references: readonly string[],
+): string[][] {
+  return (observation.referenceSequences ?? [references])
+    .map((sequence) => normalizeMessageIdLists(sequence))
+    .filter((sequence) => sequence.length > 0);
 }
 
 function fallbackIdentityKeyFor(observation: CanonicalMessageObservation): string {

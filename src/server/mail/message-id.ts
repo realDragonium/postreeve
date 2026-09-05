@@ -343,3 +343,7 @@ export function normalizeMessageIdList(value: string | null | undefined): string
 export function normalizeMessageIdLists(values: readonly (string | null | undefined)[]): string[] {
   return [...new Set(values.flatMap(normalizeMessageIdList))];
 }
+
+export function normalizeReferenceSequences(values: readonly (string | null | undefined)[]): string[][] {
+  return values.map(normalizeMessageIdList).filter((sequence) => sequence.length > 0);
+}

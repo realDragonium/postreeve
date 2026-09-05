@@ -136,6 +136,20 @@ export const messageThreadEdges = sqliteTable("message_thread_edges", {
   index("message_thread_edges_reference_idx").on(table.tenantId, table.referencedMessageId),
 ]);
 
+export const messageReferenceSequences = sqliteTable("message_reference_sequences", {
+  tenantId: text("tenant_id").notNull(),
+  messageId: text("message_id").notNull(),
+  sequenceKey: text("sequence_key").notNull(),
+  position: integer("position").notNull(),
+  referencedMessageId: text("referenced_message_id").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.tenantId, table.messageId, table.sequenceKey, table.position] }),
+  foreignKey({
+    columns: [table.tenantId, table.messageId],
+    foreignColumns: [messages.tenantId, messages.id],
+  }),
+]);
+
 export const messageAliases = sqliteTable("message_aliases", {
   aliasId: text("alias_id").notNull(),
   tenantId: text("tenant_id").notNull(),

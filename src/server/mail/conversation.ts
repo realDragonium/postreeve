@@ -3,6 +3,7 @@ import { normalizeMessageIdList } from "./message-id";
 export interface ThreadingMetadata {
   inReplyTo: string | null;
   references: readonly string[];
+  referenceSequences?: readonly (readonly string[])[];
 }
 
 export interface ConversationMessageForOrder extends ThreadingMetadata {
@@ -18,25 +19,42 @@ export function mergeThreadingMetadata(
   observedReferences: readonly string[],
   retained: ThreadingMetadata,
   merged: readonly ThreadingMetadata[],
-): { inReplyTo: string | null; references: string[]; edges: string[] } {
+  observedReferenceSequences: readonly (readonly string[])[] = [observedReferences],
+): { inReplyTo: string | null; references: string[]; edges: string[]; referenceSequences: string[][] } {
   const rows = [retained, ...merged];
   const parents = [...new Set([observedInReplyTo, ...rows.map(({ inReplyTo }) => inReplyTo)]
     .flatMap(normalizeMessageIdList))].sort();
-  const references = mergeReferenceSequences([...rows.map(({ references }) => references), observedReferences]);
+  const referenceSequences = [...rows.map(({ references }) => references), observedReferences];
+  const retainedSequences = rows.flatMap((metadata) =>
+    metadata.referenceSequences ?? [[...metadata.references]]);
+  const evidenceByKey = new Map([...retainedSequences, ...observedReferenceSequences]
+    .map((sequence) => [...new Set(sequence)])
+    .filter((sequence) => sequence.length > 0)
+    .map((sequence) => [JSON.stringify(sequence), sequence] as const));
+  const evidence = [...evidenceByKey.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([, sequence]) => sequence);
+  const references = mergeReferenceSequences(referenceSequences, evidence);
   return {
     inReplyTo: parents.length > 0 ? parents.join(" ") : null,
     references,
     edges: [...new Set([...parents, ...references])].sort(),
+    referenceSequences: evidence,
   };
 }
 
-function mergeReferenceSequences(sequences: readonly (readonly string[])[]): string[] {
+function mergeReferenceSequences(
+  sequences: readonly (readonly string[])[],
+  evidence: readonly (readonly string[])[],
+): string[] {
   const uniqueSequences = sequences.map((sequence) => [...new Set(sequence)]);
   const values = [...new Set(uniqueSequences.flat())];
   const after = new Map(values.map((value) => [value, new Set<string>()]));
-  for (const sequence of uniqueSequences) {
+  for (const sequence of evidence) {
     for (let index = 1; index < sequence.length; index += 1) {
-      after.get(sequence[index - 1]!)!.add(sequence[index]!);
+      const before = sequence[index - 1]!;
+      const later = sequence[index]!;
+      if (after.has(before) && after.has(later)) after.get(before)!.add(later);
     }
   }
   return orderDirectedGraph(values, after, (left, right) => left.localeCompare(right));
@@ -75,14 +93,27 @@ export function orderConversationMessages<T extends ConversationMessageForOrder>
       if (parentNode !== messageNode) children.get(parentNode)!.add(messageNode);
     }
 
-    let previousAncestor: OrderNode | null = null;
-    for (const reference of new Set(message.references)) {
-      const ancestor = nodeForReference(reference);
-      if (ancestor === messageNode) continue;
-      if (previousAncestor) children.get(previousAncestor)!.add(ancestor);
-      previousAncestor = ancestor;
+    if (message.referenceSequences) {
+      for (const sequence of message.referenceSequences) {
+        let previousAncestor: OrderNode | null = null;
+        for (const reference of new Set(sequence)) {
+          const ancestor = nodeForReference(reference);
+          if (ancestor === messageNode) continue;
+          if (previousAncestor) children.get(previousAncestor)!.add(ancestor);
+          previousAncestor = ancestor;
+        }
+        if (previousAncestor) children.get(previousAncestor)!.add(messageNode);
+      }
+    } else {
+      let previousAncestor: OrderNode | null = null;
+      for (const reference of new Set(message.references)) {
+        const ancestor = nodeForReference(reference);
+        if (ancestor === messageNode) continue;
+        if (previousAncestor) children.get(previousAncestor)!.add(ancestor);
+        previousAncestor = ancestor;
+      }
+      if (previousAncestor) children.get(previousAncestor)!.add(messageNode);
     }
-    if (previousAncestor) children.get(previousAncestor)!.add(messageNode);
 
     for (const parent of new Set(message.threadingEdges ?? [])) {
       const parentNode = nodeForReference(parent);
