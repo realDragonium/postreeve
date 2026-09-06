@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { simpleParser } from "mailparser";
 import { GmailMailClient, type HttpFetch } from "../src/server/mail/gmail";
+import { buildProviderDraftMessage, parseProviderDraftMarkers } from "../src/server/mail/provider-draft";
 import type { Draft } from "../src/shared/contracts";
 
 const gmailAccount = {
@@ -11,6 +12,29 @@ const gmailAccount = {
 };
 
 describe("Gmail provider drafts", () => {
+  test("encodes arbitrary editable content as safe MIME without requiring valid recipients", async () => {
+    const editable = draft(7, {
+      to: "unfinished@, Jöhn <person@example.test>\r\nX-Injected: blocked",
+      cc: "pending@",
+      subject: "Résumé 🌍\r\nX-Injected: blocked",
+      body: "Unicode 🌍 and MIME-looking =? text.\nSecond line with trailing space. ",
+      identity: { name: "Jöhn 🌍", address: gmailAccount.email },
+      source: {
+        canonicalMessageId: "canonical/source",
+        conversationId: "conversation/source",
+        providerConversationId: "thread/source",
+      },
+    });
+
+    const raw = buildProviderDraftMessage(editable);
+    const parsed = await simpleParser(raw);
+    expect(parsed.subject).toBe("Résumé 🌍 X-Injected: blocked");
+    expect(parsed.text).toBe(editable.body);
+    expect(raw.toString()).toContain("To: unfinished@, Jöhn <person@example.test> X-Injected: blocked");
+    expect(raw.toString()).not.toContain("\r\nX-Injected: blocked\r\n");
+    expect(parseProviderDraftMarkers(raw)).toEqual({ postreeveId: editable.id, version: 7 });
+  });
+
   test("creates, recovers ambiguous responses, paginates, updates without duplicates, and removes idempotently", async () => {
     const containers = new Map<string, string>([["external", Buffer.from("Subject: external\r\n\r\nbody").toString("base64url")]]);
     const requests: string[] = [];
@@ -93,6 +117,8 @@ describe("Gmail provider drafts", () => {
     containers.set("duplicate", raw);
     await client.updateDraft(gmailAccount.id, updated, updatedRef);
     expect((await client.listDrafts(gmailAccount.id)).filter(({ postreeveId }) => postreeveId === first.id)).toHaveLength(1);
+    await expect(client.updateDraft("another-account", updated, updatedRef)).rejects.toThrow("another account");
+    await expect(client.removeDraft("another-account", first.id, updatedRef)).rejects.toThrow("another account");
 
     await client.removeDraft(gmailAccount.id, first.id, updatedRef);
     await client.removeDraft(gmailAccount.id, first.id, updatedRef);

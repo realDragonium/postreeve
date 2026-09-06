@@ -45,6 +45,8 @@ interface FakeState {
   readonly mailboxes: Map<string, StoredMailbox>;
   readonly options: ImapFlowOptions[];
   readonly storeOptions: StoreOptions[];
+  readonly flagAdds: Array<{ uid: number; flags: string[]; options: StoreOptions }>;
+  readonly messageDeletes: Array<{ uids: number[]; options: { uid?: boolean } }>;
   readonly searches: SearchObject[];
   readonly searchOptions: Array<{ uid?: boolean; returnOptions: Array<"MIN" | "MAX" | "COUNT" | "ALL" | { partial: string }> }>;
   readonly fetchQueries: FetchQueryObject[];
@@ -384,6 +386,8 @@ describe("Bun IMAP compatibility", () => {
     expect(mirrored?.source?.toString()).toContain("To: unfinished@, Person <person@example.test>");
     if (!mirrored?.source) throw new Error("Expected mirrored draft source");
     expect((await simpleParser(mirrored.source)).text).toBe("Second body");
+    await expect(provider.updateDraft("account-b", updated, updatedRef)).rejects.toThrow("cannot access account account-b");
+    await expect(provider.removeDraft("account-b", updated.id, updatedRef)).rejects.toThrow("cannot access account account-b");
 
     const unrelated = fakeMessage(900, 1n, "Unrelated deleted message", "Keep", new Set(["\\Deleted"]));
     draftsMailbox.messages.set(900, unrelated);
@@ -394,6 +398,55 @@ describe("Bun IMAP compatibility", () => {
     await expect(provider.createDraft("account-b", first)).rejects.toThrow("cannot access account account-b");
     await expect(provider.createDraft(config.accountId, { ...first, accountId: "account-b" }))
       .rejects.toThrow("cannot access account account-b");
+  });
+
+  test("reconciles drafts without UIDPLUS by marking only managed UIDs deleted", async () => {
+    const state = fakeState();
+    const draftsMailbox = state.mailboxes.get("Drafts");
+    if (!draftsMailbox) throw new Error("Expected special-use Drafts mailbox");
+    const unrelated = fakeMessage(900, 7n, "Unrelated deleted message", "Keep", new Set(["\\Deleted"]));
+    draftsMailbox.messages.set(900, unrelated);
+    const factory: ImapClientFactory = (options) => {
+      state.options.push(options);
+      const client = new FakeImapClient(state);
+      client.capabilities.delete("UIDPLUS");
+      return client;
+    };
+    const provider = new ImapMailProvider(config, factory);
+    state.ambiguousAppendFailures = 3;
+
+    const first = providerDraft(1, { body: "First body" });
+    const firstRef = await provider.createDraft(config.accountId, first);
+    const current = providerDraft(2, { body: "Current body" });
+    const currentRef = await provider.updateDraft(config.accountId, current, firstRef);
+    const retriedRef = await provider.updateDraft(config.accountId, current, currentRef);
+
+    expect(await provider.listDrafts(config.accountId)).toEqual([{
+      postreeveId: current.id,
+      version: 2,
+      ref: retriedRef,
+    }]);
+    const activeManagedUids = [...draftsMailbox.messages.values()]
+      .filter((message) => message.flags?.has("\\Draft") && !message.flags.has("\\Deleted"))
+      .map(({ uid }) => uid);
+    expect(activeManagedUids).toEqual([3]);
+    expect(state.flagAdds).toEqual([
+      { uid: 1, flags: ["\\Deleted"], options: { uid: true } },
+      { uid: 2, flags: ["\\Deleted"], options: { uid: true } },
+    ]);
+    expect(state.messageDeletes).toEqual([]);
+    expect(draftsMailbox.messages.get(900)).toMatchObject({ modseq: 7n, flags: new Set(["\\Deleted"]) });
+
+    await provider.removeDraft(config.accountId, current.id, retriedRef);
+    await provider.removeDraft(config.accountId, current.id, retriedRef);
+    expect(await provider.listDrafts(config.accountId)).toEqual([]);
+    expect(state.flagAdds.slice(2)).toEqual([
+      { uid: 3, flags: ["\\Deleted"], options: { uid: true } },
+      { uid: 3, flags: ["\\Deleted"], options: { uid: true } },
+    ]);
+    expect([...draftsMailbox.messages.keys()]).toEqual([900, 1, 2, 3]);
+    expect(state.messageDeletes).toEqual([]);
+    expect(draftsMailbox.messages.get(900)).toMatchObject({ modseq: 7n, flags: new Set(["\\Deleted"]) });
   });
 
   test("manages custom folders without changing special-use mailboxes", async () => {
@@ -645,6 +698,14 @@ class FakeImapClient implements ImapClient {
     const mailbox = this.#requireSelected();
     const messages = [...mailbox.messages.values()];
     if (query.all) return { all: this.#state.eSearchAll ?? messages.map((message) => message.uid).join(",") };
+    if (query.draft !== undefined || query.deleted !== undefined) {
+      const matching = messages.filter((message) => {
+        const flags = message.flags ?? new Set<string>();
+        return (query.draft === undefined || flags.has("\\Draft") === query.draft)
+          && (query.deleted === undefined || flags.has("\\Deleted") === query.deleted);
+      });
+      return { all: matching.map(({ uid }) => uid).join(",") };
+    }
     const term = query.or?.flatMap((criterion) => [criterion.subject, criterion.from, criterion.to, criterion.text])
       .find((value) => value !== undefined)
       ?.toLowerCase();
@@ -686,6 +747,7 @@ class FakeImapClient implements ImapClient {
     flags: string[],
     options?: StoreOptions,
   ): Promise<boolean> {
+    this.#state.flagAdds.push({ uid: range, flags: [...flags], options: options ?? {} });
     return this.#changeFlags(range, flags, true, options);
   }
 
@@ -721,9 +783,10 @@ class FakeImapClient implements ImapClient {
     };
   }
 
-  async messageDelete(range: number | number[], _options?: { uid?: boolean }): Promise<boolean> {
+  async messageDelete(range: number | number[], options?: { uid?: boolean }): Promise<boolean> {
     const mailbox = this.#requireSelected();
     const uids = Array.isArray(range) ? range : [range];
+    this.#state.messageDeletes.push({ uids: [...uids], options: options ?? {} });
     let deleted = false;
     for (const uid of uids) deleted = mailbox.messages.delete(uid) || deleted;
     return deleted;
@@ -751,7 +814,9 @@ class FakeImapClient implements ImapClient {
       this.#state.ambiguousAppendFailures -= 1;
       throw new Error("ambiguous APPEND response");
     }
-    return { destination: mailbox.path, uidValidity: mailbox.uidValidity, uid };
+    return this.capabilities.has("UIDPLUS")
+      ? { destination: mailbox.path, uidValidity: mailbox.uidValidity, uid }
+      : { destination: mailbox.path };
   }
 
   #changeFlags(range: number, flags: string[], add: boolean, options?: StoreOptions): boolean {
@@ -808,6 +873,8 @@ function fakeState(): FakeState {
   return {
     options: [],
     storeOptions: [],
+    flagAdds: [],
+    messageDeletes: [],
     searches: [],
     searchOptions: [],
     fetchQueries: [],

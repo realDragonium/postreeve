@@ -104,6 +104,7 @@ export type ImapClientFactory = (options: ImapFlowOptions) => ImapClient;
 const SUMMARY_SOURCE_BYTES = 64 * 1024;
 const SEEN_FLAG = "\\Seen";
 const DRAFT_FLAG = "\\Draft";
+const DELETED_FLAG = "\\Deleted";
 const MAX_PROVIDER_DRAFTS = 1_000;
 
 const defaultClientFactory: ImapClientFactory = (options) => new ImapFlow(options);
@@ -192,7 +193,6 @@ export class ImapMailProvider implements MailProvider {
     this.#assertAccount(accountId);
     if (ref?.kind === "gmail") throw new Error("IMAP cannot remove a draft reference from another provider");
     await this.#withClient(async (client) => {
-      requireUidPlus(client);
       const mailbox = await findDraftsMailbox(client);
       const opened = await client.mailboxOpen(mailbox);
       const matches = (await this.#listSelectedProviderDrafts(client, mailbox, opened))
@@ -202,11 +202,10 @@ export class ImapMailProvider implements MailProvider {
         uids.add(ref.uid);
       }
       const selected = [...uids].filter((uid) => uid > 0);
-      if (selected.length > 0 && !await client.messageDelete(selected, { uid: true })) {
-        const remaining = (await this.#listSelectedProviderDrafts(client, mailbox, opened))
-          .some((draft) => draft.postreeveId === postreeveId);
-        if (remaining) throw new Error("IMAP server refused to remove the provider draft");
-      }
+      await retireDraftUids(client, selected);
+      const remaining = (await this.#listSelectedProviderDrafts(client, mailbox, opened))
+        .some((draft) => draft.postreeveId === postreeveId);
+      if (remaining) throw new Error("IMAP server refused to remove the provider draft");
     });
   }
 
@@ -384,7 +383,6 @@ export class ImapMailProvider implements MailProvider {
   }
 
   async #replaceDraft(client: ImapClient, draft: Draft): Promise<ProviderDraftRef> {
-    requireUidPlus(client);
     const mailbox = await findDraftsMailbox(client);
     let appended: AppendResponseObject | false;
     let appendError: unknown;
@@ -411,7 +409,11 @@ export class ImapMailProvider implements MailProvider {
       .filter(({ ref }) => ref.kind === "imap" && ref.uid !== currentUid)
       .map(({ ref }) => ref.kind === "imap" ? ref.uid : 0)
       .filter((uid) => uid > 0);
-    if (staleUids.length > 0 && !await client.messageDelete(staleUids, { uid: true })) {
+    await retireDraftUids(client, staleUids);
+    const activeCopies = (await this.#listSelectedProviderDrafts(client, mailbox, opened))
+      .filter((candidate) => candidate.postreeveId === draft.id);
+    if (activeCopies.length !== 1 || activeCopies[0]?.ref.kind !== "imap"
+      || activeCopies[0].ref.uid !== currentUid) {
       throw new Error("IMAP stored the current draft but refused to remove stale copies");
     }
     return current.ref;
@@ -428,7 +430,7 @@ export class ImapMailProvider implements MailProvider {
     mailbox: string,
     opened: MailboxObject,
   ): Promise<ProviderDraft[]> {
-    const selected = await searchUids(client, { all: true }, MAX_PROVIDER_DRAFTS + 1);
+    const selected = await searchUids(client, { draft: true, deleted: false }, MAX_PROVIDER_DRAFTS + 1);
     if (selected.length > MAX_PROVIDER_DRAFTS) throw new Error("IMAP draft reconciliation exceeded its bound");
     const drafts: ProviderDraft[] = [];
     for await (const message of client.fetch(
@@ -436,7 +438,7 @@ export class ImapMailProvider implements MailProvider {
       { uid: true, flags: true, headers: ["X-Postreeve-Draft-ID", "X-Postreeve-Draft-Version"] },
       { uid: true },
     )) {
-      if (!hasFlag(message.flags, DRAFT_FLAG) || !message.headers) continue;
+      if (!hasFlag(message.flags, DRAFT_FLAG) || hasFlag(message.flags, DELETED_FLAG) || !message.headers) continue;
       const markers = parseProviderDraftMarkers(message.headers);
       if (!markers) continue;
       drafts.push({
@@ -558,9 +560,14 @@ export class ImapMailProvider implements MailProvider {
   }
 }
 
-function requireUidPlus(client: ImapClient): void {
-  if (!client.capabilities.has("UIDPLUS")) {
-    throw new Error("This IMAP server cannot safely reconcile drafts because it does not support UIDPLUS");
+async function retireDraftUids(client: ImapClient, uids: readonly number[]): Promise<void> {
+  if (uids.length === 0) return;
+  if (client.capabilities.has("UIDPLUS")) {
+    await client.messageDelete([...uids], { uid: true });
+    return;
+  }
+  for (const uid of uids) {
+    await client.messageFlagsAdd(uid, [DELETED_FLAG], { uid: true });
   }
 }
 

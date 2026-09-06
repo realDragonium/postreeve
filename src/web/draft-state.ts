@@ -68,10 +68,12 @@ export async function migrateLocalDraftsOnce(
   try {
     parsed = JSON.parse(storage.getItem(localDraftsKey) ?? "[]");
   } catch {
+    storage.setItem(localDraftsKey, "[]");
     storage.setItem(localDraftMigrationKey, "complete");
     return { migrated: 0, ignored: 1, retryable: 0 };
   }
   if (!Array.isArray(parsed)) {
+    storage.setItem(localDraftsKey, "[]");
     storage.setItem(localDraftMigrationKey, "complete");
     return { migrated: 0, ignored: 1, retryable: 0 };
   }
@@ -82,9 +84,8 @@ export async function migrateLocalDraftsOnce(
   let ignored = 0;
   let retryable = 0;
   for (const candidate of parsed) {
-    if (!isLocalDraft(candidate) || !accountIds.has(candidate.accountId)) {
+    if (!isLocalDraft(candidate)) {
       ignored += 1;
-      remaining.push(candidate);
       continue;
     }
     const clientId = await migrationDraftId(candidate.accountId, candidate.id);
@@ -102,6 +103,10 @@ export async function migrateLocalDraftsOnce(
     });
     if (!input.success) {
       ignored += 1;
+      continue;
+    }
+    if (!accountIds.has(candidate.accountId)) {
+      retryable += 1;
       remaining.push(candidate);
       continue;
     }

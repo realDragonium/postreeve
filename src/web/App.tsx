@@ -121,14 +121,18 @@ function App() {
     queries: accounts.map((account) => ({ queryKey: ["drafts", account.id], queryFn: () => api.drafts(account.id) })),
   });
   const drafts: readonly Draft[] = draftResults.flatMap((result) => result.data ?? []);
-  const migrationStarted = useRef(false);
+  const migrationAccountSnapshot = accounts.map(({ id }) => id).sort().join("\0");
+  const migratedAccountSnapshot = useRef<string | null>(null);
   useEffect(() => {
-    if (!accountsQuery.isSuccess || migrationStarted.current) return;
-    migrationStarted.current = true;
+    if (!accountsQuery.isSuccess || migratedAccountSnapshot.current === migrationAccountSnapshot) return;
+    migratedAccountSnapshot.current = migrationAccountSnapshot;
     void migrateLocalDraftsOnce(localStorage, accounts, api.createDraft).then(async ({ migrated }) => {
       if (migrated > 0) await queryClient.invalidateQueries({ queryKey: ["drafts"] });
-    }).catch((error: unknown) => flash(error instanceof Error ? error.message : "Local draft migration failed"));
-  }, [accountsQuery.isSuccess, accounts.map(({ id }) => id).join(), queryClient]);
+    }).catch((error: unknown) => {
+      migratedAccountSnapshot.current = null;
+      flash(error instanceof Error ? error.message : "Local draft migration failed");
+    });
+  }, [accountsQuery.isSuccess, migrationAccountSnapshot, queryClient]);
 
   const batchResults = useQueries({
     queries: accounts.map((account) => ({ queryKey: ["batches", account.id], queryFn: () => api.batches(account.id) })),
