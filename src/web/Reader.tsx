@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { Folder, MessageDetail, TriageAction } from "../shared/contracts";
+import type { Folder, MessageDetail, ReceivedAttachment, TriageAction } from "../shared/contracts";
 import { EmailBody } from "./EmailBody";
 import {
   additionalDeliveryAddresses,
@@ -26,11 +26,14 @@ export interface ReaderProps {
   onAcceptProposal: (proposalId: string) => void;
   onUndo: () => void;
   onCompose: (mode: "reply" | "reply_all" | "forward") => void;
+  onDownloadAttachment: (attachment: ReceivedAttachment) => Promise<void>;
 }
 
 export function Reader(props: ReaderProps) {
   const { message } = props;
   const [destination, setDestination] = useState("");
+  const [downloading, setDownloading] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
   const deliveredTo = additionalDeliveryAddresses(message);
   const archive = props.folders.find((folder) => folder.specialUse === "archive" && folder.path !== message.ref.mailbox);
   const destinations = props.folders.filter((folder) => folder.path !== message.ref.mailbox && folder.specialUse !== "trash");
@@ -97,6 +100,30 @@ export function Reader(props: ReaderProps) {
 
         {props.error ? <div className="alert error" style={{ marginTop: 16 }}>{props.error}</div> : null}
 
+        {message.attachments.length > 0 ? <section aria-label="Attachments" style={{ marginTop: 18 }}>
+          <div className="t-dim" style={{ fontSize: 11, marginBottom: 8 }}>Attachments</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {message.attachments.map((attachment) => <button
+              key={attachment.reference}
+              className="chip"
+              disabled={downloading !== null}
+              onClick={() => {
+                setDownloading(attachment.reference);
+                setDownloadError(null);
+                void props.onDownloadAttachment(attachment)
+                  .catch((error: unknown) => setDownloadError(
+                    error instanceof Error ? error.message : "Attachment download failed",
+                  ))
+                  .finally(() => setDownloading(null));
+              }}
+            >
+              {downloading === attachment.reference ? "Downloading…" : `Download ${attachment.filename}`}
+              <span className="t-dim"> · {attachment.sizeIsEstimate ? "~" : ""}{formatAttachmentSize(attachment.size)}</span>
+            </button>)}
+          </div>
+          {downloadError ? <div className="alert error" role="alert" style={{ marginTop: 8 }}>{downloadError}</div> : null}
+        </section> : null}
+
         <EmailBody
           key={`${message.ref.accountId}:${message.ref.mailbox}:${message.ref.uidValidity}:${message.ref.uid}`}
           html={message.html}
@@ -117,4 +144,10 @@ export function Reader(props: ReaderProps) {
       <span className="t-dim">esc back to list · j k previous and next message · e archive · u unread · ⌘Z undo</span>
     </div>
   </>;
+}
+
+function formatAttachmentSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

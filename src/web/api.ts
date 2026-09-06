@@ -27,6 +27,7 @@ import {
   type Draft,
   type DraftVersionInput,
   type MessageRef,
+  type ReceivedAttachment,
   type OperationBatch,
   type Proposal,
   type RenameFolderInput,
@@ -98,6 +99,22 @@ function jsonBody(value: unknown): RequestInit {
 
 function withSignal(signal?: AbortSignal): RequestInit {
   return signal ? { signal } : {};
+}
+
+async function requestAttachment(
+  accountId: string,
+  attachment: ReceivedAttachment,
+  signal?: AbortSignal,
+): Promise<Blob> {
+  const path = `/accounts/${encodeURIComponent(accountId)}/messages/${encodeURIComponent(attachment.canonicalMessageId)}`
+    + `/attachments/${encodeURIComponent(attachment.reference)}`;
+  const response = await fetch(`/api${path}`, withSignal(signal));
+  if (!response.ok) {
+    const body: unknown = await response.json().catch(() => null);
+    const error = apiError(body);
+    throw new ApiRequestError(error.message ?? `Download failed (${response.status})`, response.status, error.code);
+  }
+  return response.blob();
 }
 
 export const api = {
@@ -223,6 +240,7 @@ export const api = {
       ...jsonBody({ references }),
       ...withSignal(signal),
     }),
+  downloadAttachment: requestAttachment,
   conversation: (id: string, signal?: AbortSignal): Promise<CanonicalConversation> =>
     request(`/conversations/${encodeURIComponent(id)}`, canonicalConversationSchema, withSignal(signal)),
   sendMessage: (input: SendMessageInput, signal?: AbortSignal): Promise<SendReceipt> =>

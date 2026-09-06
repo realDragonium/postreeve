@@ -54,6 +54,7 @@ import {
   type ProviderMessageSummary,
   type ProviderDraft,
   type ProviderDraftScope,
+  type ProviderAttachmentDownload,
 } from "../mail/provider";
 import {
   MailSendPreDispatchError,
@@ -62,6 +63,12 @@ import {
   type MailSender,
 } from "../mail/sender";
 import { DraftConflictError, DraftDeletedError, DraftNotFoundError } from "./errors";
+import {
+  decodeAttachmentReference,
+  encodeAttachmentReference,
+  safeAttachmentFilename,
+  safeAttachmentMediaType,
+} from "./attachment-reference";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
 import {
   CredentialVault,
@@ -80,7 +87,10 @@ export type GmailClientFactory = (
 
 export interface PostreeveContext {
   tenantId: string;
+  maxAttachmentBytes?: number;
 }
+
+export const DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 interface PreparedMessageSend {
   readonly account: StoredAccount;
@@ -102,6 +112,7 @@ export class PostreeveService {
   readonly #imapProviderFactory: ImapProviderFactory;
   readonly #mailSenderFactory: MailSenderFactory;
   readonly #gmailClientFactory: GmailClientFactory;
+  readonly #maxAttachmentBytes: number;
 
   constructor(
     store: Store,
@@ -116,6 +127,10 @@ export class PostreeveService {
     },
   ) {
     if (!context.tenantId.trim()) throw new Error("A tenant ID is required");
+    const maxAttachmentBytes = context.maxAttachmentBytes ?? DEFAULT_MAX_ATTACHMENT_BYTES;
+    if (!Number.isSafeInteger(maxAttachmentBytes) || maxAttachmentBytes <= 0) {
+      throw new Error("The attachment download limit must be a positive integer");
+    }
     this.#store = store;
     this.#context = context;
     this.#providers = providers;
@@ -124,6 +139,7 @@ export class PostreeveService {
     this.#imapProviderFactory = imapProviderFactory;
     this.#mailSenderFactory = mailSenderFactory;
     this.#gmailClientFactory = gmailClientFactory;
+    this.#maxAttachmentBytes = maxAttachmentBytes;
   }
 
   async initialize(): Promise<void> {
@@ -356,16 +372,68 @@ export class PostreeveService {
         providerConversationId: _providerConversationId,
         canonicalReceivedAt: _canonicalReceivedAt,
         referenceSequences: _referenceSequences,
+        attachments: providerAttachments,
         ...publicDetail
       } = detail;
+      const attachmentScope = {
+        tenantId: this.#context.tenantId,
+        accountId,
+        canonicalMessageId: canonical.id,
+        provider: account.kind,
+      } as const;
       return {
         ...publicDetail,
         canonicalId: canonical.id,
         canonicalAliases: canonical.aliases,
         conversationId: canonical.conversationId,
+        attachments: providerAttachments.map(({ locator, ...metadata }) => ({
+          ...metadata,
+          canonicalMessageId: canonical.id,
+          reference: encodeAttachmentReference(attachmentScope, locator),
+        })),
         ...(_providerConversationId ? { providerConversationId: _providerConversationId } : {}),
       };
     }));
+  }
+
+  async downloadAttachment(
+    accountId: string,
+    canonicalMessageId: string,
+    reference: string,
+  ): Promise<ProviderAttachmentDownload> {
+    const account = await this.#requireAccount(accountId);
+    const canonical = await this.#store.getMessage(this.#context.tenantId, canonicalMessageId);
+    if (!canonical) throw new Error("Attachment message was not found");
+
+    const decoded = decodeAttachmentReference(reference);
+    if (decoded.tenantId !== this.#context.tenantId
+      || decoded.accountId !== accountId
+      || decoded.canonicalMessageId !== canonical.id
+      || decoded.provider !== account.kind
+      || decoded.locator.kind !== account.kind) {
+      throw new Error("Attachment reference does not belong to this account and message");
+    }
+
+    const locations = await this.#store.listMessageLocations(this.#context.tenantId, canonical.id);
+    const ownsLocation = locations.some((location) => decoded.locator.kind === "gmail"
+      ? location.accountId === accountId && location.provider === "gmail"
+        && location.providerId === decoded.locator.messageId
+      : location.accountId === accountId && location.provider === "imap"
+        && location.mailbox === decoded.locator.mailbox
+        && location.uidValidity === decoded.locator.uidValidity
+        && location.uid === decoded.locator.uid);
+    if (!ownsLocation) throw new Error("Attachment reference is stale for this message");
+
+    const downloaded = await this.#providers.forAccount(accountId)
+      .downloadAttachment(accountId, decoded.locator, this.#maxAttachmentBytes);
+    if (downloaded.content.byteLength > this.#maxAttachmentBytes) {
+      throw new Error(`Attachment exceeds the ${this.#maxAttachmentBytes}-byte download limit`);
+    }
+    return {
+      filename: safeAttachmentFilename(downloaded.filename),
+      mediaType: safeAttachmentMediaType(downloaded.mediaType),
+      content: downloaded.content,
+    };
   }
 
   async sendMessage(rawInput: SendMessageInput): Promise<SendReceipt> {

@@ -8,6 +8,7 @@ import type {
   MailProviderKind,
   TriageAction,
   ProviderDraftRef,
+  ReceivedAttachment,
 } from "../../shared/contracts";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "./message-id";
 
@@ -18,7 +19,29 @@ interface ProviderMessageMetadata {
 }
 
 export type ProviderMessageSummary = MessageSummary & ProviderMessageMetadata;
-export type ProviderMessageDetail = MessageDetail & ProviderMessageMetadata;
+export type ProviderAttachmentLocator =
+  | { readonly kind: "gmail"; readonly messageId: string; readonly partId: string }
+  | {
+      readonly kind: "imap";
+      readonly mailbox: string;
+      readonly uidValidity: string;
+      readonly uid: number;
+      readonly part: string;
+    };
+
+export interface ProviderAttachment extends Omit<ReceivedAttachment, "reference" | "canonicalMessageId"> {
+  readonly locator: ProviderAttachmentLocator;
+}
+
+export interface ProviderAttachmentDownload {
+  readonly filename: string;
+  readonly mediaType: string;
+  readonly content: Uint8Array;
+}
+
+export type ProviderMessageDetail = Omit<MessageDetail, "attachments"> & ProviderMessageMetadata & {
+  attachments: ProviderAttachment[];
+};
 export type ProviderMessageObservation = CanonicalMessageObservation & {
   providerConversationId?: string;
   referenceSequences?: readonly (readonly string[])[];
@@ -101,6 +124,11 @@ export interface MailProvider {
   listMessagePage(accountId: string, mailbox: string, limit: number): Promise<MailboxPage>;
   listMessages(accountId: string, mailbox: string, limit: number): Promise<ProviderMessageSummary[]>;
   readMessages(accountId: string, references: MessageRef[]): Promise<ProviderMessageDetail[]>;
+  downloadAttachment(
+    accountId: string,
+    locator: ProviderAttachmentLocator,
+    maxBytes: number,
+  ): Promise<ProviderAttachmentDownload>;
   searchMessages(accountId: string, mailbox: string, query: string, limit: number): Promise<ProviderMessageSummary[]>;
   revalidate(reference: MessageRef): Promise<boolean>;
   apply(reference: MessageRef, action: TriageAction): Promise<AppliedMailAction>;

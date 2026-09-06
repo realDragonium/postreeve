@@ -69,6 +69,7 @@ const message: CanonicalMessageSummary = {
 };
 
 const messageDetail: CanonicalMessageDetail = {
+  attachments: [],
   ...message,
   text: "Untrusted email body",
   html: null,

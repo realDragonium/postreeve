@@ -41,6 +41,7 @@ const messageRef: CanonicalMessageDetail["ref"] = {
 };
 
 const message: CanonicalMessageDetail = {
+  attachments: [],
   canonicalId: "canonical-message",
   canonicalAliases: [],
   conversationId: "conversation-message",
@@ -936,6 +937,72 @@ test("reads a message and returns to the list on a narrow screen", async ({ page
   await page.getByRole("button", { name: "← Inbox" }).click();
   await expect(page.getByRole("heading", { name: message.subject })).toHaveCount(0);
   await expect(page.getByText(message.subject, { exact: true })).toBeVisible();
+});
+
+test("downloads received attachments with loading and provider error feedback", async ({ page }) => {
+  const attached: CanonicalMessageDetail = {
+    ...message,
+    attachments: [
+      {
+        reference: "download-reference",
+        canonicalMessageId: message.canonicalId,
+        filename: "planning notes.txt",
+        mediaType: "text/plain",
+        size: 2048,
+        sizeIsEstimate: false,
+      },
+      {
+        reference: "failed-reference",
+        canonicalMessageId: message.canonicalId,
+        filename: "unavailable.pdf",
+        mediaType: "application/pdf",
+        size: 3100,
+        sizeIsEstimate: true,
+      },
+    ],
+  };
+  let releaseDownload: (() => void) | undefined;
+  const downloadGate = new Promise<void>((resolve) => { releaseDownload = resolve; });
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
+    if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, [attached]);
+    if (request.method() === "POST" && url.pathname === "/api/messages/read") return json(route, [attached]);
+    if (request.method() === "GET" && url.pathname.endsWith("/attachments/download-reference")) {
+      await downloadGate;
+      return route.fulfill({
+        status: 200,
+        contentType: "text/plain",
+        headers: { "Content-Disposition": 'attachment; filename="planning notes.txt"' },
+        body: "attachment body",
+      });
+    }
+    if (request.method() === "GET" && url.pathname.endsWith("/attachments/failed-reference")) {
+      return json(route, { error: "Mailbox provider is temporarily unavailable" }, 503);
+    }
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/drafts`) return json(route, []);
+    if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
+    return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
+  });
+
+  await page.goto("/");
+  await page.getByText(message.subject, { exact: true }).click();
+  await expect(page.getByLabel("Attachments")).toContainText("Download planning notes.txt");
+  await expect(page.getByLabel("Attachments")).toContainText("~3.0 KB");
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByRole("button", { name: /Download planning notes\.txt/ }).click();
+  await expect(page.getByRole("button", { name: /Downloading/ })).toBeDisabled();
+  releaseDownload?.();
+  const download = await downloadEvent;
+  expect(download.suggestedFilename()).toBe("planning notes.txt");
+  await expect(page.getByRole("button", { name: /Download planning notes\.txt/ })).toBeEnabled();
+
+  await page.getByRole("button", { name: /Download unavailable\.pdf/ }).click();
+  await expect(page.getByRole("alert")).toContainText("Mailbox provider is temporarily unavailable");
 });
 
 test("keyboard shortcuts open, move through and archive mail", async ({ page }) => {

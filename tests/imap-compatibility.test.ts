@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { simpleParser } from "mailparser";
+import { Readable } from "node:stream";
 import type {
   AppendResponseObject,
   CopyResponseObject,
+  DownloadObject,
   ESearchResult,
   FetchMessageObject,
   FetchOptions,
@@ -12,6 +14,7 @@ import type {
   ListResponse,
   MailboxObject,
   MailboxOpenOptions,
+  MessageStructureObject,
   SearchObject,
   StatusObject,
   StoreOptions,
@@ -51,6 +54,7 @@ interface FakeState {
   readonly searches: SearchObject[];
   readonly searchOptions: Array<{ uid?: boolean; returnOptions: Array<"MIN" | "MAX" | "COUNT" | "ALL" | { partial: string }> }>;
   readonly fetchQueries: FetchQueryObject[];
+  readonly downloads: Array<{ uid: number; part: string | undefined }>;
   eSearchAll?: string;
   lists: number;
   mailboxOpens: number;
@@ -80,6 +84,177 @@ const config = {
 const draftScope = { tenantId: "tenant-a", accountId: config.accountId };
 
 describe("Bun IMAP compatibility", () => {
+  test("reads attachment metadata without fetching file parts and downloads original decoded bytes", async () => {
+    const state = fakeState();
+    const inbox = state.mailboxes.get("INBOX");
+    const message = inbox?.messages.get(3);
+    if (!message?.bodyStructure?.childNodes || !message.bodyParts) throw new Error("Expected MIME fixture");
+    const html = '<p>Newest HTML body</p><a href="cid:document@example.test">Document</a><img src="cid:logo@example.test">';
+    const htmlPart = message.bodyStructure.childNodes[0]?.childNodes?.[1];
+    if (!htmlPart) throw new Error("Expected HTML body part");
+    htmlPart.size = Buffer.byteLength(html);
+    message.bodyParts.set("1.2", Buffer.from(html));
+    const pdf = Buffer.from("pdf bytes").toString("base64");
+    const quotedPrintable = "keep=0D=0Abytes=3D";
+    message.bodyStructure.childNodes.push(
+      {
+        part: "3",
+        type: "application/pdf",
+        parameters: { name: "report.pdf" },
+        disposition: "attachment",
+        dispositionParameters: { filename: "report.pdf" },
+        id: "document@example.test",
+        encoding: "base64",
+        size: Buffer.byteLength(pdf),
+      },
+      {
+        part: "4",
+        type: "text/plain",
+        parameters: { name: "inline-notes.txt" },
+        disposition: "inline",
+        dispositionParameters: { filename: "inline-notes.txt" },
+        encoding: "quoted-printable",
+        size: 1,
+      },
+      {
+        part: "5",
+        type: "message/rfc822",
+        parameters: { name: "forwarded.eml" },
+        disposition: "attachment",
+        dispositionParameters: { filename: "forwarded.eml" },
+        encoding: "base64",
+        size: 12,
+        childNodes: [{ part: "5.1", type: "text/plain", size: 20 }],
+      },
+    );
+    message.bodyParts.set("3", Buffer.from(pdf));
+    message.bodyParts.set("4", Buffer.from(quotedPrintable));
+    message.bodyParts.set("5", Buffer.from(Buffer.from("attached eml").toString("base64")));
+    message.bodyParts.set("5.1", Buffer.from("hidden attached text"));
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const reference = {
+      accountId: config.accountId,
+      mailbox: "INBOX",
+      uidValidity: "101",
+      uid: 3,
+      modseq: "13",
+    };
+
+    const [detail] = await provider.readMessages(config.accountId, [reference]);
+    expect(detail?.text).toBe("Newest plain text body");
+    expect(detail?.text).not.toContain("hidden attached text");
+    expect(detail?.attachments.map(({ filename, sizeIsEstimate }) => ({ filename, sizeIsEstimate }))).toEqual([
+      { filename: "logo.png", sizeIsEstimate: true },
+      { filename: "report.pdf", sizeIsEstimate: true },
+      { filename: "inline-notes.txt", sizeIsEstimate: true },
+      { filename: "forwarded.eml", sizeIsEstimate: true },
+    ]);
+    expect(state.downloads.map(({ part }) => part)).toEqual(["1.1", "1.2", "2"]);
+    expect(state.fetchQueries.some((query) => query.bodyStructure === true && query.source === undefined)).toBe(true);
+    const inlineImage = detail?.attachments.find(({ filename }) => filename === "logo.png");
+    if (!inlineImage) throw new Error("Expected referenced CID file metadata");
+    expect(Buffer.from((await provider.downloadAttachment(config.accountId, inlineImage.locator, 20)).content))
+      .toEqual(Buffer.from("iVBORw0KGgo=", "base64"));
+    const inlineFile = detail?.attachments.find(({ filename }) => filename === "inline-notes.txt");
+    if (!inlineFile) throw new Error("Expected inline text file");
+    const exact = Buffer.from("keep\r\nbytes=");
+    expect(Buffer.from((await provider.downloadAttachment(config.accountId, inlineFile.locator, exact.byteLength)).content))
+      .toEqual(exact);
+    await expect(provider.downloadAttachment(config.accountId, inlineFile.locator, exact.byteLength - 1))
+      .rejects.toThrow("download limit");
+    message.bodyParts.set("4", Buffer.from("a \r\nb\t\r\nencoded=20space=09tab\r\nsoft= \r\nbreak"));
+    expect(Buffer.from((await provider.downloadAttachment(config.accountId, inlineFile.locator, 100)).content))
+      .toEqual(Buffer.from("a\r\nb\r\nencoded space\ttab\r\nsoftbreak"));
+
+    const pdfFile = detail?.attachments.find(({ filename }) => filename === "report.pdf");
+    if (!pdfFile) throw new Error("Expected base64 file");
+    message.bodyParts.set("3", Buffer.from("cG!Rm"));
+    expect(Buffer.from((await provider.downloadAttachment(config.accountId, pdfFile.locator, 100)).content))
+      .toEqual(Buffer.from("pdf"));
+    message.bodyParts.set("3", Buffer.from("Y"));
+    await expect(provider.downloadAttachment(config.accountId, pdfFile.locator, 100))
+      .rejects.toThrow("malformed base64 attachment data");
+
+    message.uid = 999;
+    await expect(provider.downloadAttachment(config.accountId, inlineFile.locator, 100)).rejects.toThrow("reference is stale");
+  });
+
+  test("reads and downloads a single-part root attachment without an invented BODYSTRUCTURE part", async () => {
+    const state = fakeState();
+    const message = state.mailboxes.get("INBOX")?.messages.get(2);
+    if (!message) throw new Error("Expected message fixture");
+    const content = Buffer.from([7]);
+    const encoded = Buffer.from(content.toString("base64"));
+    message.bodyStructure = {
+      type: "application/octet-stream",
+      parameters: { name: "root.bin" },
+      disposition: "attachment",
+      dispositionParameters: { filename: "root.bin" },
+      encoding: "base64",
+      size: encoded.byteLength,
+    };
+    message.bodyParts = new Map([["text", encoded]]);
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const reference = {
+      accountId: config.accountId,
+      mailbox: "INBOX",
+      uidValidity: "101",
+      uid: 2,
+      modseq: "12",
+    };
+
+    const [detail] = await provider.readMessages(config.accountId, [reference]);
+    expect(detail?.attachments[0]?.locator).toEqual({
+      kind: "imap",
+      mailbox: "INBOX",
+      uidValidity: "101",
+      uid: 2,
+      part: "1",
+    });
+    const attachment = detail?.attachments[0];
+    if (!attachment) throw new Error("Expected root attachment");
+    expect(Buffer.from((await provider.downloadAttachment(config.accountId, attachment.locator, content.byteLength)).content))
+      .toEqual(content);
+    for (const tolerated of ["Bw==\r\n", "Bw==!"]) {
+      const transfer = Buffer.from(tolerated);
+      message.bodyParts.set("text", transfer);
+      message.bodyStructure.size = transfer.byteLength;
+      expect(Buffer.from((await provider.downloadAttachment(
+        config.accountId,
+        attachment.locator,
+        content.byteLength,
+      )).content)).toEqual(content);
+    }
+    const overflow = Buffer.from("CAk=");
+    message.bodyParts.set("text", overflow);
+    message.bodyStructure.size = overflow.byteLength;
+    await expect(provider.downloadAttachment(config.accountId, attachment.locator, content.byteLength))
+      .rejects.toThrow("1-byte download limit");
+  });
+
+  test("preserves HTML-only reply text and ImapFlow-decoded visible-body charsets", async () => {
+    const state = fakeState();
+    const inbox = state.mailboxes.get("INBOX");
+    const htmlMessage = inbox?.messages.get(1);
+    const charsetMessage = inbox?.messages.get(2);
+    if (!htmlMessage || !charsetMessage) throw new Error("Expected message fixtures");
+    const html = "<p>HTML-only <strong>reply content</strong></p>";
+    htmlMessage.bodyStructure = { type: "text/html", parameters: { charset: "utf-8" }, size: Buffer.byteLength(html) };
+    htmlMessage.bodyParts = new Map([["1", Buffer.from(html)]]);
+    const latin1 = Buffer.from([0x63, 0x61, 0x66, 0xe9]);
+    charsetMessage.bodyStructure = { type: "text/plain", parameters: { charset: "iso-8859-1" }, size: latin1.byteLength };
+    charsetMessage.bodyParts = new Map([["1", latin1]]);
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+
+    const details = await provider.readMessages(config.accountId, [
+      { accountId: config.accountId, mailbox: "INBOX", uidValidity: "101", uid: 1, modseq: "11" },
+      { accountId: config.accountId, mailbox: "INBOX", uidValidity: "101", uid: 2, modseq: "12" },
+    ]);
+    expect(details[0]?.html).toBe(html);
+    expect(details[0]?.text).toContain("HTML-only reply content");
+    expect(details[1]?.text).toBe("café");
+  });
+
   test("verifies authentication with a folder list and no mailbox mutation", async () => {
     const state = fakeState();
     await new ImapMailProvider(config, fakeFactory(state)).verifyConnection();
@@ -1263,6 +1438,29 @@ class FakeImapClient implements ImapClient {
     return message ? this.#withFetchOmissions(fetchedMessage(message, query)) : false;
   }
 
+  async download(range: number, part?: string, options?: { uid?: boolean; maxBytes?: number }): Promise<DownloadObject> {
+    this.#state.downloads.push({ uid: range, part });
+    const message = this.#requireSelected().messages.get(range);
+    const stored = part ? message?.bodyParts?.get(part) : message?.source;
+    if (!message || !stored) throw new Error("Fake body part is missing");
+    const node = part
+      ? findStructurePart(message.bodyStructure, part)
+        ?? (part === "1" && !message.bodyStructure?.childNodes ? message.bodyStructure : undefined)
+      : undefined;
+    const transferDecoded = node?.encoding?.toLowerCase() === "base64"
+      ? Buffer.from(stored.toString("ascii").replace(/\s/g, ""), "base64")
+      : stored;
+    const charset = node?.parameters?.charset;
+    const content = charset && !/^utf-?8$/i.test(charset)
+      ? Buffer.from(new TextDecoder(charset).decode(transferDecoded))
+      : transferDecoded;
+    const limited = content.subarray(0, options?.maxBytes);
+    return {
+      meta: { expectedSize: content.byteLength, contentType: message.bodyStructure?.type ?? "application/octet-stream" },
+      content: Readable.from([limited]),
+    };
+  }
+
   #withFetchOmissions(message: FetchMessageObject): FetchMessageObject {
     const result = { ...message };
     if (this.#state.fetchWithoutFlags.has(message.uid)) delete result.flags;
@@ -1424,6 +1622,7 @@ function fakeState(): FakeState {
     searches: [],
     searchOptions: [],
     fetchQueries: [],
+    downloads: [],
     lists: 0,
     mailboxOpens: 0,
     ambiguousAppendFailures: 0,
@@ -1506,8 +1705,38 @@ function fakeRelatedMessage(
   flags: Set<string>,
 ): FetchMessageObject {
   const message = fakeMessage(uid, modseq, subject, text, flags);
+  const html = '<p>Newest HTML body</p><img src="https://tracker.example.test/pixel.png"><img src="cid:logo@example.test">';
+  const logo = Buffer.from("iVBORw0KGgo=", "base64");
   return {
     ...message,
+    bodyStructure: {
+      type: "multipart/related",
+      childNodes: [
+        {
+          part: "1",
+          type: "multipart/alternative",
+          childNodes: [
+            { part: "1.1", type: "text/plain", parameters: { charset: "utf-8" }, size: Buffer.byteLength(text) },
+            { part: "1.2", type: "text/html", parameters: { charset: "utf-8" }, size: Buffer.byteLength(html) },
+          ],
+        },
+        {
+          part: "2",
+          type: "image/png",
+          parameters: { name: "logo.png" },
+          disposition: "inline",
+          dispositionParameters: { filename: "logo.png" },
+          id: "logo@example.test",
+          encoding: "base64",
+          size: 12,
+        },
+      ],
+    },
+    bodyParts: new Map([
+      ["1.1", Buffer.from(text)],
+      ["1.2", Buffer.from(html)],
+      ["2", Buffer.from(logo.toString("base64"))],
+    ]),
     source: Buffer.from([
       "From: Sender <sender@example.test>",
       "To: Human <human@example.test>",
@@ -1562,6 +1791,17 @@ function fakeMessage(
   const source = Buffer.from(
     `From: Sender <sender@example.test>\r\nReply-To: Replies <replies@example.test>\r\nTo: Human <human@example.test>\r\nMessage-ID: <message-${uid}@example.test>\r\nIn-Reply-To: <parent@example.test>\r\nReferences: <root@example.test> <parent@example.test>\r\nSubject: ${subject}\r\nDate: Fri, 29 Aug 2025 12:00:00 +0000\r\n${contentType}${text}\r\n${htmlPart}${ending}`,
   );
+  const bodyParts = new Map<string, Buffer>([["1", Buffer.from(text)]]);
+  const bodyStructure = html === undefined
+    ? { type: "text/plain", parameters: { charset: "utf-8" }, size: Buffer.byteLength(text) }
+    : {
+        type: "multipart/alternative",
+        childNodes: [
+          { part: "1", type: "text/plain", parameters: { charset: "utf-8" }, size: Buffer.byteLength(text) },
+          { part: "2", type: "text/html", parameters: { charset: "utf-8" }, size: Buffer.byteLength(html) },
+        ],
+      };
+  if (html !== undefined) bodyParts.set("2", Buffer.from(html));
   return {
     seq: uid,
     uid,
@@ -1577,6 +1817,8 @@ function fakeMessage(
       to: [{ name: "Human", address: "human@example.test" }],
     },
     source,
+    bodyStructure,
+    bodyParts,
   };
 }
 
@@ -1625,6 +1867,19 @@ function cloneMessage(message: FetchMessageObject): FetchMessageObject {
   };
 }
 
+function findStructurePart(
+  root: MessageStructureObject | undefined,
+  section: string,
+): MessageStructureObject | undefined {
+  if (!root) return undefined;
+  if (root.part === section) return root;
+  for (const child of root.childNodes ?? []) {
+    const match = findStructurePart(child, section);
+    if (match) return match;
+  }
+  return undefined;
+}
+
 function fetchedMessage(message: FetchMessageObject, query: FetchQueryObject): FetchMessageObject {
   const cloned = cloneMessage(message);
   if (typeof query.source === "object" && cloned.source) {
@@ -1632,8 +1887,22 @@ function fetchedMessage(message: FetchMessageObject, query: FetchQueryObject): F
     const end = query.source.maxLength === undefined ? undefined : start + query.source.maxLength;
     cloned.source = cloned.source.subarray(start, end);
   }
-  if (Array.isArray(query.headers) && message.source) {
-    cloned.headers = selectedHeaders(message.source, query.headers);
+  if (query.headers && message.source) {
+    cloned.headers = Array.isArray(query.headers)
+      ? selectedHeaders(message.source, query.headers)
+      : message.source.subarray(0, message.source.indexOf("\r\n\r\n") + 4);
+  }
+  if (query.bodyParts && message.bodyParts) {
+    cloned.bodyParts = new Map(query.bodyParts.flatMap((requested) => {
+      const key = typeof requested === "string" ? requested : requested.key;
+      const value = message.bodyParts?.get(key);
+      if (!value) return [];
+      const start = typeof requested === "string" ? 0 : requested.start ?? 0;
+      const end = typeof requested === "string" || requested.maxLength === undefined
+        ? undefined
+        : start + requested.maxLength;
+      return [[key, value.subarray(start, end)] as const];
+    }));
   }
   return cloned;
 }

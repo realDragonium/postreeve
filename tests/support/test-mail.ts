@@ -23,6 +23,8 @@ import {
   type ProviderLocationMove,
   type ProviderDraft,
   type ProviderDraftScope,
+  type ProviderAttachmentDownload,
+  type ProviderAttachmentLocator,
 } from "../../src/server/mail/provider";
 import {
   MailSenderRegistry,
@@ -32,7 +34,7 @@ import {
 import { CredentialVault } from "../../src/server/security/credentials";
 import type { ImapAccountCredentials } from "../../src/server/security/credentials";
 
-interface TestMessage extends MessageDetail {
+interface TestMessage extends Omit<MessageDetail, "attachments"> {
   mailbox: string;
 }
 
@@ -59,6 +61,7 @@ export function testAccountInput(name = "Work", email = "person@example.test"): 
 
 interface TestHarnessOptions {
   tenantId?: string;
+  maxAttachmentBytes?: number;
   storePath?: string;
   imapFailure?: Error;
   smtpFailure?: Error;
@@ -83,6 +86,11 @@ interface TestHarnessOptions {
   draftRemoveFailure?: () => Error | undefined;
   providerDraftState?: Map<string, ProviderDraft>;
   providerForAccount?: (accountId: string) => MailProvider | undefined;
+  downloadAttachment?: (
+    accountId: string,
+    locator: ProviderAttachmentLocator,
+    maxBytes: number,
+  ) => Promise<ProviderAttachmentDownload> | ProviderAttachmentDownload;
 }
 
 export async function createTestHarness(options: TestHarnessOptions = {}) {
@@ -104,7 +112,7 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
   const providers = new Map<string, MailProvider>();
   const service = new PostreeveService(
     store,
-    { tenantId },
+    { tenantId, ...(options.maxAttachmentBytes === undefined ? {} : { maxAttachmentBytes: options.maxAttachmentBytes }) },
     new MailProviderRegistry(),
     new MailSenderRegistry(),
     new CredentialVault(testMasterKey),
@@ -126,6 +134,7 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
         options.providerDraftState,
         options.onDraftUpdate,
         options.rotateDraftRefOnUpdate ?? false,
+        options.downloadAttachment,
       );
       providers.set(accountId, provider);
       return provider;
@@ -189,6 +198,7 @@ class TestMailProvider implements MailProvider {
   readonly #draftRemoveFailure: (() => Error | undefined) | undefined;
   readonly #onDraftUpdate: ((draft: Draft, ref: ProviderDraftRef) => void | Promise<void>) | undefined;
   readonly #rotateDraftRefOnUpdate: boolean;
+  readonly #downloadAttachment: TestHarnessOptions["downloadAttachment"];
 
   constructor(
     accountId: string,
@@ -204,6 +214,7 @@ class TestMailProvider implements MailProvider {
     draftState: Map<string, ProviderDraft> | undefined,
     onDraftUpdate: ((draft: Draft, ref: ProviderDraftRef) => void | Promise<void>) | undefined,
     rotateDraftRefOnUpdate: boolean,
+    downloadAttachment: TestHarnessOptions["downloadAttachment"],
   ) {
     this.#accountId = accountId;
     this.#messages = testMessages(accountId, duplicateDelivery, archiveDelivery);
@@ -214,6 +225,7 @@ class TestMailProvider implements MailProvider {
     this.#draftRemoveFailure = draftRemoveFailure;
     this.#onDraftUpdate = onDraftUpdate;
     this.#rotateDraftRefOnUpdate = rotateDraftRefOnUpdate;
+    this.#downloadAttachment = downloadAttachment;
     this.#drafts = draftState ?? new Map();
     if (missingMessageId) {
       this.#messages[0]!.messageId = "missing-message-id";
@@ -318,13 +330,22 @@ class TestMailProvider implements MailProvider {
     return { messages: observed.slice(0, limit).map(toSummary), complete: observed.length <= limit };
   }
 
-  async readMessages(accountId: string, references: MessageRef[]): Promise<MessageDetail[]> {
+  async readMessages(accountId: string, references: MessageRef[]): Promise<ProviderMessageDetail[]> {
     this.#assertAccount(accountId);
     return references.map((reference) => {
       const message = this.#find(reference);
       if (!message) throw new Error(`Message UID ${reference.uid} is stale or missing`);
-      return { ...toDetail(message), ...structuredClone(this.#readOverrides) };
+      return { ...toDetail(message), attachments: [], ...structuredClone(this.#readOverrides) };
     });
+  }
+
+  async downloadAttachment(
+    accountId: string,
+    locator: ProviderAttachmentLocator,
+    maxBytes: number,
+  ): Promise<ProviderAttachmentDownload> {
+    if (!this.#downloadAttachment) throw new Error("Test message has no attachment");
+    return this.#downloadAttachment(accountId, locator, maxBytes);
   }
 
   async searchMessages(accountId: string, mailbox: string, query: string, limit: number): Promise<MessageSummary[]> {
@@ -528,7 +549,7 @@ function toSummary(message: TestMessage): MessageSummary {
   return structuredClone(summary);
 }
 
-function toDetail(message: TestMessage): MessageDetail {
+function toDetail(message: TestMessage): Omit<MessageDetail, "attachments"> {
   const { mailbox: _mailbox, ...detail } = message;
   return structuredClone(detail);
 }

@@ -108,7 +108,271 @@ function rawThreadingSource(input: {
   ].join("\r\n"), "utf8").toString("base64url");
 }
 
+async function gmailPayload(raw: string) {
+  const parsed = await simpleParser(Buffer.from(raw, "base64url"), {
+    keepCidLinks: true,
+    skipHtmlToText: true,
+    skipTextToHtml: true,
+  });
+  const parts: Array<Record<string, unknown>> = [];
+  if (parsed.text !== undefined) parts.push({
+    partId: "text",
+    mimeType: "text/plain",
+    filename: "",
+    headers: [{ name: "Content-Type", value: "text/plain; charset=UTF-8" }],
+    body: { size: Buffer.byteLength(parsed.text), data: Buffer.from(parsed.text).toString("base64url") },
+  });
+  if (typeof parsed.html === "string") parts.push({
+    partId: "html",
+    mimeType: "text/html",
+    filename: "",
+    headers: [{ name: "Content-Type", value: "text/html; charset=UTF-8" }],
+    body: { size: Buffer.byteLength(parsed.html), data: Buffer.from(parsed.html).toString("base64url") },
+  });
+  parsed.attachments.forEach((attachment, index) => parts.push({
+    partId: `attachment-${index}`,
+    mimeType: attachment.contentType,
+    filename: attachment.filename ?? "",
+    headers: [
+      { name: "Content-Disposition", value: attachment.contentDisposition ?? "attachment" },
+      ...(attachment.cid ?? attachment.contentId
+        ? [{ name: "Content-ID", value: `<${attachment.cid ?? attachment.contentId}>` }]
+        : []),
+    ],
+    body: { size: attachment.size, data: attachment.content.toString("base64url") },
+  }));
+  return {
+    partId: "",
+    mimeType: "multipart/mixed",
+    filename: "",
+    headers: parsed.headerLines.map(({ line }) => {
+      const separator = line.indexOf(":");
+      return { name: line.slice(0, separator), value: line.slice(separator + 1).trim() };
+    }).filter(({ name }) => name),
+    body: { size: 0 },
+    parts,
+  };
+}
+
 describe("Gmail compatibility", () => {
+  test("lists ordinary files from MIME metadata and fetches bytes only on download", async () => {
+    const requests: string[] = [];
+    const external = Buffer.from("file!");
+    const inlineText = Buffer.from("keep\r\nbytes");
+    const encodedName = Buffer.from("Renée Example").toString("base64");
+    const encodedSubject = Buffer.from("Résumé files").toString("base64");
+    const payload = {
+      partId: "",
+      mimeType: "multipart/mixed",
+      filename: "",
+      headers: [
+        { name: "Subject", value: `=?UTF-8?B?${encodedSubject}?=` },
+        { name: "From", value: `=?UTF-8?B?${encodedName}?= <renee@example.test>` },
+        { name: "To", value: "Team: Alice <alice@example.test>, Bob <bob@example.test>;" },
+        { name: "Message-ID", value: "<files@example.test>" },
+      ],
+      body: { size: 0 },
+      parts: [
+        {
+          partId: "1",
+          mimeType: "text/plain",
+          filename: "",
+          headers: [{ name: "Content-Type", value: "text/plain; charset=utf-8; format=flowed" }],
+          body: {
+            size: Buffer.byteLength("Visible \r\nbody"),
+            data: Buffer.from("Visible \r\nbody").toString("base64url"),
+          },
+        },
+        {
+          partId: "2",
+          mimeType: "application/pdf",
+          filename: "report.pdf",
+          headers: [{ name: "Content-Disposition", value: "attachment; filename=report.pdf" }],
+          body: { size: external.byteLength, attachmentId: "external-body" },
+        },
+        {
+          partId: "3",
+          mimeType: "text/plain",
+          filename: "inline-notes.txt",
+          headers: [{ name: "Content-Disposition", value: "inline; filename=inline-notes.txt" }],
+          body: { size: inlineText.byteLength, data: inlineText.toString("base64url") },
+        },
+        {
+          partId: "4",
+          mimeType: "message/rfc822",
+          filename: "forwarded.eml",
+          headers: [{ name: "Content-Disposition", value: "attachment; filename=forwarded.eml" }],
+          body: { size: 9, attachmentId: "message-body" },
+          parts: [{
+            partId: "4.1",
+            mimeType: "text/plain",
+            filename: "",
+            headers: [{ name: "Content-Type", value: "text/plain" }],
+            body: { size: 19, data: Buffer.from("Hidden attached body").toString("base64url") },
+          }],
+        },
+      ],
+    };
+    const request: HttpFetch = async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      requests.push(url);
+      if (url === "https://oauth2.googleapis.com/token") return json({ access_token: "access", expires_in: 3600 });
+      if (url.includes("/messages/file-message?format=full")) {
+        return json({
+          id: "file-message",
+          labelIds: ["INBOX"],
+          snippet: "Visible body",
+          internalDate: "1787990400000",
+          payload,
+        });
+      }
+      if (url.includes("/messages/file-message/attachments/external-body")) {
+        return json({ size: external.byteLength, data: external.toString("base64url") });
+      }
+      return new Response(null, { status: 404 });
+    };
+    const client = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "refresh" },
+      clientId: "client",
+      fetch: request,
+    });
+    const reference = {
+      accountId: account.id,
+      mailbox: "INBOX",
+      uidValidity: "gmail",
+      uid: 1,
+      modseq: null,
+      providerId: "file-message",
+    };
+
+    const [detail] = await client.readMessages(account.id, [reference]);
+    expect(detail?.subject).toBe("Résumé files");
+    expect(detail?.from).toEqual([{ name: "Renée Example", address: "renee@example.test" }]);
+    expect(detail?.to).toEqual([
+      { name: "Alice", address: "alice@example.test" },
+      { name: "Bob", address: "bob@example.test" },
+    ]);
+    expect(detail?.text).toBe("Visible body");
+    expect(detail?.text).not.toContain("Hidden attached body");
+    expect(detail?.attachments.map(({ filename, sizeIsEstimate }) => ({ filename, sizeIsEstimate }))).toEqual([
+      { filename: "report.pdf", sizeIsEstimate: false },
+      { filename: "inline-notes.txt", sizeIsEstimate: false },
+      { filename: "forwarded.eml", sizeIsEstimate: false },
+    ]);
+    expect(requests.some((url) => url.includes("/attachments/"))).toBe(false);
+
+    const externalAttachment = detail?.attachments[0];
+    if (!externalAttachment) throw new Error("Expected an external attachment");
+    const downloaded = await client.downloadAttachment(account.id, externalAttachment.locator, 10);
+    expect(Buffer.from(downloaded.content)).toEqual(external);
+    expect(requests.filter((url) => url.includes("/attachments/external-body"))).toHaveLength(1);
+
+    const inlineAttachment = detail?.attachments[1];
+    if (!inlineAttachment) throw new Error("Expected an inline-data attachment");
+    expect(Buffer.from((await client.downloadAttachment(account.id, inlineAttachment.locator, 20)).content))
+      .toEqual(inlineText);
+  });
+
+  test("supports a filename-bearing Gmail root and rejects incomplete or malformed file bytes", async () => {
+    let mode: "valid" | "missing" | "malformed" | "wrong-id" = "valid";
+    const root = () => ({
+      partId: "",
+      mimeType: "application/octet-stream",
+      filename: "single.bin",
+      headers: [
+        { name: "Content-Disposition", value: "attachment; filename=single.bin" },
+        { name: "Message-ID", value: "<single@example.test>" },
+      ],
+      body: mode === "valid"
+        ? { size: 0, data: "" }
+        : mode === "missing"
+          ? { size: 1 }
+          : { size: 1, data: "%%%" },
+    });
+    const client = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "refresh" },
+      clientId: "client",
+      fetch: async (input) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url === "https://oauth2.googleapis.com/token") return json({ access_token: "access", expires_in: 3600 });
+        if (url.includes("/messages/single?format=full")) {
+          return json({ id: mode === "wrong-id" ? "another" : "single", labelIds: [], snippet: "", payload: root() });
+        }
+        return new Response(null, { status: 404 });
+      },
+    });
+    const reference = {
+      accountId: account.id,
+      mailbox: "INBOX",
+      uidValidity: "gmail",
+      uid: 1,
+      modseq: null,
+      providerId: "single",
+    };
+    const [detail] = await client.readMessages(account.id, [reference]);
+    expect(detail?.attachments[0]?.locator).toEqual({ kind: "gmail", messageId: "single", partId: "" });
+    const locator = detail?.attachments[0]?.locator;
+    if (!locator) throw new Error("Expected root attachment");
+    expect((await client.downloadAttachment(account.id, locator, 1)).content.byteLength).toBe(0);
+
+    mode = "missing";
+    await expect(client.downloadAttachment(account.id, locator, 2)).rejects.toThrow("incomplete attachment data");
+    mode = "malformed";
+    await expect(client.downloadAttachment(account.id, locator, 2)).rejects.toThrow("malformed attachment data");
+    mode = "wrong-id";
+    await expect(client.downloadAttachment(account.id, locator, 2)).rejects.toThrow("reference is stale");
+  });
+
+  test("keeps the target file limit independent from unrelated Gmail full-message content", async () => {
+    const largeText = Buffer.alloc(2 * 1024 * 1024, 0x61);
+    const client = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "refresh" },
+      clientId: "client",
+      fetch: async (input) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url === "https://oauth2.googleapis.com/token") return json({ access_token: "access", expires_in: 3600 });
+        if (url.includes("/messages/large-message?format=full")) {
+          return json({
+            id: "large-message",
+            labelIds: [],
+            snippet: "large body",
+            payload: {
+              mimeType: "multipart/mixed",
+              body: { size: 0 },
+              parts: [
+                {
+                  partId: "1",
+                  mimeType: "text/plain",
+                  body: { size: largeText.byteLength, data: largeText.toString("base64url") },
+                },
+                {
+                  partId: "2",
+                  mimeType: "application/octet-stream",
+                  filename: "small.bin",
+                  body: { size: 1, attachmentId: "small-body" },
+                },
+              ],
+            },
+          });
+        }
+        if (url.includes("/messages/large-message/attachments/small-body")) {
+          return json({ size: 1, data: Buffer.from([7]).toString("base64url") });
+        }
+        return new Response(null, { status: 404 });
+      },
+    });
+
+    const downloaded = await client.downloadAttachment(
+      account.id,
+      { kind: "gmail", messageId: "large-message", partId: "2" },
+      1024,
+    );
+    expect(Buffer.from(downloaded.content)).toEqual(Buffer.from([7]));
+  });
+
   test("classifies token acquisition failure as proven pre-dispatch", async () => {
     const requests: string[] = [];
     const { store, service } = await createConversationService(async (input) => {
@@ -210,7 +474,9 @@ describe("Gmail compatibility", () => {
       if (url.includes("/messages?") && method === "GET") {
         return json({ messages: [{ id: "18fabc123" }], nextPageToken: "more-results" });
       }
-      if (url.includes("/messages/18fabc123?format=raw")) return json(message({ raw }));
+      if (url.includes("/messages/18fabc123?format=full")) {
+        return json(message({ payload: await gmailPayload(raw) }));
+      }
       if (url.includes("/messages/18fabc123?format=metadata")) return json(message({
         payload: { headers: [
           { name: "Subject", value: "Gmail test" },
@@ -260,6 +526,11 @@ describe("Gmail compatibility", () => {
     expect(details[0]?.replyTo).toEqual([{ name: "Planning replies", address: "planning-replies@example.test" }]);
     expect(details[0]?.providerConversationId).toBe("thread-1");
     expect(details[0]?.html).toContain("data:image/png;base64,");
+    expect(details[0]?.attachments.map(({ filename }) => filename)).toContain("logo.png");
+    const logo = details[0]?.attachments.find(({ filename }) => filename === "logo.png");
+    if (!logo) throw new Error("Expected referenced CID file metadata");
+    expect(Buffer.from((await client.downloadAttachment(account.id, logo.locator, 100)).content))
+      .toEqual(Buffer.from("iVBORw0KGgo=", "base64"));
     const applied = await client.apply(summaries[0]!.ref, { type: "mark_read" });
     expect(applied.previousRead).toBe(false);
     expect(labelIds).not.toContain("UNREAD");
@@ -495,7 +766,7 @@ describe("Gmail compatibility", () => {
       if (url === "https://oauth2.googleapis.com/token") {
         return json({ access_token: "short-lived-access-token", expires_in: 3600 });
       }
-      if (url.includes("/messages/unreadable?format=raw")) {
+      if (url.includes("/messages/unreadable?format=full")) {
         sourceReads += 1;
         return new Response(null, { status: 404 });
       }
@@ -550,7 +821,7 @@ describe("Gmail compatibility", () => {
       if (url === "https://oauth2.googleapis.com/token") {
         return json({ access_token: "short-lived-access-token", expires_in: 3600 });
       }
-      const sourceId = /\/messages\/(source-[ab])\?format=raw/.exec(url)?.[1];
+      const sourceId = /\/messages\/(source-[ab])\?format=full/.exec(url)?.[1];
       if (sourceId) {
         sourceReads.push(sourceId);
         const selected = sourceId === "source-b";
@@ -560,7 +831,7 @@ describe("Gmail compatibility", () => {
           labelIds: [selected ? "INBOX" : "ARCHIVE"],
           historyId: "1",
           internalDate: "1787990400000",
-          raw: rawSource(selected ? "Selected subject" : "Other subject"),
+          payload: await gmailPayload(rawSource(selected ? "Selected subject" : "Other subject")),
         });
       }
       if (url.endsWith("/messages/send")) {
@@ -646,7 +917,7 @@ describe("Gmail compatibility", () => {
         if (url === "https://oauth2.googleapis.com/token") {
           return json({ access_token: "short-lived-access-token", expires_in: 3600 });
         }
-        const sourceId = /\/messages\/(copy-[ab])\?format=raw/.exec(url)?.[1];
+        const sourceId = /\/messages\/(copy-[ab])\?format=full/.exec(url)?.[1];
         if (sourceId) {
           const selected = sourceId === "copy-b";
           const references = selected ? scenario.selectedReferences : canonicalReferences;
@@ -654,7 +925,7 @@ describe("Gmail compatibility", () => {
             id: sourceId,
             threadId: selected ? "thread-b" : "thread-a",
             labelIds: [selected ? "INBOX" : "ARCHIVE"],
-            raw: rawThreadingSource({
+            payload: await gmailPayload(rawThreadingSource({
               subject: "Selected ancestry",
               ...(selected
                 ? scenario.selectedMessageId ? { messageId: scenario.selectedMessageId } : {}
@@ -662,7 +933,7 @@ describe("Gmail compatibility", () => {
               ...(references.length > 0
                 ? { references, inReplyTo: references[references.length - 1] }
                 : {}),
-            }),
+            })),
           });
         }
         if (url.endsWith("/messages/send")) {
@@ -739,17 +1010,17 @@ describe("Gmail compatibility", () => {
       if (url === "https://oauth2.googleapis.com/token") {
         return json({ access_token: "short-lived-access-token", expires_in: 3600 });
       }
-      if (url.includes("/messages/conflicting-copy?format=raw")) {
+      if (url.includes("/messages/conflicting-copy?format=full")) {
         return json({
           id: "conflicting-copy",
           threadId: "selected-thread",
           labelIds: ["INBOX"],
-          raw: rawThreadingSource({
+          payload: await gmailPayload(rawThreadingSource({
             subject: "Canonical source",
             messageId: "<different@example.test>",
             inReplyTo: "<different-root@example.test>",
             references: ["<different-root@example.test>"],
-          }),
+          })),
         });
       }
       if (url.endsWith("/messages/send")) {
@@ -810,16 +1081,16 @@ describe("Gmail compatibility", () => {
       if (url === "https://oauth2.googleapis.com/token") {
         return json({ access_token: "short-lived-access-token", expires_in: 3600 });
       }
-      if (url.includes("/messages/fallback-copy?format=raw")) {
+      if (url.includes("/messages/fallback-copy?format=full")) {
         return json({
           id: "fallback-copy",
           threadId: "selected-thread",
           labelIds: ["INBOX"],
-          raw: rawThreadingSource({
+          payload: await gmailPayload(rawThreadingSource({
             subject: "Fallback source",
             messageId: "<read-source@example.test>",
             inReplyTo: "<read-root@example.test>",
-          }),
+          })),
         });
       }
       if (url.endsWith("/messages/send")) {
@@ -891,13 +1162,13 @@ describe("Gmail compatibility", () => {
       if (url === "https://oauth2.googleapis.com/token") {
         return json({ access_token: "short-lived-access-token", expires_in: 3600 });
       }
-      if (url.includes("/messages/threaded?format=raw")) {
+      if (url.includes("/messages/threaded?format=full")) {
         return json({
           id: "threaded",
           labelIds: ["INBOX"],
           historyId: "1",
           internalDate: "1787990400000",
-          raw,
+          payload: await gmailPayload(raw),
         });
       }
       return new Response(null, { status: 404 });
@@ -947,10 +1218,11 @@ describe("Gmail compatibility", () => {
           historyId: "1", internalDate: "1787990400000", payload: { headers: metadataHeaders },
         });
       }
-      if (url.includes("/messages/repeated?format=raw")) {
+      if (url.includes("/messages/repeated?format=full")) {
         return json({
           id: "repeated", threadId: "thread-repeated", labelIds: ["INBOX"], historyId: "1",
-          internalDate: "1787990400000", raw: Buffer.from(repeatedIdentification.raw).toString("base64url"),
+          internalDate: "1787990400000",
+          payload: await gmailPayload(Buffer.from(repeatedIdentification.raw).toString("base64url")),
         });
       }
       return new Response(null, { status: 404 });

@@ -1,5 +1,5 @@
-import { simpleParser, type EmailAddress, type ParsedMail } from "mailparser";
 import MailComposer from "nodemailer/lib/mail-composer";
+import { simpleParser, type AddressObject, type EmailAddress, type ParsedMail } from "mailparser";
 import { z, type ZodType } from "zod";
 import {
   sendMessageInputSchema,
@@ -23,13 +23,19 @@ import type {
   ProviderMessageSummary,
   ProviderDraft,
   ProviderDraftScope,
+  ProviderAttachment,
+  ProviderAttachmentDownload,
+  ProviderAttachmentLocator,
 } from "./provider";
+import { safeAttachmentFilename, safeAttachmentMediaType } from "../core/attachment-reference";
 import { buildProviderDraftMessage, parseProviderDraftMarkers } from "./provider-draft";
 import { normalizeIdentificationFields, normalizeReferenceSequences } from "./message-id";
 import { MailSendPreDispatchError, type ConversationSendContext, type MailSender } from "./sender";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
+const GMAIL_MIN_FULL_RESPONSE_BYTES = 64 * 1024 * 1024;
+const GMAIL_JSON_OVERHEAD_BYTES = 2 * 1024 * 1024;
 export const GMAIL_ARCHIVE = "__archive__";
 
 const tokenSchema = z.object({
@@ -49,6 +55,27 @@ const messageListSchema = z.object({
   messages: z.array(messageStubSchema).default([]),
   nextPageToken: z.string().min(1).optional(),
 });
+interface GmailPart {
+  partId: string;
+  mimeType: string;
+  filename: string;
+  headers: Array<{ name: string; value: string }>;
+  body: { attachmentId?: string | undefined; size: number; data?: string | undefined };
+  parts: GmailPart[];
+}
+const gmailPartSchema: z.ZodType<GmailPart> = z.lazy(() => z.object({
+  partId: z.string().default(""),
+  mimeType: z.string().default("application/octet-stream"),
+  filename: z.string().default(""),
+  headers: z.array(z.object({ name: z.string(), value: z.string() })).default([]),
+  body: z.object({
+    attachmentId: z.string().min(1).optional(),
+    size: z.number().int().nonnegative().default(0),
+    data: z.string().optional(),
+  }).default({ size: 0 }),
+  parts: z.array(gmailPartSchema).default([]),
+}));
+const gmailPartBodySchema = z.object({ data: z.string(), size: z.number().int().nonnegative().default(0) });
 const gmailMessageSchema = z.object({
   id: z.string().min(1),
   threadId: z.string().min(1).optional(),
@@ -56,9 +83,7 @@ const gmailMessageSchema = z.object({
   snippet: z.string().default(""),
   historyId: z.string().min(1).optional(),
   internalDate: z.string().optional(),
-  payload: z.object({
-    headers: z.array(z.object({ name: z.string(), value: z.string() })).default([]),
-  }).optional(),
+  payload: gmailPartSchema.optional(),
   raw: z.string().optional(),
 });
 const sentMessageSchema = z.object({ id: z.string().min(1), threadId: z.string().min(1).optional() });
@@ -258,15 +283,57 @@ export class GmailMailClient implements MailProvider, MailSender {
     return Promise.all(references.map(async (reference) => {
       this.#assertReference(reference);
       const id = providerId(reference);
-      const message = await this.#request(`/messages/${encodeURIComponent(id)}?format=raw`, gmailMessageSchema);
-      const raw = message.raw;
-      if (!raw) throw new Error("Gmail did not return the message source");
-      const parsed = await simpleParser(fromBase64Url(raw), {
-        skipHtmlToText: true,
-        skipTextToHtml: true,
-      });
-      return toDetail(this.#account.id, reference.mailbox, message, parsed);
+      const message = await this.#request(`/messages/${encodeURIComponent(id)}?format=full`, gmailMessageSchema);
+      if (message.id !== id) throw new Error(`Gmail returned the wrong message while reading ${id}`);
+      if (!message.payload) throw new Error("Gmail did not return the message body structure");
+      const rendered = await renderGmailBody(id, message.payload, (part) => this.#gmailPartContent(id, part));
+      const parsedHeaders = await parseGmailHeaders(message.payload.headers);
+      return toDetail(this.#account.id, reference.mailbox, message, rendered, parsedHeaders);
     }));
+  }
+
+  async downloadAttachment(
+    accountId: string,
+    locator: ProviderAttachmentLocator,
+    maxBytes: number,
+  ): Promise<ProviderAttachmentDownload> {
+    this.#assertAccount(accountId);
+    if (locator.kind !== "gmail") throw new Error("Gmail cannot download another provider's attachment");
+    const attachmentResponseLimit = Math.ceil(maxBytes * 4 / 3) + GMAIL_JSON_OVERHEAD_BYTES;
+    const messageResponseLimit = Math.max(GMAIL_MIN_FULL_RESPONSE_BYTES, attachmentResponseLimit);
+    const message = await this.#request(
+      `/messages/${encodeURIComponent(locator.messageId)}?format=full`,
+      gmailMessageSchema,
+      {},
+      messageResponseLimit,
+    );
+    if (message.id !== locator.messageId) throw new Error("Gmail attachment reference is stale");
+    if (!message.payload) throw new Error("Gmail did not return the message body structure");
+    const attachment = gmailAttachments(locator.messageId, message.payload)
+      .find(({ locator: candidate }) => candidate.kind === "gmail" && candidate.partId === locator.partId);
+    if (!attachment) throw new Error("Gmail attachment reference is stale");
+    const part = visibleGmailParts(message.payload).find(({ part: candidate }) => candidate.partId === locator.partId)?.part;
+    if (!part) throw new Error("Gmail attachment reference is stale");
+    if (part.body.size > maxBytes) throw new Error(`Attachment exceeds the ${maxBytes}-byte download limit`);
+    const content = await this.#gmailPartContent(locator.messageId, part, attachmentResponseLimit);
+    if (content.byteLength > maxBytes) throw new Error(`Attachment exceeds the ${maxBytes}-byte download limit`);
+    return { filename: attachment.filename, mediaType: attachment.mediaType, content };
+  }
+
+  async #gmailPartContent(messageId: string, part: GmailPart, responseLimit?: number): Promise<Buffer> {
+    if (part.body.data !== undefined) return decodeGmailPartBody(part.body.data, part.body.size);
+    if (!part.body.attachmentId) {
+      if (part.body.size > 0) throw new Error("Gmail returned incomplete attachment data");
+      return Buffer.alloc(0);
+    }
+    const body = await this.#request(
+      `/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(part.body.attachmentId)}`,
+      gmailPartBodySchema,
+      {},
+      responseLimit,
+    );
+    if (body.size !== part.body.size) throw new Error("Gmail returned inconsistent attachment size");
+    return decodeGmailPartBody(body.data, body.size);
   }
 
   async revalidate(reference: MessageRef): Promise<boolean> {
@@ -521,12 +588,23 @@ export class GmailMailClient implements MailProvider, MailSender {
     });
   }
 
-  async #request<T>(path: string, schema: ZodType<T>, init: RequestInit = {}): Promise<T> {
+  async #request<T>(
+    path: string,
+    schema: ZodType<T>,
+    init: RequestInit = {},
+    maxResponseBytes?: number,
+  ): Promise<T> {
     const token = await this.#token();
-    return this.#requestWithToken(token, path, schema, init);
+    return this.#requestWithToken(token, path, schema, init, maxResponseBytes);
   }
 
-  async #requestWithToken<T>(token: string, path: string, schema: ZodType<T>, init: RequestInit = {}): Promise<T> {
+  async #requestWithToken<T>(
+    token: string,
+    path: string,
+    schema: ZodType<T>,
+    init: RequestInit = {},
+    maxResponseBytes?: number,
+  ): Promise<T> {
     const response = await this.#fetch(`${GMAIL_API}${path}`, {
       ...init,
       headers: {
@@ -536,7 +614,7 @@ export class GmailMailClient implements MailProvider, MailSender {
         ...init.headers,
       },
     });
-    const body: unknown = await response.json().catch(() => null);
+    const body = await responseJson(response, maxResponseBytes);
     if (!response.ok) throw new GmailHttpError(response.status, googleError(body));
     return schema.parse(body);
   }
@@ -659,32 +737,162 @@ function toDetail(
   accountId: string,
   mailbox: string,
   message: z.infer<typeof gmailMessageSchema>,
-  parsed: ParsedMail,
+  rendered: { text: string; html: string | null; attachments: ProviderAttachment[] },
+  parsedHeaders: ParsedMail,
 ): ProviderMessageDetail {
-  const summary = toSummary(accountId, mailbox, {
-    ...message,
-    payload: {
-      headers: [
-        ...optionalHeader("Subject", parsed.subject),
-        ...optionalHeader("From", parsed.from?.text),
-        ...optionalHeader("Reply-To", addressText(parsed.replyTo)),
-        ...optionalHeader("To", addressText(parsed.to)),
-        ...optionalHeader("Cc", addressText(parsed.cc)),
-        ...optionalHeader("Delivered-To", headerString(parsed, "delivered-to")),
-        ...optionalHeader("Date", rawHeaderValue(parsed, "date")),
-        ...identificationHeaderEntries(parsed),
-      ],
-    },
-  });
+  const summary = toSummary(accountId, mailbox, message);
   return {
     ...summary,
-    from: flattenAddresses(parsed.from).map(toAddress),
-    replyTo: flattenAddresses(parsed.replyTo).map(toAddress),
-    to: flattenAddresses(parsed.to).map(toAddress),
-    cc: flattenAddresses(parsed.cc).map(toAddress),
-    text: parsed.text ?? "",
-    html: typeof parsed.html === "string" ? parsed.html : null,
+    ...rendered,
+    subject: parsedHeaders.subject ?? summary.subject,
+    from: flattenAddresses(parsedHeaders.from).map(toAddress),
+    replyTo: flattenAddresses(parsedHeaders.replyTo).map(toAddress),
+    to: flattenAddresses(parsedHeaders.to).map(toAddress),
+    cc: flattenAddresses(parsedHeaders.cc).map(toAddress),
   };
+}
+
+async function parseGmailHeaders(headers: readonly { name: string; value: string }[]): Promise<ParsedMail> {
+  const block = headers.map(({ name, value }) => `${name}: ${value}`).join("\r\n");
+  return simpleParser(Buffer.from(`${block}\r\n\r\n`), {
+    skipHtmlToText: true,
+    skipTextToHtml: true,
+  });
+}
+
+function flattenAddresses(value: AddressObject | AddressObject[] | undefined): EmailAddress[] {
+  if (!value) return [];
+  const addresses = Array.isArray(value) ? value.flatMap((entry) => entry.value) : value.value;
+  return addresses.flatMap(flattenEmailAddress);
+}
+
+function flattenEmailAddress(value: EmailAddress): EmailAddress[] {
+  return value.group ? value.group.flatMap(flattenEmailAddress) : [value];
+}
+
+function toAddress(value: EmailAddress): { name: string; address: string } {
+  return { name: value.name ?? "", address: value.address ?? "" };
+}
+
+async function renderGmailBody(
+  messageId: string,
+  root: GmailPart,
+  load: (part: GmailPart) => Promise<Buffer>,
+): Promise<{ text: string; html: string | null; attachments: ProviderAttachment[] }> {
+  const body = await readGmailText(root, load);
+  const cids = referencedCids(body.html);
+  let html = body.html;
+  if (html) {
+    for (const { part } of visibleGmailParts(root)) {
+      const cid = contentId(part);
+      if (!cid || !cids.has(cid) || !safeAttachmentMediaType(part.mimeType).startsWith("image/")) continue;
+      const content = await load(part);
+      const dataUrl = `data:${safeAttachmentMediaType(part.mimeType)};base64,${content.toString("base64")}`;
+      html = replaceCid(html, cid, dataUrl);
+    }
+  }
+  return {
+    ...body,
+    html,
+    attachments: gmailAttachments(messageId, root),
+  };
+}
+
+async function readGmailText(
+  root: GmailPart,
+  load: (part: GmailPart) => Promise<Buffer>,
+): Promise<{ text: string; html: string | null }> {
+  const plain: string[] = [];
+  const html: string[] = [];
+  for (const { part } of visibleGmailParts(root)) {
+    const mediaType = safeAttachmentMediaType(part.mimeType);
+    if ((mediaType !== "text/plain" && mediaType !== "text/html") || isFilePart(part)) continue;
+    const decoded = await decodeGmailText(await load(part), part, mediaType);
+    if (mediaType === "text/plain") plain.push(decoded);
+    else html.push(decoded);
+  }
+  return { text: plain.join("\n"), html: html.length > 0 ? html.join("<br/>\n") : null };
+}
+
+function gmailAttachments(messageId: string, root: GmailPart): ProviderAttachment[] {
+  return visibleGmailParts(root).flatMap(({ part, root: isRoot }) => {
+    if (!isFilePart(part)) return [];
+    if (!part.partId && !isRoot) throw new Error("Gmail returned an attachment without a part identity");
+    return [{
+      locator: { kind: "gmail", messageId, partId: part.partId },
+      filename: safeAttachmentFilename(part.filename || dispositionFilename(part) || "attachment"),
+      mediaType: safeAttachmentMediaType(part.mimeType),
+      size: part.body.size,
+      sizeIsEstimate: false,
+    }];
+  });
+}
+
+function visibleGmailParts(root: GmailPart): Array<{ part: GmailPart; root: boolean }> {
+  const result: Array<{ part: GmailPart; root: boolean }> = [];
+  const pending = [{ part: root, root: true }];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current) continue;
+    result.push(current);
+    if (!isFilePart(current.part)) {
+      pending.push(...current.part.parts.toReversed().map((part) => ({ part, root: false })));
+    }
+  }
+  return result;
+}
+
+function isFilePart(part: GmailPart): boolean {
+  return Boolean(part.filename.trim() || disposition(part).startsWith("attachment"));
+}
+
+function disposition(part: GmailPart): string {
+  return headerValues(part.headers, "content-disposition")[0]?.trim().toLowerCase() ?? "";
+}
+
+function dispositionFilename(part: GmailPart): string | undefined {
+  const value = headerValues(part.headers, "content-disposition")[0] ?? "";
+  return /filename\*?=(?:UTF-8'')?["']?([^"';]+)/i.exec(value)?.[1]?.trim();
+}
+
+function contentId(part: GmailPart): string | null {
+  const value = headerValues(part.headers, "content-id")[0]?.trim().replace(/^<|>$/g, "").trim();
+  return value ? value.toLowerCase() : null;
+}
+
+function referencedCids(html: string | null): Set<string> {
+  const result = new Set<string>();
+  for (const match of html?.matchAll(/\bcid:([^'"\s>]+)/gi) ?? []) {
+    try {
+      result.add(decodeURIComponent(match[1]!).toLowerCase());
+    } catch {
+      result.add(match[1]!.toLowerCase());
+    }
+  }
+  return result;
+}
+
+function replaceCid(html: string, cid: string, replacement: string): string {
+  return html.replace(/\bcid:([^'"\s>]+)/gi, (match, value: string) => {
+    try {
+      return decodeURIComponent(value).toLowerCase() === cid ? replacement : match;
+    } catch {
+      return value.toLowerCase() === cid ? replacement : match;
+    }
+  });
+}
+
+async function decodeGmailText(content: Buffer, part: GmailPart, mediaType: string): Promise<string> {
+  const contentType = headerValues(part.headers, "content-type")[0] ?? `${mediaType}; charset=utf-8`;
+  const parsed = await simpleParser(Buffer.concat([
+    Buffer.from(`Content-Type: ${contentType}\r\nContent-Transfer-Encoding: 8bit\r\n\r\n`),
+    content,
+  ]), {
+    skipHtmlToText: true,
+    skipTextToHtml: true,
+  });
+  return (mediaType === "text/html" && typeof parsed.html === "string" ? parsed.html : parsed.text ?? "")
+    .replace(/\r?\n/g, "\n");
 }
 
 function toReference(accountId: string, mailbox: string, message: z.infer<typeof gmailMessageSchema>): MessageRef {
@@ -727,62 +935,41 @@ function parseAddresses(value?: string): Array<{ name: string; address: string }
   });
 }
 
-function flattenAddresses(value: ParsedMail["to"]): EmailAddress[] {
-  if (!value) return [];
-  return Array.isArray(value) ? value.flatMap((entry) => entry.value) : value.value;
-}
-
-function toAddress(value: EmailAddress): { name: string; address: string } {
-  return { name: value.name ?? "", address: value.address ?? "" };
-}
-
-function addressText(value: ParsedMail["to"]): string | undefined {
-  if (!value) return undefined;
-  return Array.isArray(value) ? value.map(({ text }) => text).join(", ") : value.text;
-}
-
-function headerString(parsed: ParsedMail, name: string): string | undefined {
-  const value = parsed.headers.get(name);
-  if (typeof value === "string") return value;
-  return Array.isArray(value) && value.every((entry): entry is string => typeof entry === "string")
-    ? value.join(" ")
-    : undefined;
-}
-
-function rawHeaderValue(parsed: ParsedMail, name: string): string | undefined {
-  return rawHeaderValues(parsed, name)[0];
-}
-
-function rawHeaderValues(parsed: ParsedMail, name: string): string[] {
-  return parsed.headerLines
-    .filter(({ key }) => key.toLowerCase() === name)
-    .flatMap(({ line }) => {
-      const separator = line.indexOf(":");
-      return separator < 0 ? [] : [line.slice(separator + 1).trim()];
-    });
-}
-
 function headerValues(headers: readonly { name: string; value: string }[], name: string): string[] {
   return headers
     .filter((header) => header.name.trim().toLowerCase() === name)
     .map(({ value }) => value);
 }
 
-function identificationHeaderEntries(parsed: ParsedMail): Array<{ name: string; value: string }> {
-  const names: ReadonlyArray<readonly [string, string]> = [
-    ["Message-ID", "message-id"],
-    ["In-Reply-To", "in-reply-to"],
-    ["References", "references"],
-  ];
-  return names.flatMap(([name, key]) => rawHeaderValues(parsed, key).map((value) => ({ name, value })));
-}
-
-function optionalHeader(name: string, value: string | undefined): Array<{ name: string; value: string }> {
-  return value ? [{ name, value }] : [];
-}
-
 function isEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+async function responseJson(response: Response, maxBytes?: number): Promise<unknown> {
+  if (maxBytes === undefined) return response.json().catch(() => null);
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error("Gmail attachment response exceeds the configured download limit");
+  }
+  if (!response.body) return null;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  while (true) {
+    const next = await reader.read();
+    if (next.done) break;
+    length += next.value.byteLength;
+    if (length > maxBytes) {
+      await reader.cancel();
+      throw new Error("Gmail attachment response exceeds the configured download limit");
+    }
+    chunks.push(next.value);
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), length).toString("utf8"));
+  } catch {
+    return null;
+  }
 }
 
 function replySubject(subject: string): string {
@@ -833,4 +1020,15 @@ function toBase64Url(value: Buffer): string {
 
 function fromBase64Url(value: string): Buffer {
   return Buffer.from(value.replaceAll("-", "+").replaceAll("_", "/"), "base64");
+}
+
+function decodeGmailPartBody(value: string, expectedBytes: number): Buffer {
+  const unpadded = value.replace(/=+$/, "");
+  if (!/^[A-Za-z0-9_-]*={0,2}$/.test(value) || unpadded.length % 4 === 1) {
+    throw new Error("Gmail returned malformed attachment data");
+  }
+  const decoded = Buffer.from(unpadded, "base64url");
+  if (decoded.toString("base64url") !== unpadded) throw new Error("Gmail returned malformed attachment data");
+  if (decoded.byteLength !== expectedBytes) throw new Error("Gmail returned inconsistent attachment size");
+  return decoded;
 }

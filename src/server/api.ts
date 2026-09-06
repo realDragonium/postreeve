@@ -22,6 +22,7 @@ import {
   updateAccountInputSchema,
 } from "../shared/contracts";
 import type { PostreeveService } from "./core/postreeve";
+import { attachmentDisposition } from "./core/attachment-reference";
 import { AccountConflictError, DraftConflictError, DraftDeletedError, DraftNotFoundError } from "./core/errors";
 import type { GoogleOAuth } from "./google/oauth";
 
@@ -30,6 +31,11 @@ const draftParamsSchema = z.object({ accountId: accountIdSchema, draftId: draftI
 const proposalParamsSchema = z.object({ proposalId: proposalIdSchema });
 const batchParamsSchema = z.object({ batchId: batchIdSchema });
 const conversationParamsSchema = z.object({ conversationId: z.string().min(1) });
+const attachmentParamsSchema = z.object({
+  accountId: accountIdSchema,
+  canonicalMessageId: z.string().min(1),
+  reference: z.string().min(1).max(8_000),
+});
 const messageQuerySchema = z.object({
   mailbox: z.string().min(1),
   query: z.string().max(200).optional(),
@@ -193,6 +199,23 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
     )
     .post("/messages/read", zValidator("json", readMessagesSchema), async (context) =>
       context.json(await service.readMessages(context.req.valid("json").references)))
+    .get(
+      "/accounts/:accountId/messages/:canonicalMessageId/attachments/:reference",
+      zValidator("param", attachmentParamsSchema),
+      async (context) => {
+        const { accountId, canonicalMessageId, reference } = context.req.valid("param");
+        const attachment = await service.downloadAttachment(accountId, canonicalMessageId, reference);
+        return new Response(Buffer.from(attachment.content), {
+          headers: {
+            "Content-Type": attachment.mediaType,
+            "Content-Disposition": attachmentDisposition(attachment.filename),
+            "Content-Length": String(attachment.content.byteLength),
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+          },
+        });
+      },
+    )
     .get("/conversations/:conversationId", zValidator("param", conversationParamsSchema), async (context) =>
       context.json(await service.getConversation(context.req.valid("param").conversationId)))
     .post("/messages/send", zValidator("json", sendMessageInputSchema), async (context) =>

@@ -17,6 +17,7 @@ const environment = [
   `POSTREEVE_MASTER_KEY=${masterKey}`,
   "POSTREEVE_DB_PATH=./data/postreeve.sqlite",
   "POSTREEVE_HOST=127.0.0.1",
+  "POSTREEVE_MAX_ATTACHMENT_BYTES=26214400",
   "PORT=3000",
   "",
 ].join("\n");
