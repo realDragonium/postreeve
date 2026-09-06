@@ -1,3 +1,4 @@
+import type { OutgoingContent } from "./outgoing-content";
 import type { SendMessageInput, SendReceipt } from "../../shared/contracts";
 
 interface ConversationSourceContext {
@@ -24,7 +25,7 @@ export class MailSendPreDispatchError extends Error {
 
 export interface MailSender {
   verifyConnection(): Promise<void>;
-  send(input: SendMessageInput, context?: ConversationSendContext): Promise<SendReceipt>;
+  send(input: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SendReceipt>;
 }
 
 export class MailSenderRegistry {

@@ -1,3 +1,8 @@
+import {
+  DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_MAX_MESSAGE_BYTES, positiveByteLimit,
+  type OutgoingAttachment,
+} from "../mail/outgoing-content";
+import { buildProviderDraftMessage } from "../mail/provider-draft";
 import type {
   Account,
   AccountSettings,
@@ -35,6 +40,7 @@ import {
   deleteFolderInputSchema,
   directActionInputSchema,
   draftSchema,
+  draftFileUploadSchema,
   draftVersionInputSchema,
   renameFolderInputSchema,
   sendMessageInputSchema,
@@ -88,6 +94,8 @@ export type GmailClientFactory = (
 export interface PostreeveContext {
   tenantId: string;
   maxAttachmentBytes?: number;
+  maxUploadBytes?: number;
+  maxMessageBytes?: number;
 }
 
 export const DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -113,6 +121,7 @@ export class PostreeveService {
   readonly #mailSenderFactory: MailSenderFactory;
   readonly #gmailClientFactory: GmailClientFactory;
   readonly #maxAttachmentBytes: number;
+  readonly outgoingMailLimits: { readonly maxUploadBytes: number; readonly maxMessageBytes: number };
 
   constructor(
     store: Store,
@@ -140,6 +149,10 @@ export class PostreeveService {
     this.#mailSenderFactory = mailSenderFactory;
     this.#gmailClientFactory = gmailClientFactory;
     this.#maxAttachmentBytes = maxAttachmentBytes;
+    this.outgoingMailLimits = {
+      maxUploadBytes: positiveByteLimit(context.maxUploadBytes ?? DEFAULT_MAX_UPLOAD_BYTES),
+      maxMessageBytes: positiveByteLimit(context.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES),
+    };
   }
 
   async initialize(): Promise<void> {
@@ -456,6 +469,9 @@ export class PostreeveService {
     });
     return this.#withDraftLifecycle(input.accountId, draft.id, async () => {
       await this.#requireAccount(input.accountId);
+      await buildProviderDraftMessage(this.#draftScope(draft.accountId), {
+        ...draft, maxMessageBytes: this.outgoingMailLimits.maxMessageBytes,
+      });
       let stored: Draft;
       try {
         stored = await this.#store.insertDraft(this.#context.tenantId, draft);
@@ -489,6 +505,14 @@ export class PostreeveService {
     const { version, ...content } = input;
     return this.#withDraftLifecycle(accountId, id, async () => {
       await this.#requireAccount(accountId);
+      const current = await this.#store.getDraft(this.#context.tenantId, accountId, id);
+      if (!current) throw new DraftNotFoundError();
+      if (current.version !== version) throw new DraftConflictError();
+      const candidate = { ...current, ...content, version: version + 1 };
+      const files = await this.#store.draftFiles(this.#context.tenantId, accountId, candidate);
+      await buildProviderDraftMessage(this.#draftScope(accountId), {
+        ...candidate, files, maxMessageBytes: this.outgoingMailLimits.maxMessageBytes,
+      });
       const draft = await this.#store.updateDraft(
         this.#context.tenantId,
         accountId,
@@ -499,6 +523,48 @@ export class PostreeveService {
       );
       return this.#mirrorDraftLocked(draft, true);
     });
+  }
+
+  async uploadDraftFile(
+    accountId: string, draftId: string, version: number, file: OutgoingAttachment,
+  ): Promise<Draft> {
+    if (file.content.byteLength > this.outgoingMailLimits.maxUploadBytes) {
+      throw new Error(`File exceeds the ${this.outgoingMailLimits.maxUploadBytes}-byte upload limit`);
+    }
+    const metadata = draftFileUploadSchema.parse({ ...file, version });
+    const attachment = {
+      ...file, name: metadata.name.replace(/[\u0000-\u001f\u007f]/g, "") || "attachment",
+      type: safeAttachmentMediaType(metadata.type),
+    };
+    return this.#withDraftLifecycle(accountId, draftId, async () => {
+      await this.#requireAccount(accountId);
+      const current = await this.#store.getDraft(this.#context.tenantId, accountId, draftId);
+      if (!current) throw new DraftNotFoundError();
+      const files = await this.#store.draftFiles(this.#context.tenantId, accountId, current);
+      const existing = files.some(({ id }) => id === attachment.id);
+      if (!existing) {
+        if (current.version !== version) throw new DraftConflictError();
+        await buildProviderDraftMessage(this.#draftScope(accountId), {
+          ...current, version: version + 1,
+          files: [...files, attachment], maxMessageBytes: this.outgoingMailLimits.maxMessageBytes,
+        });
+      }
+      const draft = await this.#store.uploadDraftFile(
+        this.#context.tenantId, accountId, draftId, version, attachment, new Date().toISOString(),
+      );
+      if (draft.delivery.status === "sent" || draft.delivery.status === "sending") return draft;
+      return this.#mirrorDraftLocked(draft, true);
+    });
+  }
+
+  async downloadDraftFile(accountId: string, draftId: string, fileId: string): Promise<OutgoingAttachment> {
+    await this.#requireAccount(accountId);
+    const draft = await this.#store.getDraft(this.#context.tenantId, accountId, draftId);
+    if (!draft) throw new DraftNotFoundError();
+    const files = await this.#store.draftFiles(this.#context.tenantId, accountId, draft);
+    const file = files.find(({ id }) => id === fileId);
+    if (!file) throw new DraftNotFoundError();
+    return file;
   }
 
   async removeDraft(accountId: string, id: string, rawInput: DraftVersionInput): Promise<void> {
@@ -559,8 +625,8 @@ export class PostreeveService {
     if (draft.delivery.status === "uncertain") {
       throw new DraftConflictError("Draft delivery is uncertain and cannot be retried automatically");
     }
-    if (draft.attachments.length > 0) {
-      throw new Error("Draft attachment delivery is not supported yet");
+    if (draft.attachments.some((attachment) => !attachment.id)) {
+      throw new Error("Some draft files have no stored content; remove or attach them again before sending");
     }
     const account = await this.#requireAccount(accountId);
     if (draft.identity.address.toLocaleLowerCase() !== account.email.toLocaleLowerCase()) {
@@ -581,6 +647,7 @@ export class PostreeveService {
       text: draft.body,
       intent,
     });
+    const files = await this.#store.draftFiles(this.#context.tenantId, accountId, draft);
     const prepared = await this.#prepareMessageSend(input);
     const claim = await this.#store.claimDraftSend(
       this.#context.tenantId,
@@ -594,7 +661,7 @@ export class PostreeveService {
 
     let receipt: SendReceipt;
     try {
-      receipt = await this.#dispatchMessageSend(prepared);
+      receipt = await this.#dispatchMessageSend(prepared, files);
     } catch (error) {
       const failedAt = new Date().toISOString();
       try {
@@ -697,9 +764,11 @@ export class PostreeveService {
     const candidateRef = candidate?.ref ?? draft.mirror.ref;
     let ref: ProviderDraftRef;
     try {
+      const files = await this.#store.draftFiles(this.#context.tenantId, draft.accountId, draft);
+      const preparedDraft = { ...draft, files, maxMessageBytes: this.outgoingMailLimits.maxMessageBytes };
       ref = candidateRef
-        ? await provider.updateDraft(this.#draftScope(draft.accountId), draft, candidateRef)
-        : await provider.createDraft(this.#draftScope(draft.accountId), draft);
+        ? await provider.updateDraft(this.#draftScope(draft.accountId), preparedDraft, candidateRef)
+        : await provider.createDraft(this.#draftScope(draft.accountId), preparedDraft);
     } catch (error) {
       const message = errorMessage(error);
       try {
@@ -1068,8 +1137,10 @@ export class PostreeveService {
     return { account, input, sender, context };
   }
 
-  async #dispatchMessageSend(prepared: PreparedMessageSend): Promise<SendReceipt> {
-    const receipt = sendReceiptSchema.parse(await prepared.sender.send(prepared.input, prepared.context));
+  async #dispatchMessageSend(prepared: PreparedMessageSend, files: readonly OutgoingAttachment[] = []): Promise<SendReceipt> {
+    const receipt = sendReceiptSchema.parse(await prepared.sender.send(prepared.input, prepared.context, {
+      files, maxMessageBytes: this.outgoingMailLimits.maxMessageBytes,
+    }));
     if (receipt.accountId !== prepared.input.accountId) {
       throw new Error("Mail sender returned a receipt for another account");
     }

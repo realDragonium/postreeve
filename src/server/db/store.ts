@@ -1,3 +1,4 @@
+import type { OutgoingAttachment } from "../mail/outgoing-content";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
@@ -162,6 +163,7 @@ export class Store {
         if (existing.account_id !== draft.accountId) throw new Error("Draft idempotency identity belongs to another account");
         return toDraft(existing);
       }
+      this.#assertDraftFileReferences(tenantId, draft.accountId, draft.id, draft.attachments);
       this.#sqlite.query(`
         INSERT INTO drafts (
           id, tenant_id, account_id, mode, recipients_to, recipients_cc, recipients_bcc,
@@ -298,6 +300,17 @@ export class Store {
     content: DraftContent,
     updatedAt: string,
   ): Promise<Draft> {
+    return this.#sqlite.transaction(() => {
+      this.#assertDraftFileReferences(tenantId, accountId, id, content.attachments);
+      const draft = this.#updateDraftContent(tenantId, accountId, id, expectedVersion, content, updatedAt);
+      this.#cleanupDraftFiles(tenantId, accountId, id);
+      return draft;
+    }).immediate();
+  }
+
+  #updateDraftContent(
+    tenantId: string, accountId: string, id: string, expectedVersion: number, content: DraftContent, updatedAt: string,
+  ): Draft {
     const row = this.#sqlite.query(`
       UPDATE drafts SET
         mode = ?, recipients_to = ?, recipients_cc = ?, recipients_bcc = ?, subject = ?, body = ?,
@@ -327,6 +340,79 @@ export class Store {
     ) as DraftRow | null;
     if (row) return toDraft(row);
     this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "updated");
+  }
+
+  async uploadDraftFile(
+    tenantId: string, accountId: string, draftId: string, expectedVersion: number,
+    attachment: OutgoingAttachment, updatedAt: string,
+  ): Promise<Draft> {
+    return this.#sqlite.transaction(() => {
+      const row = this.#draftRow(tenantId, accountId, draftId);
+      if (!row) throw new DraftNotFoundError();
+      const current = toDraft(row);
+      const existing = this.#fileRow(tenantId, accountId, draftId, attachment.id);
+      if (existing) {
+        if (existing.name !== attachment.name || existing.media_type !== attachment.type
+          || !Buffer.from(existing.content).equals(Buffer.from(attachment.content))) {
+          throw new DraftConflictError("Upload identity already belongs to different file content");
+        }
+        return current;
+      }
+      if (current.version !== expectedVersion) throw new DraftConflictError();
+      this.#sqlite.query(`
+        INSERT INTO draft_files (tenant_id, account_id, draft_id, id, name, media_type, content)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(tenantId, accountId, draftId, attachment.id, attachment.name, attachment.type, attachment.content);
+      return this.#updateDraftContent(tenantId, accountId, draftId, expectedVersion, {
+        ...current,
+        attachments: [...current.attachments, {
+          id: attachment.id, name: attachment.name, type: attachment.type, size: attachment.content.byteLength,
+        }],
+      }, updatedAt);
+    }).immediate();
+  }
+
+  async draftFiles(tenantId: string, accountId: string, draft: Draft): Promise<OutgoingAttachment[]> {
+    this.#assertDraftFileReferences(tenantId, accountId, draft.id, draft.attachments);
+    return draft.attachments.flatMap((attachment) => {
+      if (!attachment.id) return [];
+      const row = this.#fileRow(tenantId, accountId, draft.id, attachment.id);
+      if (!row) throw new Error("Draft file content is unavailable; attach the file again");
+      return [{ id: attachment.id, name: row.name, type: row.media_type, content: row.content }];
+    });
+  }
+
+  #fileRow(tenantId: string, accountId: string, draftId: string, id: string): {
+    name: string; media_type: string; content: Uint8Array;
+  } | null {
+    return this.#sqlite.query(`
+      SELECT name, media_type, content FROM draft_files
+      WHERE tenant_id = ? AND account_id = ? AND draft_id = ? AND id = ?
+    `).get(tenantId, accountId, draftId, id) as { name: string; media_type: string; content: Uint8Array } | null;
+  }
+
+  #assertDraftFileReferences(tenantId: string, accountId: string, draftId: string, attachments: Draft["attachments"]): void {
+    const seen = new Set<string>();
+    for (const attachment of attachments) {
+      if (!attachment.id) continue;
+      const row = this.#fileRow(tenantId, accountId, draftId, attachment.id);
+      if (!row || seen.has(attachment.id) || row.name !== attachment.name || row.media_type !== attachment.type
+        || row.content.byteLength !== attachment.size) {
+        throw new Error("Draft file reference is invalid or belongs to another draft");
+      }
+      seen.add(attachment.id);
+    }
+  }
+
+  #cleanupDraftFiles(tenantId: string, accountId: string, draftId: string): void {
+    this.#sqlite.query(`
+      DELETE FROM draft_files WHERE tenant_id = ? AND account_id = ? AND draft_id = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM drafts, json_each(drafts.attachments) AS attachment
+          WHERE drafts.tenant_id = draft_files.tenant_id AND drafts.id = draft_files.draft_id
+            AND json_extract(attachment.value, '$.id') = draft_files.id
+        )
+    `).run(tenantId, accountId, draftId);
   }
 
   async completeDraftMirror(
@@ -681,6 +767,11 @@ export class Store {
         copiedAt,
         copiedAt,
       );
+      this.#sqlite.query(`
+        INSERT INTO draft_files (tenant_id, account_id, draft_id, id, name, media_type, content)
+        SELECT tenant_id, account_id, ?, id, name, media_type, content FROM draft_files
+        WHERE tenant_id = ? AND account_id = ? AND draft_id = ?
+      `).run(copyId, tenantId, accountId, id);
       const row = this.#draftRow(tenantId, accountId, copyId);
       if (!row) throw new Error("Recovery draft copy was not stored");
       return toDraft(row);
@@ -1368,6 +1459,14 @@ export class Store {
     this.#migrateDrafts();
     this.#migrateDraftMirrors();
     this.#migrateDraftAttachments();
+    this.#sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS draft_files (
+        tenant_id TEXT NOT NULL, account_id TEXT NOT NULL, draft_id TEXT NOT NULL,
+        id TEXT NOT NULL, name TEXT NOT NULL, media_type TEXT NOT NULL, content BLOB NOT NULL,
+        PRIMARY KEY (tenant_id, draft_id, id),
+        FOREIGN KEY (tenant_id, draft_id) REFERENCES drafts(tenant_id, id) ON DELETE CASCADE
+      );
+    `);
     this.#migrateDraftTombstones();
     this.#migrateDraftTombstoneCleanup();
     const accountsTable = this.#sqlite.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")

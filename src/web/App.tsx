@@ -695,6 +695,8 @@ function App() {
     /> : null}
 
     {overlay?.kind === "compose" && accounts.find(({ id }) => id === overlay.accountId) ? <ComposeModal
+      key={overlay.intent.draft?.id ?? "new-compose"}
+      onCopied={(draft) => setOverlay({ kind: "compose", accountId: draft.accountId, intent: { mode: "draft", draft } })}
       account={accounts.find(({ id }) => id === overlay.accountId)!}
       identities={identities.filter((identity) => identity.accountId === overlay.accountId)}
       intent={overlay.intent}

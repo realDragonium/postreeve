@@ -7,6 +7,8 @@ const desktopEnvironmentKeys = [
   "POSTREEVE_GOOGLE_CLIENT_SECRET",
   "POSTREEVE_MASTER_KEY",
   "POSTREEVE_MAX_ATTACHMENT_BYTES",
+  "POSTREEVE_MAX_UPLOAD_BYTES",
+  "POSTREEVE_MAX_MESSAGE_BYTES",
 ] as const;
 
 export type DesktopEnvironment = Partial<Record<(typeof desktopEnvironmentKeys)[number], string>>;

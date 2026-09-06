@@ -1,3 +1,5 @@
+import { composeMime, type OutgoingContent } from "./outgoing-content";
+import { MailSendPreDispatchError } from "./sender";
 import { createTransport } from "nodemailer";
 import type { SendMailOptions } from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
@@ -75,23 +77,47 @@ export class SmtpMailSender implements MailSender {
     if (!verified) throw new Error("SMTP server rejected the connection");
   }
 
-  async send(rawInput: SendMessageInput, context?: ConversationSendContext): Promise<SendReceipt> {
+  async send(rawInput: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SendReceipt> {
     const input = sendMessageInputSchema.parse(rawInput);
     this.#assertAccount(input.accountId);
     const reply = context?.type === "reply" || context?.type === "reply_all" ? context : undefined;
 
-    const result = await this.#transport.sendMail({
-      from: { name: this.#config.fromName, address: this.#config.fromAddress },
-      to: input.to,
-      cc: input.cc,
-      bcc: input.bcc,
-      subject: input.subject,
-      text: input.text,
-      ...(reply?.inReplyTo ? { inReplyTo: reply.inReplyTo } : {}),
-      ...(reply && reply.references.length > 0 ? { references: [...reply.references] } : {}),
-      disableFileAccess: true,
-      disableUrlAccess: true,
-    });
+    const messageId = `<${crypto.randomUUID()}@postreeve.local>`;
+    const submittedAt = new Date().toISOString();
+    let raw: Buffer;
+    try {
+      raw = await composeMime({
+        messageId,
+        date: new Date(submittedAt),
+        from: { name: this.#config.fromName, address: this.#config.fromAddress },
+        to: input.to,
+        cc: input.cc,
+        bcc: input.bcc,
+        subject: input.subject,
+        ...(reply?.inReplyTo ? { inReplyTo: reply.inReplyTo } : {}),
+        ...(reply && reply.references.length > 0 ? { references: [...reply.references] } : {}),
+        disableFileAccess: true,
+        disableUrlAccess: true,
+      }, input.text, content);
+    } catch (error) {
+      throw new MailSendPreDispatchError(error instanceof Error ? error.message : "Mail preparation failed", { cause: error });
+    }
+    let result: SmtpDeliveryResult;
+    try {
+      result = await this.#transport.sendMail({
+        raw,
+        envelope: { from: this.#config.fromAddress, to: [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address) },
+        messageId,
+        disableFileAccess: true,
+        disableUrlAccess: true,
+      });
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "EENVELOPE"
+        && "command" in error && (error.command === "MAIL FROM" || error.command === "RCPT TO")) {
+        throw new MailSendPreDispatchError(error.message, { cause: error });
+      }
+      throw error;
+    }
 
     return sendReceiptSchema.parse({
       id: crypto.randomUUID(),
@@ -99,7 +125,7 @@ export class SmtpMailSender implements MailSender {
       messageId: result.messageId,
       accepted: result.accepted.map(deliveryAddress),
       rejected: result.rejected.map(deliveryAddress),
-      submittedAt: new Date().toISOString(),
+      submittedAt,
     });
   }
 

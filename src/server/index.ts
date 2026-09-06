@@ -1,3 +1,4 @@
+import { DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_MAX_MESSAGE_BYTES } from "./mail/outgoing-content";
 import { serveStatic } from "hono/bun";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -25,7 +26,11 @@ const serverConfig = z.object({
   hostname: z.string().trim().min(1),
   port: z.coerce.number().int().min(1).max(65535),
   maxAttachmentBytes: z.coerce.number().int().positive(),
+  maxUploadBytes: z.coerce.number().int().positive(),
+  maxMessageBytes: z.coerce.number().int().positive(),
 }).parse({
+  maxUploadBytes: process.env.POSTREEVE_MAX_UPLOAD_BYTES ?? String(DEFAULT_MAX_UPLOAD_BYTES),
+  maxMessageBytes: process.env.POSTREEVE_MAX_MESSAGE_BYTES ?? String(DEFAULT_MAX_MESSAGE_BYTES),
   hostname: process.env.POSTREEVE_HOST ?? "127.0.0.1",
   port: process.env.PORT ?? "3000",
   maxAttachmentBytes: process.env.POSTREEVE_MAX_ATTACHMENT_BYTES ?? String(25 * 1024 * 1024),
@@ -41,7 +46,8 @@ const googleOAuth = googleClientId && googleClientSecret
 
 const service = new PostreeveService(
   store,
-  { tenantId: "local", maxAttachmentBytes: serverConfig.maxAttachmentBytes },
+  { tenantId: "local", maxAttachmentBytes: serverConfig.maxAttachmentBytes,
+    maxUploadBytes: serverConfig.maxUploadBytes, maxMessageBytes: serverConfig.maxMessageBytes },
   providers,
   senders,
   vault,

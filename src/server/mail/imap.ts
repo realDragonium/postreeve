@@ -1,3 +1,4 @@
+import type { ProviderDraftInput } from "./provider";
 import {
   ImapFlow,
   type AppendResponseObject,
@@ -190,12 +191,12 @@ export class ImapMailProvider implements MailProvider {
     });
   }
 
-  async createDraft(scope: ProviderDraftScope, draft: Draft): Promise<ProviderDraftRef> {
+  async createDraft(scope: ProviderDraftScope, draft: ProviderDraftInput): Promise<ProviderDraftRef> {
     this.#assertDraftScope(scope, draft);
     return this.#withClient((client) => this.#replaceDraft(client, scope, draft));
   }
 
-  async updateDraft(scope: ProviderDraftScope, draft: Draft, ref: ProviderDraftRef): Promise<ProviderDraftRef> {
+  async updateDraft(scope: ProviderDraftScope, draft: ProviderDraftInput, ref: ProviderDraftRef): Promise<ProviderDraftRef> {
     this.#assertDraftScope(scope, draft);
     if (ref.kind !== "imap") throw new Error("IMAP cannot update a draft reference from another provider");
     return this.#withClient((client) => this.#replaceDraft(client, scope, draft, ref));
@@ -450,7 +451,7 @@ export class ImapMailProvider implements MailProvider {
   async #replaceDraft(
     client: ImapClient,
     scope: ProviderDraftScope,
-    draft: Draft,
+    draft: ProviderDraftInput,
     ref?: Extract<ProviderDraftRef, { kind: "imap" }>,
   ): Promise<ProviderDraftRef> {
     const mailbox = await findDraftsMailbox(client);

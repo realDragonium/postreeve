@@ -19,6 +19,7 @@ export class DraftRecoveryConflictError extends Error {
 
 export class DraftSaveQueue {
   #draft: Draft | null;
+  readonly #uploadBases = new Map<string, Draft>();
   #tail: Promise<void> = Promise.resolve();
   readonly #accountId: string;
   readonly #clientId: string;
@@ -61,7 +62,7 @@ export class DraftSaveQueue {
         if (!sameDraftContent(stored, content)) {
           throw new DraftRecoveryConflictError("Draft changed in another client while it was being saved");
         }
-        this.#draft = stored;
+        this.#adoptSavedDraft(stored);
         return stored;
       }
 
@@ -80,12 +81,68 @@ export class DraftSaveQueue {
       if (!sameDraftContent(reconciled, content)) {
         throw new DraftRecoveryConflictError("Draft changed in another client while its first save was being recovered");
       }
-      this.#draft = reconciled;
+      this.#adoptSavedDraft(reconciled);
       this.#submittedCreateContent.clear();
-      return this.#draft;
+      return reconciled;
     });
     this.#tail = operation.then(() => undefined, () => undefined);
     return operation;
+  }
+
+  async uploadFile(
+    content: DraftContent, id: string, file: File,
+    upload: (accountId: string, draftId: string, version: number, id: string, file: File) => Promise<Draft>,
+  ): Promise<Draft> {
+    if (!this.#uploadBases.has(id)) {
+      const saved = await this.save(content);
+      this.#uploadBases.set(id, saved);
+    }
+    const operation = this.#tail.then(async () => {
+      const base = this.#uploadBases.get(id);
+      if (!base) throw new Error("Save the draft before attaching files");
+      const stored = await upload(this.#accountId, base.id, base.version, id, file);
+      this.#assertBoundary(stored);
+      const attached = stored.attachments.find((attachment) => attachment.id === id);
+      if (!attached || attached.size !== file.size || !sameDraftContent(stored, {
+        ...base, attachments: [...base.attachments.filter((attachment) => attachment.id !== id), attached],
+      })) {
+        throw new DraftRecoveryConflictError("Draft changed in another client while the file was uploading");
+      }
+      this.#draft = stored;
+      this.#uploadBases.set(id, stored);
+      return attached;
+    });
+    this.#tail = operation.then(() => undefined, () => undefined);
+    const attached = await operation;
+    const stored = await this.save({
+      ...content, attachments: [...content.attachments.filter((attachment) => attachment.id !== id), attached],
+    });
+    this.#uploadBases.delete(id);
+    return stored;
+  }
+
+  async cancelUpload(
+    content: DraftContent, id: string,
+    load: (accountId: string, draftId: string) => Promise<Draft>,
+  ): Promise<Draft> {
+    const operation = this.#tail.then(async () => {
+      const base = this.#uploadBases.get(id);
+      if (!base) return;
+      const stored = await load(this.#accountId, base.id);
+      this.#assertBoundary(stored);
+      const attachment = stored.attachments.find((attachment) => attachment.id === id);
+      const expected = attachment
+        ? { ...base, attachments: [...base.attachments.filter((candidate) => candidate.id !== id), attachment] }
+        : base;
+      if (!sameDraftContent(stored, expected)) {
+        throw new DraftRecoveryConflictError("Draft changed in another client while the upload was being removed");
+      }
+      this.#draft = stored;
+      this.#uploadBases.delete(id);
+    });
+    this.#tail = operation.then(() => undefined, () => undefined);
+    await operation;
+    return this.save({ ...content, attachments: content.attachments.filter((attachment) => attachment.id !== id) });
   }
 
   refreshAfterSend(load: (accountId: string, draftId: string) => Promise<Draft>): Promise<Draft | null> {
@@ -101,6 +158,18 @@ export class DraftSaveQueue {
     });
     this.#tail = operation.then(() => undefined, () => undefined);
     return operation;
+  }
+
+  #adoptSavedDraft(stored: Draft): void {
+    const previous = this.#draft;
+    if (previous) {
+      for (const [id, base] of this.#uploadBases) {
+        if (base.version === previous.version && sameDraftContent(base, previous)) {
+          this.#uploadBases.set(id, stored);
+        }
+      }
+    }
+    this.#draft = stored;
   }
 
   #assertBoundary(draft: Draft): void {
@@ -126,7 +195,7 @@ function draftContentKey(content: DraftContent): string {
     content.source
       ? [content.source.canonicalMessageId, content.source.conversationId, content.source.providerConversationId ?? null]
       : null,
-    content.attachments.map(({ name, size, type }) => [name, size, type]),
+    content.attachments.map(({ id, name, size, type }) => [id ?? null, name, size, type]),
   ]);
 }
 

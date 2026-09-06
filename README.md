@@ -99,3 +99,11 @@ Docker Compose publishes Postreeve only on `127.0.0.1:3000` and stores SQLite da
 - `bun run test:e2e`: run the Playwright browser workflow
 
 Licensed under the [Apache License 2.0](LICENSE).
+
+### Draft file storage and outgoing limits
+
+Files selected in compose upload into the saved draft. Postreeve stores their bytes in its SQLite database and exposes only opaque file IDs in draft metadata. Files survive another client, restart, and failed delivery. Retry failed uploads in the open compose form; failed or uncertain sends retain the stored files. An uncertain send still requires the existing explicit recovery-copy action before another delivery attempt.
+
+`POSTREEVE_MAX_UPLOAD_BYTES` sets the maximum actual bytes per uploaded file (default 20 MiB). `POSTREEVE_MAX_MESSAGE_BYTES` sets the maximum complete encoded MIME message (default 25 MiB), including body, headers, attachment encoding, and multipart overhead. Both settings require positive integers. Gmail and SMTP enforce the message limit before dispatch; provider mirrors use the same limit. Base64 overhead means the permitted total file content is smaller than the encoded-message limit. These application limits do not override a provider's own limits. The received-download setting `POSTREEVE_MAX_ATTACHMENT_BYTES` is independent.
+
+Uploads commit their bytes and versioned draft ownership together. Rejected uploads leave no staged blobs. Removing a file or deleting its draft deletes the corresponding owned bytes transactionally; recovery copies retain independent bytes. Settled drafts retain their files with their delivery receipt until the draft or account is removed. Old drafts migrated from browser storage show missing file content explicitly because those records never contained the bytes; remove or attach those files again before sending. Ordinary file attachments are supported; inline/CID rendering remains outside this feature.

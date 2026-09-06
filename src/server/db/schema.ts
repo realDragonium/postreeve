@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, foreignKey, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { blob, check, foreignKey, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import type {
   ConversationSendSource,
   DraftComposeMode,
@@ -72,6 +72,19 @@ export const drafts = sqliteTable("drafts", {
       AND ${table.deliveryError} IS NULL AND ${table.claimedAt} IS NOT NULL
       AND ${table.claimOwner} IS NOT NULL AND ${table.settledAt} IS NOT NULL)
   `),
+]);
+
+export const draftFiles = sqliteTable("draft_files", {
+  tenantId: text("tenant_id").notNull(),
+  accountId: text("account_id").notNull(),
+  draftId: text("draft_id").notNull(),
+  id: text("id").notNull(),
+  name: text("name").notNull(),
+  mediaType: text("media_type").notNull(),
+  content: blob("content", { mode: "buffer" }).notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.tenantId, table.draftId, table.id] }),
+  foreignKey({ columns: [table.tenantId, table.draftId], foreignColumns: [drafts.tenantId, drafts.id] }).onDelete("cascade"),
 ]);
 
 export const draftTombstones = sqliteTable("draft_tombstones", {

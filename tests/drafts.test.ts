@@ -111,7 +111,7 @@ describe("server-authoritative drafts", () => {
     expect(await reopened.service.getDraft(account.id, created.id)).toEqual(created);
     expect(await reopened.service.listDrafts(account.id)).toEqual([created]);
     await expect(reopened.service.sendDraft(account.id, created.id, { version: created.version }))
-      .rejects.toThrow("Draft attachment delivery is not supported yet");
+      .rejects.toThrow("Some draft files have no stored content");
     expect(reopened.sendAttempts).toEqual([]);
     const edited = await reopened.service.updateDraft(account.id, created.id, updateInput(created, { body: "Edited later" }));
     expect(edited.attachments).toEqual(created.attachments);
