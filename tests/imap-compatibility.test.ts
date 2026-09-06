@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { simpleParser } from "mailparser";
 import type {
+  AppendResponseObject,
   CopyResponseObject,
   ESearchResult,
   FetchMessageObject,
@@ -23,16 +25,17 @@ import {
 import { MailProviderRegistry, toCanonicalObservation } from "../src/server/mail/provider";
 import { MailSenderRegistry } from "../src/server/mail/sender";
 import { Store } from "../src/server/db/store";
-import { canonicalConversationSchema, type MessageRef } from "../src/shared/contracts";
+import { canonicalConversationSchema, type Draft, type MessageRef } from "../src/shared/contracts";
 import { PostreeveService } from "../src/server/core/postreeve";
 import { CredentialVault } from "../src/server/security/credentials";
 import { createApi } from "../src/server/api";
 import { repeatedIdentification } from "./fixtures/repeated-identification";
+import { buildProviderDraftMessage } from "../src/server/mail/provider-draft";
 
 interface StoredMailbox {
   path: string;
   name: string;
-  readonly uidValidity: bigint;
+  uidValidity: bigint;
   readonly specialUse?: string;
   readonly flags?: Set<string>;
   nextUid: number;
@@ -43,11 +46,27 @@ interface FakeState {
   readonly mailboxes: Map<string, StoredMailbox>;
   readonly options: ImapFlowOptions[];
   readonly storeOptions: StoreOptions[];
+  readonly flagAdds: Array<{ uid: number; flags: string[]; options: StoreOptions }>;
+  readonly messageDeletes: Array<{ uids: number[]; options: { uid?: boolean } }>;
   readonly searches: SearchObject[];
   readonly searchOptions: Array<{ uid?: boolean; returnOptions: Array<"MIN" | "MAX" | "COUNT" | "ALL" | { partial: string }> }>;
   readonly fetchQueries: FetchQueryObject[];
   eSearchAll?: string;
   lists: number;
+  mailboxOpens: number;
+  onMailboxOpen?: (mailbox: StoredMailbox, count: number) => void;
+  ambiguousAppendFailures: number;
+  readonly messageDeleteFalse: Map<number, "present" | "absent">;
+  readonly messageDeleteSuccessWithoutRemoval: Set<number>;
+  readonly omittedDraftSearchUids: Set<number>;
+  readonly omittedFetchUids: Set<number>;
+  readonly fetchWithoutFlags: Set<number>;
+  readonly fetchWithoutHeaders: Set<number>;
+  readonly fetchOneFailures: Map<number, Error>;
+  readonly fetchOneFalse: Set<number>;
+  readonly exactUidSearchFailures: Set<number>;
+  broadSearchFailures: number;
+  readonly messageFlagAddFalseWithUnreadableUid: Set<number>;
 }
 
 const config = {
@@ -58,6 +77,7 @@ const config = {
   username: "human@example.test",
   password: "not-logged",
 };
+const draftScope = { tenantId: "tenant-a", accountId: config.accountId };
 
 describe("Bun IMAP compatibility", () => {
   test("verifies authentication with a folder list and no mailbox mutation", async () => {
@@ -351,8 +371,587 @@ describe("Bun IMAP compatibility", () => {
       { path: "INBOX", name: "Inbox", specialUse: "inbox", unread: 2, total: 3 },
       { path: "Archive", name: "Archive", specialUse: "archive", unread: 0, total: 0 },
       { path: "Bin", name: "Bin", specialUse: "trash", unread: 0, total: 0 },
+      { path: "Drafts", name: "Drafts", specialUse: "drafts", unread: 0, total: 0 },
     ]);
     expect(provider.listFolders("account-b")).rejects.toThrow("cannot access account account-b");
+  });
+
+  test("creates, updates, lists, and safely removes marked drafts in the special-use mailbox", async () => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const first = providerDraft(1, { to: "unfinished@, Person <person@example.test>", body: "First body" });
+    state.ambiguousAppendFailures = 3;
+
+    const firstRef = await provider.createDraft(draftScope, first);
+    expect(firstRef).toMatchObject({ kind: "imap", mailbox: "Drafts", uidValidity: "505" });
+    const updated = providerDraft(2, {
+      to: "unfinished@, Person <person@example.test>",
+      subject: "Updated",
+      body: "Second body",
+    });
+    const updatedRef = await provider.updateDraft(draftScope, updated, firstRef);
+    await provider.updateDraft(draftScope, updated, updatedRef);
+    const listed = await provider.listDrafts(draftScope);
+    expect(listed).toEqual([{
+      tenantId: "tenant-a", accountId: config.accountId, postreeveId: updated.id, version: 2,
+      ref: expect.objectContaining({ kind: "imap", mailbox: "Drafts" }),
+    }]);
+    const draftsMailbox = state.mailboxes.get("Drafts");
+    if (!draftsMailbox) throw new Error("Expected special-use Drafts mailbox");
+    expect(draftsMailbox.messages.size).toBe(1);
+    const mirrored = [...draftsMailbox.messages.values()][0];
+    expect(mirrored?.flags).toContain("\\Draft");
+    expect(mirrored?.source?.toString()).toContain("To: <unfinished@>, Person <person@example.test>");
+    if (!mirrored?.source) throw new Error("Expected mirrored draft source");
+    expect((await simpleParser(mirrored.source)).text).toBe("Second body");
+    await expect(provider.updateDraft({ ...draftScope, accountId: "account-b" }, updated, updatedRef))
+      .rejects.toThrow("cannot access account account-b");
+    await expect(provider.removeDraft({ ...draftScope, accountId: "account-b" }, updated.id, updatedRef))
+      .rejects.toThrow("cannot access account account-b");
+
+    const unrelated = fakeMessage(900, 1n, "Unrelated deleted message", "Keep", new Set(["\\Deleted"]));
+    draftsMailbox.messages.set(900, unrelated);
+    await provider.removeDraft(draftScope, updated.id, updatedRef);
+    await provider.removeDraft(draftScope, updated.id, updatedRef);
+    expect(draftsMailbox.messages.has(900)).toBe(true);
+    expect(await provider.listDrafts(draftScope)).toEqual([]);
+    await expect(provider.createDraft({ ...draftScope, accountId: "account-b" }, first))
+      .rejects.toThrow("cannot access account account-b");
+    await expect(provider.createDraft(draftScope, { ...first, accountId: "account-b" }))
+      .rejects.toThrow("cannot access account account-b");
+  });
+
+  test("keeps same-id drafts isolated between accounts sharing an IMAP mailbox", async () => {
+    const state = fakeState();
+    const draftsMailbox = state.mailboxes.get("Drafts");
+    if (!draftsMailbox) throw new Error("Expected special-use Drafts mailbox");
+    const unscopedSource = Buffer.from(
+      `X-Postreeve-Draft-ID: ${Buffer.from("imap-postreeve-draft").toString("base64url")}\r\nX-Postreeve-Draft-Version: 1\r\n\r\n`,
+    );
+    draftsMailbox.messages.set(900, {
+      ...fakeMessage(900, 1n, "Legacy unscoped draft", "Keep", new Set(["\\Draft"])),
+      source: unscopedSource,
+      headers: unscopedSource,
+    });
+    const otherConfig = { ...config, accountId: "account-b" };
+    const firstProvider = new ImapMailProvider(config, fakeFactory(state));
+    const secondProvider = new ImapMailProvider(otherConfig, fakeFactory(state));
+    const firstDraft = providerDraft(1);
+    const secondDraft = providerDraft(1, {
+      accountId: otherConfig.accountId,
+      identity: { name: "Human", address: otherConfig.username },
+    });
+
+    const firstRef = await firstProvider.createDraft(draftScope, firstDraft);
+    const secondScope = { tenantId: "tenant-a", accountId: otherConfig.accountId };
+    const secondRef = await secondProvider.createDraft(secondScope, secondDraft);
+    expect(await firstProvider.listDrafts(draftScope)).toEqual([
+      { tenantId: "tenant-a", accountId: config.accountId, postreeveId: firstDraft.id, version: 1, ref: firstRef },
+    ]);
+    expect(await secondProvider.listDrafts(secondScope)).toEqual([
+      { tenantId: "tenant-a", accountId: otherConfig.accountId, postreeveId: secondDraft.id, version: 1, ref: secondRef },
+    ]);
+
+    const updatedFirst = providerDraft(2, { body: "First account update" });
+    const updatedRef = await firstProvider.updateDraft(draftScope, updatedFirst, secondRef);
+    await firstProvider.removeDraft(draftScope, firstDraft.id, secondRef);
+
+    expect(await firstProvider.listDrafts(draftScope)).toEqual([]);
+    expect(await secondProvider.listDrafts(secondScope)).toEqual([
+      { tenantId: "tenant-a", accountId: otherConfig.accountId, postreeveId: secondDraft.id, version: 1, ref: secondRef },
+    ]);
+    expect(draftsMailbox.messages.has(900)).toBe(true);
+    expect(state.messageDeletes.flatMap(({ uids }) => uids).includes(secondRef.kind === "imap" ? secondRef.uid : 0)).toBe(false);
+    expect(state.messageDeletes.flatMap(({ uids }) => uids).includes(updatedRef.kind === "imap" ? updatedRef.uid : 0)).toBe(true);
+  });
+
+  test("keeps same-account same-id drafts isolated between trusted tenants", async () => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const secondScope = { tenantId: "tenant-b", accountId: config.accountId };
+    const first = providerDraft(1, { body: "Tenant A" });
+    const second = providerDraft(1, { body: "Tenant B" });
+
+    const firstRef = await provider.createDraft(draftScope, first);
+    const secondRef = await provider.createDraft(secondScope, second);
+    expect(firstRef).not.toEqual(secondRef);
+    expect(await provider.listDrafts(draftScope)).toEqual([{
+      tenantId: "tenant-a", accountId: config.accountId, postreeveId: first.id, version: 1, ref: firstRef,
+    }]);
+    expect(await provider.listDrafts(secondScope)).toEqual([{
+      tenantId: "tenant-b", accountId: config.accountId, postreeveId: second.id, version: 1, ref: secondRef,
+    }]);
+
+    await provider.updateDraft(draftScope, { ...first, version: 2, body: "Tenant A updated" }, secondRef);
+    expect(await provider.listDrafts(secondScope)).toEqual([{
+      tenantId: "tenant-b", accountId: config.accountId, postreeveId: second.id, version: 1, ref: secondRef,
+    }]);
+    await provider.removeDraft(draftScope, first.id, secondRef);
+    expect(await provider.listDrafts(draftScope)).toEqual([]);
+    expect(await provider.listDrafts(secondScope)).toHaveLength(1);
+  });
+
+  test("resolves an omitted exact IMAP ref and rejects uncertain lookup without touching foreign drafts", async () => {
+    const state = fakeState();
+    const drafts = state.mailboxes.get("Drafts");
+    if (!drafts) throw new Error("Expected special-use Drafts mailbox");
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const owned = providerDraft(1);
+    const ownedRef = await provider.createDraft(draftScope, owned);
+    if (ownedRef.kind !== "imap") throw new Error("Expected IMAP ref");
+    state.omittedDraftSearchUids.add(ownedRef.uid);
+
+    const sources = new Map<number, Buffer>([
+      [2, await buildProviderDraftMessage(draftScope, { ...owned, id: "different-draft" })],
+      [3, Buffer.from([
+        `X-Postreeve-Draft-Account-ID: ${Buffer.from(config.accountId).toString("base64url")}`,
+        `X-Postreeve-Draft-ID: ${Buffer.from(owned.id).toString("base64url")}`,
+        "X-Postreeve-Draft-Version: 1",
+        "",
+        "",
+      ].join("\r\n"))],
+      [4, await buildProviderDraftMessage({ tenantId: "tenant-b", accountId: config.accountId }, owned)],
+      [5, await buildProviderDraftMessage(draftScope, owned)],
+      [6, await buildProviderDraftMessage(draftScope, owned)],
+    ]);
+    for (const [uid, source] of sources) {
+      drafts.messages.set(uid, {
+        ...fakeMessage(uid, BigInt(uid), "Provider draft", "Body", new Set(["\\Draft", ...(uid === 6 ? ["\\Deleted"] : [])])),
+        source,
+      });
+      state.omittedDraftSearchUids.add(uid);
+    }
+    drafts.nextUid = 7;
+    state.fetchOneFailures.set(5, new Error("exact fetch unavailable"));
+
+    await provider.removeDraft(draftScope, owned.id, ownedRef);
+    await provider.removeDraft(draftScope, owned.id, { ...ownedRef, uid: 999 });
+    await provider.removeDraft(draftScope, owned.id, { ...ownedRef, uid: 2 });
+    await provider.removeDraft(draftScope, owned.id, { ...ownedRef, uid: 3 });
+    await provider.removeDraft(draftScope, owned.id, { ...ownedRef, uid: 4 });
+    await provider.removeDraft(draftScope, owned.id, { ...ownedRef, uid: 6 });
+    await expect(provider.removeDraft(draftScope, owned.id, { ...ownedRef, uid: 5 }))
+      .rejects.toThrow("exact fetch unavailable");
+    expect([...drafts.messages.keys()].sort((left, right) => left - right)).toEqual([2, 3, 4, 5]);
+    expect(state.messageDeletes.map(({ uids }) => uids)).toEqual([[ownedRef.uid], [6]]);
+  });
+
+  test("replaces an omitted exact IMAP ref and fails uncertain lookup before appending", async () => {
+    const state = fakeState();
+    const drafts = state.mailboxes.get("Drafts");
+    if (!drafts) throw new Error("Expected special-use Drafts mailbox");
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const original = providerDraft(1, { body: "Original body" });
+    const originalRef = await provider.createDraft(draftScope, original);
+    if (originalRef.kind !== "imap") throw new Error("Expected IMAP ref");
+    state.omittedDraftSearchUids.add(originalRef.uid);
+
+    const updated = providerDraft(2, { body: "Updated body" });
+    const updatedRef = await provider.updateDraft(draftScope, updated, originalRef);
+    if (updatedRef.kind !== "imap") throw new Error("Expected IMAP ref");
+    expect(updatedRef.uid).not.toBe(originalRef.uid);
+    expect([...drafts.messages.values()].filter((message) =>
+      message.flags?.has("\\Draft") && !message.flags.has("\\Deleted"))).toHaveLength(1);
+    expect(drafts.messages.has(originalRef.uid)).toBe(false);
+
+    state.omittedDraftSearchUids.add(updatedRef.uid);
+    state.fetchOneFailures.set(updatedRef.uid, new Error("exact fetch unavailable"));
+    const nextUid = drafts.nextUid;
+    await expect(provider.updateDraft(draftScope, providerDraft(3), updatedRef))
+      .rejects.toThrow("exact fetch unavailable");
+    expect(drafts.nextUid).toBe(nextUid);
+    expect(drafts.messages.has(updatedRef.uid)).toBe(true);
+
+    state.fetchOneFailures.delete(updatedRef.uid);
+    state.fetchOneFalse.add(updatedRef.uid);
+    state.exactUidSearchFailures.add(updatedRef.uid);
+    await expect(provider.updateDraft(draftScope, providerDraft(3), updatedRef))
+      .rejects.toThrow(`could not confirm whether draft UID ${updatedRef.uid} exists`);
+    expect(drafts.nextUid).toBe(nextUid);
+  });
+
+  test("never carries replacement UIDs into a new Drafts UIDVALIDITY generation", async () => {
+    for (const uidplus of [true, false]) {
+      const state = fakeState();
+      const drafts = state.mailboxes.get("Drafts");
+      if (!drafts) throw new Error("Expected special-use Drafts mailbox");
+      const factory: ImapClientFactory = (options) => {
+        state.options.push(options);
+        const client = new FakeImapClient(state);
+        if (!uidplus) client.capabilities.delete("UIDPLUS");
+        return client;
+      };
+      const provider = new ImapMailProvider(config, factory);
+      const original = providerDraft(1, { body: "Original generation" });
+      const originalRef = await provider.createDraft(draftScope, original);
+      if (originalRef.kind !== "imap") throw new Error("Expected IMAP ref");
+      const foreignSource = await buildProviderDraftMessage(
+        { tenantId: "tenant-b", accountId: config.accountId },
+        { ...original, body: "Foreign generation" },
+      );
+      state.onMailboxOpen = (mailbox, count) => {
+        if (count !== 3) return;
+        mailbox.uidValidity = 506n;
+        mailbox.messages.set(originalRef.uid, {
+          ...fakeMessage(originalRef.uid, 9n, "Foreign draft", "Keep", new Set(["\\Draft"])),
+          source: foreignSource,
+        });
+      };
+
+      const updatedRef = await provider.updateDraft(
+        draftScope,
+        providerDraft(2, { body: "Current generation" }),
+        originalRef,
+      );
+
+      expect(updatedRef).toMatchObject({ kind: "imap", uidValidity: "506", uid: 2 });
+      expect(drafts.messages.get(originalRef.uid)?.flags).toEqual(new Set(["\\Draft"]));
+      expect(state.messageDeletes.flatMap(({ uids }) => uids)).not.toContain(originalRef.uid);
+      expect(state.flagAdds.map(({ uid }) => uid)).not.toContain(originalRef.uid);
+    }
+  });
+
+  test("marks only an omitted exact owned UID deleted without UIDPLUS", async () => {
+    const state = fakeState();
+    const drafts = state.mailboxes.get("Drafts");
+    if (!drafts) throw new Error("Expected special-use Drafts mailbox");
+    const factory: ImapClientFactory = (options) => {
+      state.options.push(options);
+      const client = new FakeImapClient(state);
+      client.capabilities.delete("UIDPLUS");
+      return client;
+    };
+    const provider = new ImapMailProvider(config, factory);
+    const draft = providerDraft(1);
+    const ref = await provider.createDraft(draftScope, draft);
+    if (ref.kind !== "imap") throw new Error("Expected IMAP ref");
+    state.omittedDraftSearchUids.add(ref.uid);
+
+    await provider.removeDraft(draftScope, draft.id, ref);
+    await provider.removeDraft(draftScope, draft.id, ref);
+
+    expect(state.flagAdds).toEqual([{ uid: ref.uid, flags: ["\\Deleted"], options: { uid: true } }]);
+    expect(state.messageDeletes).toEqual([]);
+    expect(drafts.messages.get(ref.uid)?.flags).toContain("\\Deleted");
+  });
+
+  test("rejects failed broad draft discovery without acknowledging provider removal", async () => {
+    const state = fakeState();
+    const drafts = state.mailboxes.get("Drafts");
+    if (!drafts) throw new Error("Expected special-use Drafts mailbox");
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const draft = providerDraft(1);
+    const ref = await provider.createDraft(draftScope, draft);
+    state.broadSearchFailures = 1;
+
+    await expect(provider.removeDraft(draftScope, draft.id, ref))
+      .rejects.toThrow("could not complete the UID search");
+    expect(drafts.messages.size).toBe(1);
+    expect(state.messageDeletes).toEqual([]);
+    expect(state.flagAdds).toEqual([]);
+  });
+
+  test("rejects incomplete draft discovery without acknowledging provider removal", async () => {
+    const state = fakeState();
+    const drafts = state.mailboxes.get("Drafts");
+    if (!drafts) throw new Error("Expected special-use Drafts mailbox");
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const draft = providerDraft(1);
+    const ref = await provider.createDraft(draftScope, draft);
+    if (ref.kind !== "imap") throw new Error("Expected IMAP ref");
+    state.omittedFetchUids.add(ref.uid);
+
+    await expect(provider.removeDraft(draftScope, draft.id, ref))
+      .rejects.toThrow("did not return every selected provider draft");
+    expect(drafts.messages.has(ref.uid)).toBe(true);
+    expect(state.messageDeletes).toEqual([]);
+    expect(state.flagAdds).toEqual([]);
+  });
+
+  test("rejects incomplete exact draft data before mutation", async () => {
+    for (const missing of ["flags", "headers"] as const) {
+      const state = fakeState();
+      const drafts = state.mailboxes.get("Drafts");
+      if (!drafts) throw new Error("Expected special-use Drafts mailbox");
+      const provider = new ImapMailProvider(config, fakeFactory(state));
+      const draft = providerDraft(1);
+      const ref = await provider.createDraft(draftScope, draft);
+      if (ref.kind !== "imap") throw new Error("Expected IMAP ref");
+      state.omittedDraftSearchUids.add(ref.uid);
+      state[missing === "flags" ? "fetchWithoutFlags" : "fetchWithoutHeaders"].add(ref.uid);
+
+      await expect(provider.removeDraft(draftScope, draft.id, ref))
+        .rejects.toThrow(`incomplete data while resolving draft UID ${ref.uid}`);
+      expect(drafts.messages.has(ref.uid)).toBe(true);
+      expect(state.messageDeletes).toEqual([]);
+      expect(state.flagAdds).toEqual([]);
+    }
+  });
+
+  test("accepts an explicit empty header result for an unmarked provider draft", async () => {
+    const state = fakeState();
+    const drafts = state.mailboxes.get("Drafts");
+    if (!drafts) throw new Error("Expected special-use Drafts mailbox");
+    const unmarked = fakeMessage(50, 50n, "Unmarked draft", "Body", new Set(["\\Draft"]));
+    delete unmarked.source;
+    unmarked.headers = Buffer.alloc(0);
+    drafts.messages.set(unmarked.uid, unmarked);
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+
+    expect(await provider.listDrafts(draftScope)).toEqual([]);
+  });
+
+  test("rejects an unreadable non-UIDPLUS flag failure while the exact UID still exists", async () => {
+    const state = fakeState();
+    const drafts = state.mailboxes.get("Drafts");
+    if (!drafts) throw new Error("Expected special-use Drafts mailbox");
+    const factory: ImapClientFactory = (options) => {
+      state.options.push(options);
+      const client = new FakeImapClient(state);
+      client.capabilities.delete("UIDPLUS");
+      return client;
+    };
+    const provider = new ImapMailProvider(config, factory);
+    const draft = providerDraft(1);
+    const ref = await provider.createDraft(draftScope, draft);
+    if (ref.kind !== "imap") throw new Error("Expected IMAP ref");
+    state.messageFlagAddFalseWithUnreadableUid.add(ref.uid);
+
+    await expect(provider.removeDraft(draftScope, draft.id, ref))
+      .rejects.toThrow(`did not confirm marking draft UID ${ref.uid} deleted`);
+    expect(drafts.messages.has(ref.uid)).toBe(true);
+    expect(drafts.messages.get(ref.uid)?.flags).not.toContain("\\Deleted");
+    expect(state.messageDeletes).toEqual([]);
+  });
+
+  test("reconciles drafts without UIDPLUS by marking only managed UIDs deleted", async () => {
+    const state = fakeState();
+    const draftsMailbox = state.mailboxes.get("Drafts");
+    if (!draftsMailbox) throw new Error("Expected special-use Drafts mailbox");
+    const unrelated = fakeMessage(900, 7n, "Unrelated deleted message", "Keep", new Set(["\\Deleted"]));
+    draftsMailbox.messages.set(900, unrelated);
+    const factory: ImapClientFactory = (options) => {
+      state.options.push(options);
+      const client = new FakeImapClient(state);
+      client.capabilities.delete("UIDPLUS");
+      return client;
+    };
+    const provider = new ImapMailProvider(config, factory);
+    state.ambiguousAppendFailures = 3;
+
+    const first = providerDraft(1, { body: "First body" });
+    const firstRef = await provider.createDraft(draftScope, first);
+    const current = providerDraft(2, { body: "Current body" });
+    const currentRef = await provider.updateDraft(draftScope, current, firstRef);
+    const retriedRef = await provider.updateDraft(draftScope, current, currentRef);
+
+    expect(await provider.listDrafts(draftScope)).toEqual([{
+      tenantId: "tenant-a",
+      accountId: config.accountId,
+      postreeveId: current.id,
+      version: 2,
+      ref: retriedRef,
+    }]);
+    const activeManagedUids = [...draftsMailbox.messages.values()]
+      .filter((message) => message.flags?.has("\\Draft") && !message.flags.has("\\Deleted"))
+      .map(({ uid }) => uid);
+    expect(activeManagedUids).toEqual([3]);
+    expect(state.flagAdds).toEqual([
+      { uid: 1, flags: ["\\Deleted"], options: { uid: true } },
+      { uid: 2, flags: ["\\Deleted"], options: { uid: true } },
+    ]);
+    expect(state.messageDeletes).toEqual([]);
+    expect(draftsMailbox.messages.get(900)).toMatchObject({ modseq: 7n, flags: new Set(["\\Deleted"]) });
+
+    await provider.removeDraft(draftScope, current.id, retriedRef);
+    await provider.removeDraft(draftScope, current.id, retriedRef);
+    expect(await provider.listDrafts(draftScope)).toEqual([]);
+    expect(state.flagAdds.slice(2)).toEqual([
+      { uid: 3, flags: ["\\Deleted"], options: { uid: true } },
+    ]);
+    expect([...draftsMailbox.messages.keys()]).toEqual([900, 1, 2, 3]);
+    expect(state.messageDeletes).toEqual([]);
+    expect(draftsMailbox.messages.get(900)).toMatchObject({ modseq: 7n, flags: new Set(["\\Deleted"]) });
+  });
+
+  test("reports an unconfirmed UIDPLUS purge and selectively retires owned stale UIDs on retry", async () => {
+    const state = fakeState();
+    const draftsMailbox = state.mailboxes.get("Drafts");
+    if (!draftsMailbox) throw new Error("Expected special-use Drafts mailbox");
+    draftsMailbox.messages.set(900, fakeMessage(900, 7n, "Unrelated deleted", "Keep", new Set(["\\Deleted"])));
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const first = providerDraft(1);
+    const firstRef = await provider.createDraft(draftScope, first);
+    state.messageDeleteFalse.set(1, "present");
+
+    const current = providerDraft(2, { body: "Current body" });
+    await expect(provider.updateDraft(draftScope, current, firstRef))
+      .rejects.toThrow("did not confirm selective removal of draft UID 1");
+    expect(await provider.listDrafts(draftScope)).toEqual([
+      { tenantId: "tenant-a", accountId: config.accountId, postreeveId: current.id, version: 2, ref: expect.objectContaining({ kind: "imap", uid: 2 }) },
+    ]);
+    expect(draftsMailbox.messages.get(1)?.flags).toContain("\\Deleted");
+    expect(draftsMailbox.messages.has(900)).toBe(true);
+
+    state.messageDeleteFalse.delete(1);
+    const retried = await provider.updateDraft(draftScope, current, firstRef);
+    expect(retried).toMatchObject({ kind: "imap", uid: 3 });
+    expect(await provider.listDrafts(draftScope)).toEqual([
+      { tenantId: "tenant-a", accountId: config.accountId, postreeveId: current.id, version: 2, ref: retried },
+    ]);
+    expect([...draftsMailbox.messages.keys()]).toEqual([900, 3]);
+    expect(state.messageDeletes.flatMap(({ uids }) => uids)).toEqual([1, 2, 1]);
+    expect(draftsMailbox.messages.get(900)).toMatchObject({ modseq: 7n, flags: new Set(["\\Deleted"]) });
+  });
+
+  test("rejects a truthy UIDPLUS result while the exact stale draft still exists", async () => {
+    const state = fakeState();
+    const drafts = state.mailboxes.get("Drafts");
+    if (!drafts) throw new Error("Expected special-use Drafts mailbox");
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const first = providerDraft(1);
+    const firstRef = await provider.createDraft(draftScope, first);
+    if (firstRef.kind !== "imap") throw new Error("Expected IMAP ref");
+    state.omittedDraftSearchUids.add(firstRef.uid);
+    state.messageDeleteSuccessWithoutRemoval.add(firstRef.uid);
+
+    await expect(provider.updateDraft(draftScope, providerDraft(2), firstRef))
+      .rejects.toThrow(`did not confirm selective removal of draft UID ${firstRef.uid}`);
+    expect([...drafts.messages.values()].filter((message) =>
+      message.flags?.has("\\Draft") && !message.flags.has("\\Deleted"))).toHaveLength(2);
+  });
+
+  test("accepts a false UIDPLUS result when the exact owned UID is already absent", async () => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const first = providerDraft(1);
+    const firstRef = await provider.createDraft(draftScope, first);
+    state.messageDeleteFalse.set(1, "absent");
+
+    const current = providerDraft(2);
+    await expect(provider.updateDraft(draftScope, current, firstRef)).resolves.toMatchObject({ kind: "imap", uid: 2 });
+    expect(await provider.listDrafts(draftScope)).toEqual([
+      { tenantId: "tenant-a", accountId: config.accountId, postreeveId: current.id, version: 2, ref: expect.objectContaining({ kind: "imap", uid: 2 }) },
+    ]);
+  });
+
+  test("retains the backend IMAP reference after an unconfirmed purge and repairs it on read", async () => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const providers = new MailProviderRegistry();
+    providers.register(config.accountId, provider);
+    const store = new Store(":memory:");
+    await store.insertAccount({
+      id: config.accountId,
+      name: "Human",
+      email: config.username,
+      kind: "imap",
+      encryptedCredentials: null,
+    });
+    const unavailable = () => { throw new Error("Factory is not used by this fixture"); };
+    const service = new PostreeveService(
+      store,
+      { tenantId: "tenant-a" },
+      providers,
+      new MailSenderRegistry(),
+      new CredentialVault(Buffer.alloc(32, 7).toString("base64")),
+      unavailable,
+      unavailable,
+    );
+    const created = await service.createDraft({
+      accountId: config.accountId,
+      mode: "new",
+      to: "unfinished@",
+      cc: "",
+      bcc: "",
+      subject: "Provider cleanup",
+      body: "Version one",
+      identity: { name: "Human", address: config.username },
+      attachments: [],
+    });
+    if (created.mirror.status !== "synced" || created.mirror.ref.kind !== "imap") {
+      throw new Error("Expected initial IMAP mirror");
+    }
+    state.messageDeleteFalse.set(created.mirror.ref.uid, "present");
+
+    const failed = await service.updateDraft(config.accountId, created.id, {
+      mode: created.mode,
+      to: created.to,
+      cc: created.cc,
+      bcc: created.bcc,
+      subject: created.subject,
+      body: "Authoritative version two",
+      identity: created.identity,
+      attachments: created.attachments,
+      version: created.version,
+    });
+    expect(failed).toMatchObject({
+      version: 2,
+      body: "Authoritative version two",
+      mirror: { status: "failed", mirroredVersion: 1, ref: created.mirror.ref },
+    });
+    expect(await store.getDraft("tenant-a", config.accountId, created.id)).toEqual(failed);
+
+    state.messageDeleteFalse.clear();
+    const repaired = await service.getDraft(config.accountId, created.id);
+    if (repaired.mirror.status !== "synced") throw new Error("Expected repaired IMAP mirror");
+    expect(repaired).toMatchObject({ version: 2, body: "Authoritative version two", mirror: { status: "synced", mirroredVersion: 2 } });
+    expect(await provider.listDrafts(draftScope)).toEqual([
+      { tenantId: "tenant-a", accountId: config.accountId, postreeveId: repaired.id, version: 2, ref: repaired.mirror.ref },
+    ]);
+    store.close();
+  });
+
+  test("retains backend authority when UIDPLUS reports success but the exact draft survives", async () => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const providers = new MailProviderRegistry();
+    providers.register(config.accountId, provider);
+    const store = new Store(":memory:");
+    await store.insertAccount({
+      id: config.accountId,
+      name: "Human",
+      email: config.username,
+      kind: "imap",
+      encryptedCredentials: null,
+    });
+    const unavailable = () => { throw new Error("Factory is not used by this fixture"); };
+    const service = new PostreeveService(
+      store,
+      { tenantId: "tenant-a" },
+      providers,
+      new MailSenderRegistry(),
+      new CredentialVault(Buffer.alloc(32, 7).toString("base64")),
+      unavailable,
+      unavailable,
+    );
+    const created = await service.createDraft({
+      accountId: config.accountId,
+      mode: "new",
+      to: "unfinished@",
+      cc: "",
+      bcc: "",
+      subject: "Provider cleanup",
+      body: "Keep backend authority",
+      identity: { name: "Human", address: config.username },
+      attachments: [],
+    });
+    if (created.mirror.status !== "synced" || created.mirror.ref.kind !== "imap") {
+      throw new Error("Expected initial IMAP mirror");
+    }
+    state.omittedDraftSearchUids.add(created.mirror.ref.uid);
+    state.messageDeleteSuccessWithoutRemoval.add(created.mirror.ref.uid);
+
+    await expect(service.removeDraft(config.accountId, created.id, { version: created.version }))
+      .rejects.toThrow(`did not confirm selective removal of draft UID ${created.mirror.ref.uid}`);
+    expect(await store.getDraft("tenant-a", config.accountId, created.id)).toMatchObject({
+      id: created.id,
+      body: "Keep backend authority",
+      mirror: { status: "failed", ref: created.mirror.ref },
+    });
+    expect((await provider.listDrafts(draftScope))).toEqual([]);
+    expect(state.mailboxes.get("Drafts")?.messages.has(created.mirror.ref.uid)).toBe(true);
+    store.close();
   });
 
   test("manages custom folders without changing special-use mailboxes", async () => {
@@ -586,6 +1185,8 @@ class FakeImapClient implements ImapClient {
 
   async mailboxOpen(path: string | string[], _options?: MailboxOpenOptions): Promise<MailboxObject> {
     const mailbox = this.#mailbox(path);
+    this.#state.mailboxOpens += 1;
+    this.#state.onMailboxOpen?.(mailbox, this.#state.mailboxOpens);
     this.#selected = mailbox;
     return mailboxObject(mailbox);
   }
@@ -603,7 +1204,25 @@ class FakeImapClient implements ImapClient {
     this.#state.searchOptions.push(options);
     const mailbox = this.#requireSelected();
     const messages = [...mailbox.messages.values()];
+    if (query.uid === undefined && this.#state.broadSearchFailures > 0) {
+      this.#state.broadSearchFailures -= 1;
+      return false;
+    }
     if (query.all) return { all: this.#state.eSearchAll ?? messages.map((message) => message.uid).join(",") };
+    if (query.uid !== undefined) {
+      const uid = Number(query.uid);
+      if (this.#state.exactUidSearchFailures.has(uid)) return false;
+      return mailbox.messages.has(uid) ? { all: uid.toString() } : {};
+    }
+    if (query.draft !== undefined || query.deleted !== undefined) {
+      const matching = messages.filter((message) => {
+        const flags = message.flags ?? new Set<string>();
+        return !this.#state.omittedDraftSearchUids.has(message.uid)
+          && (query.draft === undefined || flags.has("\\Draft") === query.draft)
+          && (query.deleted === undefined || flags.has("\\Deleted") === query.deleted);
+      });
+      return { all: matching.map(({ uid }) => uid).join(",") };
+    }
     const term = query.or?.flatMap((criterion) => [criterion.subject, criterion.from, criterion.to, criterion.text])
       .find((value) => value !== undefined)
       ?.toLowerCase();
@@ -625,8 +1244,9 @@ class FakeImapClient implements ImapClient {
     this.#state.fetchQueries.push(query);
     const mailbox = this.#requireSelected();
     for (const uid of range) {
+      if (this.#state.omittedFetchUids.has(uid)) continue;
       const message = mailbox.messages.get(uid);
-      if (message) yield fetchedMessage(message, query);
+      if (message) yield this.#withFetchOmissions(fetchedMessage(message, query));
     }
   }
 
@@ -636,8 +1256,18 @@ class FakeImapClient implements ImapClient {
     _options?: FetchOptions,
   ): Promise<FetchMessageObject | false> {
     this.#state.fetchQueries.push(query);
+    const failure = this.#state.fetchOneFailures.get(sequence);
+    if (failure) throw failure;
+    if (this.#state.fetchOneFalse.has(sequence)) return false;
     const message = this.#requireSelected().messages.get(sequence);
-    return message ? fetchedMessage(message, query) : false;
+    return message ? this.#withFetchOmissions(fetchedMessage(message, query)) : false;
+  }
+
+  #withFetchOmissions(message: FetchMessageObject): FetchMessageObject {
+    const result = { ...message };
+    if (this.#state.fetchWithoutFlags.has(message.uid)) delete result.flags;
+    if (this.#state.fetchWithoutHeaders.has(message.uid)) delete result.headers;
+    return result;
   }
 
   async messageFlagsAdd(
@@ -645,6 +1275,11 @@ class FakeImapClient implements ImapClient {
     flags: string[],
     options?: StoreOptions,
   ): Promise<boolean> {
+    this.#state.flagAdds.push({ uid: range, flags: [...flags], options: options ?? {} });
+    if (this.#state.messageFlagAddFalseWithUnreadableUid.has(range)) {
+      this.#state.fetchOneFalse.add(range);
+      return false;
+    }
     return this.#changeFlags(range, flags, true, options);
   }
 
@@ -678,6 +1313,56 @@ class FakeImapClient implements ImapClient {
       uidValidity: target.uidValidity,
       uidMap: new Map([[range, targetUid]]),
     };
+  }
+
+  async messageDelete(range: number | number[], options?: { uid?: boolean }): Promise<boolean> {
+    const mailbox = this.#requireSelected();
+    const uids = Array.isArray(range) ? range : [range];
+    this.#state.messageDeletes.push({ uids: [...uids], options: options ?? {} });
+    const falseResult = uids.length === 1 ? this.#state.messageDeleteFalse.get(uids[0]!) : undefined;
+    if (falseResult) {
+      const uid = uids[0]!;
+      const message = mailbox.messages.get(uid);
+      if (falseResult === "absent") mailbox.messages.delete(uid);
+      else if (message) message.flags = new Set([...(message.flags ?? []), "\\Deleted"]);
+      return false;
+    }
+    if (uids.length === 1 && this.#state.messageDeleteSuccessWithoutRemoval.has(uids[0]!)) return true;
+    let deleted = false;
+    for (const uid of uids) deleted = mailbox.messages.delete(uid) || deleted;
+    return deleted;
+  }
+
+  async append(
+    path: string | string[],
+    content: string | Buffer,
+    flags: string[] = [],
+    idate?: Date | string,
+  ): Promise<AppendResponseObject | false> {
+    const mailbox = this.#mailbox(path);
+    const uid = mailbox.nextUid++;
+    const source = Buffer.isBuffer(content) ? Buffer.from(content) : Buffer.from(content);
+    mailbox.messages.set(uid, {
+      seq: uid,
+      uid,
+      modseq: 1n,
+      flags: new Set(flags),
+      internalDate: idate ? new Date(idate) : new Date(),
+      source,
+      headers: selectedHeaders(source, [
+        "X-Postreeve-Draft-Tenant-ID",
+        "X-Postreeve-Draft-Account-ID",
+        "X-Postreeve-Draft-ID",
+        "X-Postreeve-Draft-Version",
+      ]),
+    });
+    if (this.#state.ambiguousAppendFailures > 0) {
+      this.#state.ambiguousAppendFailures -= 1;
+      throw new Error("ambiguous APPEND response");
+    }
+    return this.capabilities.has("UIDPLUS")
+      ? { destination: mailbox.path, uidValidity: mailbox.uidValidity, uid }
+      : { destination: mailbox.path };
   }
 
   #changeFlags(range: number, flags: string[], add: boolean, options?: StoreOptions): boolean {
@@ -734,10 +1419,25 @@ function fakeState(): FakeState {
   return {
     options: [],
     storeOptions: [],
+    flagAdds: [],
+    messageDeletes: [],
     searches: [],
     searchOptions: [],
     fetchQueries: [],
     lists: 0,
+    mailboxOpens: 0,
+    ambiguousAppendFailures: 0,
+    messageDeleteFalse: new Map(),
+    messageDeleteSuccessWithoutRemoval: new Set(),
+    omittedDraftSearchUids: new Set(),
+    omittedFetchUids: new Set(),
+    fetchWithoutFlags: new Set(),
+    fetchWithoutHeaders: new Set(),
+    fetchOneFailures: new Map(),
+    fetchOneFalse: new Set(),
+    exactUidSearchFailures: new Set(),
+    broadSearchFailures: 0,
+    messageFlagAddFalseWithUnreadableUid: new Set(),
     mailboxes: new Map([
       [
         "INBOX",
@@ -769,6 +1469,17 @@ function fakeState(): FakeState {
           uidValidity: 303n,
           specialUse: "\\Trash",
           nextUid: 30,
+          messages: new Map(),
+        },
+      ],
+      [
+        "Drafts",
+        {
+          path: "Drafts",
+          name: "Drafts",
+          uidValidity: 505n,
+          specialUse: "\\Drafts",
+          nextUid: 1,
           messages: new Map(),
         },
       ],
@@ -952,5 +1663,26 @@ function messageRef(overrides: Partial<MessageRef> = {}): MessageRef {
     uid: 3,
     modseq: "13",
     ...overrides,
+  };
+}
+
+function providerDraft(version: number, changes: Partial<Draft> = {}): Draft {
+  return {
+    id: "imap-postreeve-draft",
+    accountId: config.accountId,
+    mode: "new",
+    to: "person@example.test",
+    cc: "",
+    bcc: "",
+    subject: "Provider draft",
+    body: "Body",
+    identity: { name: "Human", address: config.username },
+    attachments: [],
+    delivery: { status: "editable" },
+    mirror: { status: "pending" },
+    createdAt: "2026-09-06T10:00:00.000Z",
+    updatedAt: `2026-09-06T10:00:0${version}.000Z`,
+    version,
+    ...changes,
   };
 }

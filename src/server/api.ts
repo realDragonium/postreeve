@@ -22,7 +22,7 @@ import {
   updateAccountInputSchema,
 } from "../shared/contracts";
 import type { PostreeveService } from "./core/postreeve";
-import { AccountConflictError, DraftConflictError, DraftNotFoundError } from "./core/errors";
+import { AccountConflictError, DraftConflictError, DraftDeletedError, DraftNotFoundError } from "./core/errors";
 import type { GoogleOAuth } from "./google/oauth";
 
 const accountParamsSchema = z.object({ accountId: accountIdSchema });
@@ -226,6 +226,9 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
       }
       if (error instanceof DraftNotFoundError) {
         return context.json({ error: error.message, code: "draft_not_found" as const }, 404);
+      }
+      if (error instanceof DraftDeletedError) {
+        return context.json({ error: error.message, code: "draft_deleted" as const }, 410);
       }
       if (error instanceof DraftConflictError) {
         return context.json({ error: error.message, code: "draft_conflict" as const }, 409);

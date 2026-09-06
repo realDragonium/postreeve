@@ -39,12 +39,14 @@ test("web API sends typed draft lifecycle requests", async () => {
     subject: "Typed draft",
     body: "Draft body",
     identity: { name: "Person", address: "person@example.test" },
+    attachments: [],
   };
   const draft = {
     id: "draft/one",
     accountId: "account/one",
     ...content,
     delivery: { status: "editable" as const },
+    mirror: { status: "synced" as const, mirroredVersion: 1, ref: { kind: "gmail" as const, draftId: "provider-draft" } },
     createdAt: now,
     updatedAt: now,
     version: 1,
@@ -90,6 +92,9 @@ test("web API preserves typed lifecycle error codes and HTTP status", async () =
     if (String(input).includes("missing")) {
       return Response.json({ error: "Draft not found", code: "draft_not_found" }, { status: 404 });
     }
+    if (String(input).includes("deleted")) {
+      return Response.json({ error: "Draft was deleted", code: "draft_deleted" }, { status: 410 });
+    }
     return Response.json({ error: "Draft version conflict", code: "draft_conflict" }, { status: 409 });
   }, { preconnect: globalThis.fetch.preconnect }));
 
@@ -101,6 +106,7 @@ test("web API preserves typed lifecycle error codes and HTTP status", async () =
     subject: "",
     body: "",
     identity: { name: "Person", address: "person@example.test" },
+    attachments: [],
     version: 1,
   }).catch((error: unknown) => error);
   expect(conflict).toBeInstanceOf(ApiRequestError);
@@ -113,6 +119,23 @@ test("web API preserves typed lifecycle error codes and HTTP status", async () =
   if (!(missing instanceof ApiRequestError)) throw new Error("Expected ApiRequestError");
   expect(missing.code).toBe("draft_not_found");
   expect(missing.status).toBe(404);
+
+  const deleted = await api.createDraft({
+    accountId: "deleted",
+    clientId: "deleted-draft",
+    mode: "new",
+    to: [],
+    cc: [],
+    bcc: [],
+    subject: "",
+    body: "",
+    identity: { name: "Person", address: "person@example.test" },
+    attachments: [],
+  }).catch((error: unknown) => error);
+  expect(deleted).toBeInstanceOf(ApiRequestError);
+  if (!(deleted instanceof ApiRequestError)) throw new Error("Expected ApiRequestError");
+  expect(deleted.code).toBe("draft_deleted");
+  expect(deleted.status).toBe(410);
 
   const accountConflict = await api.removeAccount("active").catch((error: unknown) => error);
   expect(accountConflict).toBeInstanceOf(ApiRequestError);

@@ -274,6 +274,11 @@ export const draftRecipientFieldSchema = z.union([
   z.string(),
   z.array(outboundAddressSchema).max(100),
 ]);
+export const draftAttachmentSchema = z.object({
+  name: z.string(),
+  size: z.number().finite().nonnegative(),
+  type: z.string(),
+});
 
 export const draftContentSchema = z.object({
   mode: draftComposeModeSchema,
@@ -284,6 +289,7 @@ export const draftContentSchema = z.object({
   body: z.string().max(2_000_000),
   identity: outboundAddressSchema,
   source: conversationSendSourceSchema.optional(),
+  attachments: z.array(draftAttachmentSchema).default([]),
 });
 
 export const draftDeliverySchema = z.discriminatedUnion("status", [
@@ -307,16 +313,49 @@ export const draftDeliverySchema = z.discriminatedUnion("status", [
   }),
 ]);
 
+export const providerDraftRefSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("gmail"), draftId: z.string().min(1) }),
+  z.object({
+    kind: z.literal("imap"),
+    mailbox: z.string().min(1),
+    uidValidity: z.string().min(1),
+    uid: z.number().int().positive(),
+  }),
+]);
+
+export const draftMirrorSchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("pending"),
+    mirroredVersion: z.number().int().positive().optional(),
+    ref: providerDraftRefSchema.optional(),
+  }),
+  z.object({
+    status: z.literal("synced"),
+    mirroredVersion: z.number().int().positive(),
+    ref: providerDraftRefSchema,
+  }),
+  z.object({
+    status: z.literal("failed"),
+    error: z.string().trim().min(1),
+    mirroredVersion: z.number().int().positive().optional(),
+    ref: providerDraftRefSchema.optional(),
+  }),
+]);
+
 export const draftSchema = draftContentSchema.extend({
   id: draftIdSchema,
   accountId: accountIdSchema,
   delivery: draftDeliverySchema,
+  mirror: draftMirrorSchema,
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
   version: z.number().int().positive(),
 });
 
-export const createDraftInputSchema = draftContentSchema.extend({ accountId: accountIdSchema });
+export const createDraftInputSchema = draftContentSchema.extend({
+  accountId: accountIdSchema,
+  clientId: draftIdSchema.optional(),
+});
 export const updateDraftInputSchema = draftContentSchema.extend({
   version: z.number().int().positive(),
 });
@@ -381,8 +420,11 @@ export type SendMessageInput = z.infer<typeof sendMessageInputSchema>;
 export type SendReceipt = z.infer<typeof sendReceiptSchema>;
 export type DraftComposeMode = z.infer<typeof draftComposeModeSchema>;
 export type DraftRecipientField = z.infer<typeof draftRecipientFieldSchema>;
+export type DraftAttachment = z.infer<typeof draftAttachmentSchema>;
 export type DraftContent = z.infer<typeof draftContentSchema>;
 export type DraftDelivery = z.infer<typeof draftDeliverySchema>;
+export type ProviderDraftRef = z.infer<typeof providerDraftRefSchema>;
+export type DraftMirror = z.infer<typeof draftMirrorSchema>;
 export type Draft = z.infer<typeof draftSchema>;
 export type CreateDraftInput = z.infer<typeof createDraftInputSchema>;
 export type UpdateDraftInput = z.infer<typeof updateDraftInputSchema>;

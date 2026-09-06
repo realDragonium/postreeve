@@ -1,4 +1,5 @@
 import type {
+  Draft,
   Folder,
   MessageRef,
   MessageSummary,
@@ -6,6 +7,7 @@ import type {
   CanonicalMessageObservation,
   MailProviderKind,
   TriageAction,
+  ProviderDraftRef,
 } from "../../shared/contracts";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "./message-id";
 
@@ -73,12 +75,29 @@ export interface MailboxPage {
   complete: boolean;
 }
 
+export interface ProviderDraft {
+  readonly tenantId: string;
+  readonly accountId: string;
+  readonly postreeveId: string;
+  readonly version: number;
+  readonly ref: ProviderDraftRef;
+}
+
+export interface ProviderDraftScope {
+  readonly tenantId: string;
+  readonly accountId: string;
+}
+
 export interface MailProvider {
   verifyConnection(): Promise<void>;
   listFolders(accountId: string): Promise<Folder[]>;
   createFolder(accountId: string, name: string): Promise<void>;
   renameFolder(accountId: string, path: string, name: string): Promise<void>;
   deleteFolder(accountId: string, path: string): Promise<void>;
+  createDraft(scope: ProviderDraftScope, draft: Draft): Promise<ProviderDraftRef>;
+  updateDraft(scope: ProviderDraftScope, draft: Draft, ref: ProviderDraftRef): Promise<ProviderDraftRef>;
+  listDrafts(scope: ProviderDraftScope): Promise<ProviderDraft[]>;
+  removeDraft(scope: ProviderDraftScope, postreeveId: string, ref?: ProviderDraftRef): Promise<void>;
   listMessagePage(accountId: string, mailbox: string, limit: number): Promise<MailboxPage>;
   listMessages(accountId: string, mailbox: string, limit: number): Promise<ProviderMessageSummary[]>;
   readMessages(accountId: string, references: MessageRef[]): Promise<ProviderMessageDetail[]>;

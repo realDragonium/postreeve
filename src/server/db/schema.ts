@@ -3,12 +3,14 @@ import { check, foreignKey, index, integer, primaryKey, sqliteTable, text, uniqu
 import type {
   ConversationSendSource,
   DraftComposeMode,
+  DraftAttachment,
   DraftRecipientField,
   OperationResult,
   OutboundAddress,
   ProposalItem,
   ProposalStatus,
   SendReceipt,
+  ProviderDraftRef,
 } from "../../shared/contracts";
 import type { AppliedMailAction } from "../mail/provider";
 
@@ -33,6 +35,7 @@ export const drafts = sqliteTable("drafts", {
   body: text("body").notNull(),
   identity: text("identity", { mode: "json" }).$type<OutboundAddress>().notNull(),
   source: text("source", { mode: "json" }).$type<ConversationSendSource>(),
+  attachments: text("attachments", { mode: "json" }).$type<DraftAttachment[]>().notNull(),
   deliveryStatus: text("delivery_status", {
     enum: ["editable", "sending", "failed", "uncertain", "sent"],
   }).notNull(),
@@ -41,6 +44,10 @@ export const drafts = sqliteTable("drafts", {
   claimedAt: text("claimed_at"),
   claimOwner: text("claim_owner"),
   settledAt: text("settled_at"),
+  mirrorStatus: text("mirror_status", { enum: ["pending", "synced", "failed"] }).notNull(),
+  mirrorRef: text("mirror_ref", { mode: "json" }).$type<ProviderDraftRef>(),
+  mirroredVersion: integer("mirrored_version"),
+  mirrorError: text("mirror_error"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
   version: integer("version").notNull(),
@@ -65,6 +72,16 @@ export const drafts = sqliteTable("drafts", {
       AND ${table.deliveryError} IS NULL AND ${table.claimedAt} IS NOT NULL
       AND ${table.claimOwner} IS NOT NULL AND ${table.settledAt} IS NOT NULL)
   `),
+]);
+
+export const draftTombstones = sqliteTable("draft_tombstones", {
+  id: text("id").notNull(),
+  tenantId: text("tenant_id").notNull(),
+  accountId: text("account_id").notNull().references(() => accounts.id),
+  deletedAt: text("deleted_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.tenantId, table.accountId, table.id] }),
+  index("draft_tombstones_tenant_account_idx").on(table.tenantId, table.accountId),
 ]);
 
 export const proposals = sqliteTable("proposals", {

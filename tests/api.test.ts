@@ -367,6 +367,50 @@ describe("Hono RPC API", () => {
     store.close();
   });
 
+  test("returns a typed gone response for a deleted stable draft identity", async () => {
+    const { store, service } = await createEmptyTestHarness();
+    const account = await service.createAccount(testAccountInput());
+    const otherAccount = await service.createAccount(testAccountInput("Other", "other@example.test"));
+    const app = createApi(service);
+    const client = hc<AppType>("http://postreeve.local", { fetch: app.request });
+    const content = {
+      clientId: "deleted-api-draft",
+      mode: "new" as const,
+      to: [],
+      cc: [],
+      bcc: [],
+      subject: "Deleted draft",
+      body: "Do not resurrect",
+      identity: { name: account.name, address: account.email },
+      attachments: [],
+    };
+    const createdResponse = await client.api.accounts[":accountId"].drafts.$post({
+      param: { accountId: account.id },
+      json: content,
+    });
+    const created = draftSchema.parse(await createdResponse.json());
+    await client.api.accounts[":accountId"].drafts[":draftId"].$delete({
+      param: { accountId: account.id, draftId: created.id },
+      json: { version: created.version },
+    });
+    const otherResponse = await client.api.accounts[":accountId"].drafts.$post({
+      param: { accountId: otherAccount.id },
+      json: { ...content, clientId: content.clientId, identity: { name: otherAccount.name, address: otherAccount.email } },
+    });
+    const otherDraft = draftSchema.parse(await otherResponse.json());
+
+    const replay = await app.request(`/api/accounts/${encodeURIComponent(account.id)}/drafts`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...content, body: "Stale retry" }),
+    });
+    expect(replay.status).toBe(410);
+    expect(await replay.json()).toEqual({ error: "Draft was deleted", code: "draft_deleted" });
+    expect(await service.listDrafts(account.id)).toEqual([]);
+    expect(await service.listDrafts(otherAccount.id)).toEqual([otherDraft]);
+    store.close();
+  });
+
   test("creates, reads, and updates arbitrary raw recipient text through typed routes", async () => {
     const { store, service } = await createEmptyTestHarness();
     const account = await service.createAccount(testAccountInput());
@@ -379,6 +423,7 @@ describe("Hono RPC API", () => {
       subject: "Healthy sibling",
       body: "Structured recipients remain supported.",
       identity: { name: account.name, address: account.email },
+      attachments: [],
     });
     const client = hc<AppType>("http://postreeve.local", { fetch: createApi(service).request });
     const raw = {
@@ -389,6 +434,7 @@ describe("Hono RPC API", () => {
       subject: "Raw recipients",
       body: "Preserve unfinished input.",
       identity: { name: account.name, address: account.email },
+      attachments: [],
     };
 
     const createdResponse = await client.api.accounts[":accountId"].drafts.$post({
@@ -443,6 +489,7 @@ describe("Hono RPC API", () => {
       subject: "Active delivery",
       body: "Keep this draft until delivery settles.",
       identity: { name: account.name, address: account.email },
+      attachments: [],
     });
     const sending = service.sendDraft(account.id, draft.id, { version: draft.version });
     await attempted;
@@ -475,6 +522,7 @@ describe("Hono RPC API", () => {
       subject: "Recover me",
       body: "Preserve this content",
       identity: { name: account.name, address: account.email },
+      attachments: [],
     });
     await expect(service.sendDraft(account.id, draft.id, { version: draft.version }))
       .rejects.toThrow("provider outcome unknown");

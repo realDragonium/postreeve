@@ -165,7 +165,7 @@ export function Sidebar(props: SidebarProps) {
     <div>
       <div className="thin" />
       <button className="side-entry" onClick={props.onDrafts}>
-        <span className="side-entry-name">Local drafts</span>
+        <span className="side-entry-name">Drafts</span>
         <span className="t-dim t-num" style={{ marginLeft: "auto" }}>{props.draftCount || ""}</span>
       </button>
       <button className={`side-entry ${props.view === "activity" ? "on" : ""}`} onClick={() => props.onView("activity")}>

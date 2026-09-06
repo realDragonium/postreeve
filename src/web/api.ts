@@ -37,7 +37,7 @@ import {
   type UpdateAccountInput,
 } from "../shared/contracts";
 
-export type ApiErrorCode = "account_conflict" | "draft_conflict" | "draft_not_found";
+export type ApiErrorCode = "account_conflict" | "draft_conflict" | "draft_deleted" | "draft_not_found";
 
 export class ApiRequestError extends Error {
   readonly status: number;
@@ -59,7 +59,10 @@ function apiError(value: unknown): { message: string | null; code: ApiErrorCode 
       ? value.message
       : null;
   const code = "code" in value && (
-    value.code === "account_conflict" || value.code === "draft_conflict" || value.code === "draft_not_found"
+    value.code === "account_conflict"
+      || value.code === "draft_conflict"
+      || value.code === "draft_deleted"
+      || value.code === "draft_not_found"
   )
     ? value.code
     : null;

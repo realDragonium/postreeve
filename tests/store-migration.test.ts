@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Draft } from "../src/shared/contracts";
 import { Store } from "../src/server/db/store";
 
 const paths: string[] = [];
@@ -54,7 +55,7 @@ describe("Store migrations", () => {
     baseline.close();
 
     const pre479 = new Database(path);
-    pre479.exec("DROP TABLE drafts; DELETE FROM schema_migrations WHERE version = 479;");
+    pre479.exec("DROP TABLE draft_tombstones; DROP TABLE drafts; DELETE FROM schema_migrations WHERE version IN (479, 480, 480001, 480002, 480003);");
     pre479.close();
 
     const migrated = new Store(path);
@@ -70,8 +71,75 @@ describe("Store migrations", () => {
 
     const inspected = new Database(path);
     expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 479").get()).toEqual({ version: 479 });
+    expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 480").get()).toEqual({ version: 480 });
+    expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 480001").get()).toEqual({ version: 480001 });
+    expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 480002").get()).toEqual({ version: 480002 });
+    expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 480003").get()).toEqual({ version: 480003 });
+    expect((inspected.query("PRAGMA table_info('drafts')").all() as Array<{ name: string }>).map(({ name }) => name))
+      .toContain("mirror_status");
+    expect((inspected.query("PRAGMA table_info('drafts')").all() as Array<{ name: string }>).map(({ name }) => name))
+      .toContain("attachments");
     expect(inspected.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'drafts'").get())
       .toEqual({ name: "drafts" });
+    expect(inspected.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'draft_tombstones'").get())
+      .toEqual({ name: "draft_tombstones" });
+    expect((inspected.query("PRAGMA table_info('draft_tombstones')").all() as Array<{ name: string; pk: number }>)
+      .filter(({ pk }) => pk > 0)
+      .sort((left, right) => left.pk - right.pk)
+      .map(({ name }) => name))
+      .toEqual(["tenant_id", "account_id", "id"]);
+    expect((inspected.query("PRAGMA table_info('draft_tombstones')").all() as Array<{ name: string }>)
+      .map(({ name }) => name)).toContain("cleanup_ref");
+    expect(inspected.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    inspected.close();
+  });
+
+  test("adds tombstones to an existing draft store without changing its drafts", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const baseline = new Store(path);
+    await baseline.insertAccount({
+      id: "draft-account",
+      name: "Draft owner",
+      email: "owner@example.test",
+      kind: "imap",
+      encryptedCredentials: null,
+    });
+    const draft = {
+      id: "preserved-draft",
+      accountId: "draft-account",
+      mode: "new",
+      to: "unfinished recipient",
+      cc: [],
+      bcc: [],
+      subject: "Preserved subject",
+      body: "Preserved body",
+      identity: { name: "Draft owner", address: "owner@example.test" },
+      attachments: [{ name: "legacy.txt", size: 7, type: "text/plain" }],
+      delivery: { status: "editable" },
+      mirror: { status: "pending" },
+      createdAt: "2026-09-06T10:00:00.000Z",
+      updatedAt: "2026-09-06T10:00:00.000Z",
+      version: 1,
+    } satisfies Draft;
+    await baseline.insertDraft("tenant-a", draft);
+    baseline.close();
+
+    const previous = new Database(path);
+    previous.exec("DROP TABLE draft_tombstones; DELETE FROM schema_migrations WHERE version IN (480002, 480003);");
+    previous.close();
+
+    const migrated = new Store(path);
+    expect(await migrated.getDraft("tenant-a", draft.accountId, draft.id)).toEqual(draft);
+    migrated.close();
+
+    const inspected = new Database(path);
+    expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 480002").get())
+      .toEqual({ version: 480002 });
+    expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 480003").get())
+      .toEqual({ version: 480003 });
+    expect(inspected.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'draft_tombstones'").get())
+      .toEqual({ name: "draft_tombstones" });
     expect(inspected.query("PRAGMA foreign_key_check").all()).toEqual([]);
     inspected.close();
   });

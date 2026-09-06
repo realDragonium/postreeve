@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { and, desc, eq } from "drizzle-orm";
 import { drizzle, type BunSQLiteDatabase } from "drizzle-orm/bun-sqlite";
 import type {
@@ -16,10 +16,11 @@ import type {
   OperationBatch,
   Proposal,
   SendReceipt,
+  ProviderDraftRef,
 } from "../../shared/contracts";
-import { draftSchema, sendReceiptSchema } from "../../shared/contracts";
-import { AccountConflictError, DraftConflictError, DraftNotFoundError } from "../core/errors";
-import { accounts, batches, drafts, proposals, type StoredOperation } from "./schema";
+import { draftSchema, providerDraftRefSchema, sendReceiptSchema } from "../../shared/contracts";
+import { AccountConflictError, DraftConflictError, DraftDeletedError, DraftNotFoundError } from "../core/errors";
+import { accounts, batches, proposals, type StoredOperation } from "./schema";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
 import type { ProviderMessageObservation } from "../mail/provider";
 import type { ConversationSendContext } from "../mail/sender";
@@ -44,6 +45,17 @@ export interface MailboxSnapshot {
   authoritative: boolean;
 }
 
+export interface DraftCleanupArtifact {
+  readonly id: string;
+  readonly ref: ProviderDraftRef;
+  readonly mirroredVersion: number;
+}
+
+export type DraftMirrorArtifactRetention =
+  | { readonly kind: "draft"; readonly draft: Draft }
+  | { readonly kind: "deleted" }
+  | { readonly kind: "missing" };
+
 export type StoredMessageLocation = CanonicalMessageObservation["location"] & {
   id: string;
   messageId: string;
@@ -55,11 +67,17 @@ export type DraftSendClaim =
   | { kind: "claimed"; draft: Draft }
   | { kind: "sent"; receipt: SendReceipt };
 
+let memoryStoreSequence = 0;
+
 export class Store {
   readonly #sqlite: Database;
   readonly #db: BunSQLiteDatabase;
+  readonly coordinationIdentity: string;
 
   constructor(path = process.env.POSTREEVE_DB_PATH ?? "./data/postreeve.sqlite") {
+    this.coordinationIdentity = path === ":memory:"
+      ? `memory:${memoryStoreSequence += 1}`
+      : `file:${resolve(path)}`;
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.#sqlite = new Database(path, { create: true, strict: true });
     this.#sqlite.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
@@ -120,6 +138,7 @@ export class Store {
       `).get(accountId);
       if (sending) throw new AccountConflictError();
       this.#sqlite.query("DELETE FROM drafts WHERE account_id = ?").run(accountId);
+      this.#sqlite.query("DELETE FROM draft_tombstones WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_provider_conversations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_locations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_provider_associations WHERE account_id = ?").run(accountId);
@@ -131,29 +150,46 @@ export class Store {
     return remove.immediate(id);
   }
 
-  async insertDraft(tenantId: string, draft: Draft): Promise<void> {
-    await this.#db.insert(drafts).values({
-      id: draft.id,
-      tenantId,
-      accountId: draft.accountId,
-      mode: draft.mode,
-      recipientsTo: draft.to,
-      recipientsCc: draft.cc,
-      recipientsBcc: draft.bcc,
-      subject: draft.subject,
-      body: draft.body,
-      identity: draft.identity,
-      source: draft.source ?? null,
-      deliveryStatus: "editable",
-      deliveryReceipt: null,
-      deliveryError: null,
-      claimedAt: null,
-      claimOwner: null,
-      settledAt: null,
-      createdAt: draft.createdAt,
-      updatedAt: draft.updatedAt,
-      version: draft.version,
+  async insertDraft(tenantId: string, draft: Draft): Promise<Draft> {
+    const insert = this.#sqlite.transaction((): Draft => {
+      const tombstone = this.#sqlite.query(`
+        SELECT 1 FROM draft_tombstones WHERE tenant_id = ? AND account_id = ? AND id = ?
+      `).get(tenantId, draft.accountId, draft.id);
+      if (tombstone) throw new DraftDeletedError();
+      const existing = this.#sqlite.query("SELECT * FROM drafts WHERE tenant_id = ? AND id = ?")
+        .get(tenantId, draft.id) as DraftRow | null;
+      if (existing) {
+        if (existing.account_id !== draft.accountId) throw new Error("Draft idempotency identity belongs to another account");
+        return toDraft(existing);
+      }
+      this.#sqlite.query(`
+        INSERT INTO drafts (
+          id, tenant_id, account_id, mode, recipients_to, recipients_cc, recipients_bcc,
+          subject, body, identity, source, attachments, delivery_status, delivery_receipt, delivery_error,
+          claimed_at, claim_owner, settled_at, mirror_status, mirror_ref, mirrored_version,
+          mirror_error, created_at, updated_at, version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL,
+          'pending', NULL, NULL, NULL, ?, ?, ?)
+      `).run(
+        draft.id,
+        tenantId,
+        draft.accountId,
+        draft.mode,
+        JSON.stringify(draft.to),
+        JSON.stringify(draft.cc),
+        JSON.stringify(draft.bcc),
+        draft.subject,
+        draft.body,
+        JSON.stringify(draft.identity),
+        draft.source ? JSON.stringify(draft.source) : null,
+        JSON.stringify(draft.attachments),
+        draft.createdAt,
+        draft.updatedAt,
+        draft.version,
+      );
+      return draft;
     });
+    return insert.immediate();
   }
 
   async listDrafts(tenantId: string, accountId: string): Promise<Draft[]> {
@@ -170,6 +206,90 @@ export class Store {
     return row ? toDraft(row) : null;
   }
 
+  async getDraftCleanupArtifact(
+    tenantId: string,
+    accountId: string,
+    id: string,
+  ): Promise<DraftCleanupArtifact | null> {
+    const row = this.#sqlite.query(`
+      SELECT id, cleanup_ref, cleanup_version FROM draft_tombstones
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND cleanup_ref IS NOT NULL
+    `).get(tenantId, accountId, id) as DraftCleanupRow | null;
+    return row ? toDraftCleanupArtifact(row) : null;
+  }
+
+  async listDraftCleanupArtifacts(
+    tenantId: string,
+    accountId: string,
+    limit: number,
+  ): Promise<DraftCleanupArtifact[]> {
+    const rows = this.#sqlite.query(`
+      SELECT id, cleanup_ref, cleanup_version FROM draft_tombstones
+      WHERE tenant_id = ? AND account_id = ? AND cleanup_ref IS NOT NULL
+      ORDER BY deleted_at, id LIMIT ?
+    `).all(tenantId, accountId, limit) as DraftCleanupRow[];
+    return rows.map(toDraftCleanupArtifact);
+  }
+
+  async recordDraftCleanupFailure(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    completed: { readonly ref: ProviderDraftRef; readonly mirroredVersion: number },
+    error: string,
+  ): Promise<boolean> {
+    const validatedRef = providerDraftRefSchema.parse(completed.ref);
+    if (!Number.isInteger(completed.mirroredVersion) || completed.mirroredVersion < 1) {
+      throw new Error("Completed provider draft version is invalid");
+    }
+    const account = this.#sqlite.query("SELECT kind FROM accounts WHERE id = ?").get(accountId) as { kind: MailProviderKind } | null;
+    if (account && account.kind !== validatedRef.kind) {
+      throw new Error("Draft cleanup reference does not match the account provider");
+    }
+    const message = normalizeDeliveryError(error, "Provider draft cleanup failed");
+    const result = this.#sqlite.query(`
+      UPDATE draft_tombstones
+      SET cleanup_ref = ?, cleanup_version = ?, cleanup_error = ?
+      WHERE tenant_id = ? AND account_id = ? AND id = ?
+        AND (
+          cleanup_version IS NULL OR cleanup_version < ?
+          OR (cleanup_version = ? AND cleanup_ref = ?)
+        )
+    `).run(
+      JSON.stringify(validatedRef),
+      completed.mirroredVersion,
+      message,
+      tenantId,
+      accountId,
+      id,
+      completed.mirroredVersion,
+      completed.mirroredVersion,
+      JSON.stringify(validatedRef),
+    );
+    return result.changes === 1;
+  }
+
+  async completeDraftCleanup(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    completed: { readonly ref: ProviderDraftRef; readonly mirroredVersion: number },
+  ): Promise<boolean> {
+    const validatedRef = providerDraftRefSchema.parse(completed.ref);
+    const result = this.#sqlite.query(`
+      UPDATE draft_tombstones SET cleanup_ref = NULL, cleanup_version = NULL, cleanup_error = NULL
+      WHERE tenant_id = ? AND account_id = ? AND id = ?
+        AND cleanup_ref = ? AND cleanup_version = ?
+    `).run(
+      tenantId,
+      accountId,
+      id,
+      JSON.stringify(validatedRef),
+      completed.mirroredVersion,
+    );
+    return result.changes === 1;
+  }
+
   async updateDraft(
     tenantId: string,
     accountId: string,
@@ -182,7 +302,9 @@ export class Store {
       UPDATE drafts SET
         mode = ?, recipients_to = ?, recipients_cc = ?, recipients_bcc = ?, subject = ?, body = ?,
         identity = ?, source = ?, delivery_status = 'editable', delivery_receipt = NULL,
+        attachments = ?,
         delivery_error = NULL, claimed_at = NULL, claim_owner = NULL, settled_at = NULL,
+        mirror_status = 'pending', mirror_error = NULL,
         updated_at = ?, version = version + 1
       WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
         AND delivery_status IN ('editable', 'failed')
@@ -196,6 +318,7 @@ export class Store {
       content.body,
       JSON.stringify(content.identity),
       content.source ? JSON.stringify(content.source) : null,
+      JSON.stringify(content.attachments),
       updatedAt,
       tenantId,
       accountId,
@@ -206,14 +329,193 @@ export class Store {
     this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "updated");
   }
 
+  async completeDraftMirror(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    expectedVersion: number,
+    ref: ProviderDraftRef,
+  ): Promise<boolean> {
+    const validatedRef = providerDraftRefSchema.parse(ref);
+    const account = this.#sqlite.query("SELECT kind FROM accounts WHERE id = ?").get(accountId) as { kind: MailProviderKind } | null;
+    if (account && account.kind !== validatedRef.kind) {
+      throw new Error("Draft mirror reference does not match the account provider");
+    }
+    const result = this.#sqlite.query(`
+      UPDATE drafts SET mirror_status = 'synced', mirror_ref = ?, mirrored_version = ?, mirror_error = NULL
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+    `).run(JSON.stringify(validatedRef), expectedVersion, tenantId, accountId, id, expectedVersion);
+    return result.changes === 1;
+  }
+
+  async failDraftMirror(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    expectedVersion: number,
+    error: string,
+    completed?: { readonly ref: ProviderDraftRef; readonly mirroredVersion: number },
+  ): Promise<boolean> {
+    const message = normalizeDeliveryError(error, "Provider draft mirroring failed");
+    if (completed) {
+      const validatedRef = providerDraftRefSchema.parse(completed.ref);
+      if (!Number.isInteger(completed.mirroredVersion)
+        || completed.mirroredVersion < 1
+        || completed.mirroredVersion > expectedVersion) {
+        throw new Error("Completed provider draft version is invalid");
+      }
+      const account = this.#sqlite.query("SELECT kind FROM accounts WHERE id = ?").get(accountId) as { kind: MailProviderKind } | null;
+      if (account && account.kind !== validatedRef.kind) {
+        throw new Error("Draft mirror reference does not match the account provider");
+      }
+      const result = this.#sqlite.query(`
+        UPDATE drafts SET mirror_status = 'failed', mirror_ref = ?, mirrored_version = ?, mirror_error = ?
+        WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+          AND (
+            mirror_ref IS NULL OR mirrored_version IS NULL OR mirrored_version < ?
+            OR (mirrored_version = ? AND mirror_ref = ?)
+          )
+      `).run(
+        JSON.stringify(validatedRef),
+        completed.mirroredVersion,
+        message,
+        tenantId,
+        accountId,
+        id,
+        expectedVersion,
+        completed.mirroredVersion,
+        completed.mirroredVersion,
+        JSON.stringify(validatedRef),
+      );
+      return result.changes === 1;
+    }
+    const result = this.#sqlite.query(`
+      UPDATE drafts SET mirror_status = 'failed', mirror_error = ?
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+    `).run(message, tenantId, accountId, id, expectedVersion);
+    return result.changes === 1;
+  }
+
+  async supersedeDraftMirrorArtifact(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    expectedVersion: number,
+    completed: { readonly ref: ProviderDraftRef; readonly mirroredVersion: number },
+    error: string,
+  ): Promise<boolean> {
+    const validatedRef = providerDraftRefSchema.parse(completed.ref);
+    if (!Number.isInteger(completed.mirroredVersion)
+      || completed.mirroredVersion < 1
+      || completed.mirroredVersion > expectedVersion) {
+      throw new Error("Completed provider draft version is invalid");
+    }
+    const account = this.#sqlite.query("SELECT kind FROM accounts WHERE id = ?").get(accountId) as { kind: MailProviderKind } | null;
+    if (account && account.kind !== validatedRef.kind) {
+      throw new Error("Draft mirror reference does not match the account provider");
+    }
+    const result = this.#sqlite.query(`
+      UPDATE drafts SET mirror_status = 'failed', mirror_ref = ?, mirrored_version = ?, mirror_error = ?
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+    `).run(
+      JSON.stringify(validatedRef),
+      completed.mirroredVersion,
+      normalizeDeliveryError(error, "Provider draft mirroring failed"),
+      tenantId,
+      accountId,
+      id,
+      expectedVersion,
+    );
+    return result.changes === 1;
+  }
+
+  async retainDraftMirrorArtifact(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    completed: { readonly ref: ProviderDraftRef; readonly mirroredVersion: number },
+    error: string,
+  ): Promise<DraftMirrorArtifactRetention> {
+    const validatedRef = providerDraftRefSchema.parse(completed.ref);
+    if (!Number.isInteger(completed.mirroredVersion) || completed.mirroredVersion < 1) {
+      throw new Error("Completed provider draft version is invalid");
+    }
+    const message = normalizeDeliveryError(error, "Provider draft mirroring failed");
+    const retain = this.#sqlite.transaction((): DraftMirrorArtifactRetention => {
+      const account = this.#sqlite.query("SELECT kind FROM accounts WHERE id = ?").get(accountId) as { kind: MailProviderKind } | null;
+      if (!account) return { kind: "missing" };
+      if (account.kind !== validatedRef.kind) {
+        throw new Error("Draft mirror reference does not match the account provider");
+      }
+      const row = this.#draftRow(tenantId, accountId, id);
+      if (row) {
+        if (completed.mirroredVersion > row.version) {
+          throw new Error("Completed provider draft version is newer than the backend draft");
+        }
+        this.#sqlite.query(`
+          UPDATE drafts SET mirror_status = 'failed', mirror_ref = ?, mirrored_version = ?, mirror_error = ?
+          WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+            AND (
+              mirror_ref IS NULL OR mirrored_version IS NULL OR mirrored_version < ?
+              OR (mirrored_version = ? AND mirror_ref = ?)
+            )
+        `).run(
+          JSON.stringify(validatedRef),
+          completed.mirroredVersion,
+          message,
+          tenantId,
+          accountId,
+          id,
+          row.version,
+          completed.mirroredVersion,
+          completed.mirroredVersion,
+          JSON.stringify(validatedRef),
+        );
+        const retained = this.#draftRow(tenantId, accountId, id);
+        if (!retained) throw new Error("Draft disappeared while retaining its provider artifact");
+        return { kind: "draft", draft: toDraft(retained) };
+      }
+      const tombstone = this.#sqlite.query(`
+        SELECT 1 FROM draft_tombstones WHERE tenant_id = ? AND account_id = ? AND id = ?
+      `).get(tenantId, accountId, id);
+      if (!tombstone) return { kind: "missing" };
+      this.#sqlite.query(`
+        UPDATE draft_tombstones
+        SET cleanup_ref = ?, cleanup_version = ?, cleanup_error = ?
+        WHERE tenant_id = ? AND account_id = ? AND id = ?
+          AND (
+            cleanup_version IS NULL OR cleanup_version < ?
+            OR (cleanup_version = ? AND cleanup_ref = ?)
+          )
+      `).run(
+        JSON.stringify(validatedRef),
+        completed.mirroredVersion,
+        message,
+        tenantId,
+        accountId,
+        id,
+        completed.mirroredVersion,
+        completed.mirroredVersion,
+        JSON.stringify(validatedRef),
+      );
+      return { kind: "deleted" };
+    });
+    return retain.immediate();
+  }
+
   async deleteDraft(tenantId: string, accountId: string, id: string, expectedVersion: number): Promise<void> {
-    const deleted = this.#sqlite.query(`
-      DELETE FROM drafts
-      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ? AND delivery_status <> 'sending'
-      RETURNING id
-    `).get(tenantId, accountId, id, expectedVersion) as { id: string } | null;
-    if (deleted) return;
-    this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "removed");
+    const remove = this.#sqlite.transaction(() => {
+      const deleted = this.#sqlite.query(`
+        DELETE FROM drafts
+        WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ? AND delivery_status <> 'sending'
+        RETURNING id
+      `).get(tenantId, accountId, id, expectedVersion) as { id: string } | null;
+      if (!deleted) this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "removed");
+      this.#sqlite.query(`
+        INSERT INTO draft_tombstones (id, tenant_id, account_id, deleted_at) VALUES (?, ?, ?, ?)
+      `).run(id, tenantId, accountId, new Date().toISOString());
+    });
+    remove.immediate();
   }
 
   async claimDraftSend(
@@ -347,7 +649,7 @@ export class Store {
   ): Promise<Draft> {
     const copy = this.#sqlite.transaction((): Draft => {
       const source = this.#sqlite.query(`
-        UPDATE drafts SET updated_at = ?, version = version + 1
+        UPDATE drafts SET updated_at = ?, version = version + 1, mirror_status = 'pending', mirror_error = NULL
         WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
           AND delivery_status = 'uncertain'
         RETURNING *
@@ -358,9 +660,11 @@ export class Store {
       this.#sqlite.query(`
         INSERT INTO drafts (
           id, tenant_id, account_id, mode, recipients_to, recipients_cc, recipients_bcc,
-          subject, body, identity, source, delivery_status, delivery_receipt, delivery_error,
-          claimed_at, claim_owner, settled_at, created_at, updated_at, version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL, ?, ?, 1)
+          subject, body, identity, source, attachments, delivery_status, delivery_receipt, delivery_error,
+          claimed_at, claim_owner, settled_at, mirror_status, mirror_ref, mirrored_version,
+          mirror_error, created_at, updated_at, version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL,
+          'pending', NULL, NULL, NULL, ?, ?, 1)
       `).run(
         copyId,
         source.tenant_id,
@@ -373,6 +677,7 @@ export class Store {
         source.body,
         source.identity,
         source.source,
+        source.attachments,
         copiedAt,
         copiedAt,
       );
@@ -1061,6 +1366,10 @@ export class Store {
     this.#migrateReferenceSequences();
     this.#migrateSemanticMessageIds();
     this.#migrateDrafts();
+    this.#migrateDraftMirrors();
+    this.#migrateDraftAttachments();
+    this.#migrateDraftTombstones();
+    this.#migrateDraftTombstoneCleanup();
     const accountsTable = this.#sqlite.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
       .get() as { sql: string } | null;
     if (accountsTable && !accountsTable.sql.includes("'gmail'")) {
@@ -1149,6 +1458,65 @@ export class Store {
       `);
       const violations = this.#sqlite.query("PRAGMA foreign_key_check('drafts')").all();
       if (violations.length > 0) throw new Error("Draft migration left invalid foreign keys");
+    });
+    migrate();
+  }
+
+  #migrateDraftMirrors(): void {
+    if (this.#sqlite.query("SELECT 1 FROM schema_migrations WHERE version = 480").get()) return;
+    const migrate = this.#sqlite.transaction(() => {
+      this.#sqlite.exec(`
+        ALTER TABLE drafts ADD COLUMN mirror_status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (mirror_status IN ('pending', 'synced', 'failed'));
+        ALTER TABLE drafts ADD COLUMN mirror_ref TEXT;
+        ALTER TABLE drafts ADD COLUMN mirrored_version INTEGER CHECK (mirrored_version IS NULL OR mirrored_version > 0);
+        ALTER TABLE drafts ADD COLUMN mirror_error TEXT;
+        INSERT INTO schema_migrations (version, applied_at) VALUES (480, CURRENT_TIMESTAMP);
+      `);
+    });
+    migrate();
+  }
+
+  #migrateDraftAttachments(): void {
+    if (this.#sqlite.query("SELECT 1 FROM schema_migrations WHERE version = 480001").get()) return;
+    const migrate = this.#sqlite.transaction(() => {
+      this.#sqlite.exec(`
+        ALTER TABLE drafts ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]';
+        INSERT INTO schema_migrations (version, applied_at) VALUES (480001, CURRENT_TIMESTAMP);
+      `);
+    });
+    migrate();
+  }
+
+  #migrateDraftTombstones(): void {
+    if (this.#sqlite.query("SELECT 1 FROM schema_migrations WHERE version = 480002").get()) return;
+    const migrate = this.#sqlite.transaction(() => {
+      this.#sqlite.exec(`
+        CREATE TABLE draft_tombstones (
+          id TEXT NOT NULL,
+          tenant_id TEXT NOT NULL,
+          account_id TEXT NOT NULL REFERENCES accounts(id),
+          deleted_at TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, account_id, id)
+        );
+        CREATE INDEX draft_tombstones_tenant_account_idx
+          ON draft_tombstones(tenant_id, account_id);
+        INSERT INTO schema_migrations (version, applied_at) VALUES (480002, CURRENT_TIMESTAMP);
+      `);
+    });
+    migrate();
+  }
+
+  #migrateDraftTombstoneCleanup(): void {
+    if (this.#sqlite.query("SELECT 1 FROM schema_migrations WHERE version = 480003").get()) return;
+    const migrate = this.#sqlite.transaction(() => {
+      this.#sqlite.exec(`
+        ALTER TABLE draft_tombstones ADD COLUMN cleanup_ref TEXT;
+        ALTER TABLE draft_tombstones ADD COLUMN cleanup_version INTEGER
+          CHECK (cleanup_version IS NULL OR cleanup_version > 0);
+        ALTER TABLE draft_tombstones ADD COLUMN cleanup_error TEXT;
+        INSERT INTO schema_migrations (version, applied_at) VALUES (480003, CURRENT_TIMESTAMP);
+      `);
     });
     migrate();
   }
@@ -1532,6 +1900,7 @@ export class Store {
 interface MessageRow { id: string; tenant_id: string; identity_key: string; message_id: string | null; in_reply_to: string | null; references: string; received_at: string | null; created_at: string; updated_at: string }
 interface LocationRow { id: string; message_id: string; tenant_id: string; account_id: string; provider: MailProviderKind; mailbox: string; uid_validity: string; uid: number; modseq: string | null; provider_id: string | null; read: number; flagged: number; observed_at: string }
 interface ConversationRow { id: string; tenant_id: string; created_at: string; updated_at: string }
+interface DraftCleanupRow { id: string; cleanup_ref: string | null; cleanup_version: number | null }
 interface DraftRow {
   id: string;
   tenant_id: string;
@@ -1544,12 +1913,17 @@ interface DraftRow {
   body: string;
   identity: string;
   source: string | null;
+  attachments: string;
   delivery_status: Draft["delivery"]["status"];
   delivery_receipt: string | null;
   delivery_error: string | null;
   claimed_at: string | null;
   claim_owner: string | null;
   settled_at: string | null;
+  mirror_status: Draft["mirror"]["status"];
+  mirror_ref: string | null;
+  mirrored_version: number | null;
+  mirror_error: string | null;
   created_at: string;
   updated_at: string;
   version: number;
@@ -1557,6 +1931,17 @@ interface DraftRow {
 
 function normalizeDeliveryError(error: string, fallback: string): string {
   return error.trim() || fallback;
+}
+
+function toDraftCleanupArtifact(row: DraftCleanupRow): DraftCleanupArtifact {
+  if (row.cleanup_ref === null || row.cleanup_version === null) {
+    throw new Error("Draft cleanup artifact is incomplete");
+  }
+  return {
+    id: row.id,
+    ref: providerDraftRefSchema.parse(parseJson(row.cleanup_ref)),
+    mirroredVersion: row.cleanup_version,
+  };
 }
 
 function toDraft(row: DraftRow): Draft {
@@ -1591,6 +1976,25 @@ function toDraft(row: DraftRow): Draft {
         return { status: "sent", settledAt: row.settled_at, receipt };
     }
   })();
+  const ref = row.mirror_ref === null ? undefined : providerDraftRefSchema.parse(parseJson(row.mirror_ref));
+  const mirroredVersion = row.mirrored_version ?? undefined;
+  const mirror: Draft["mirror"] = (() => {
+    switch (row.mirror_status) {
+      case "pending":
+        return { status: "pending", ...(mirroredVersion ? { mirroredVersion } : {}), ...(ref ? { ref } : {}) };
+      case "synced":
+        if (!mirroredVersion || !ref) throw new Error("Synced draft mirror is missing its provider state");
+        return { status: "synced", mirroredVersion, ref };
+      case "failed":
+        if (!row.mirror_error?.trim()) throw new Error("Failed draft mirror is missing its error");
+        return {
+          status: "failed",
+          error: row.mirror_error.trim(),
+          ...(mirroredVersion ? { mirroredVersion } : {}),
+          ...(ref ? { ref } : {}),
+        };
+    }
+  })();
   return draftSchema.parse({
     id: row.id,
     accountId: row.account_id,
@@ -1602,7 +2006,9 @@ function toDraft(row: DraftRow): Draft {
     body: row.body,
     identity: parseJson(row.identity),
     ...(row.source ? { source: parseJson(row.source) } : {}),
+    attachments: parseJson(row.attachments),
     delivery,
+    mirror,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     version: row.version,

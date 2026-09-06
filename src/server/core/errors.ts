@@ -5,6 +5,13 @@ export class DraftNotFoundError extends Error {
   }
 }
 
+export class DraftDeletedError extends Error {
+  constructor() {
+    super("Draft was deleted");
+    this.name = "DraftDeletedError";
+  }
+}
+
 export class DraftConflictError extends Error {
   constructor(message = "Draft version conflict") {
     super(message);

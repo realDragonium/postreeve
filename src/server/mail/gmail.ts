@@ -5,11 +5,13 @@ import {
   sendMessageInputSchema,
   sendReceiptSchema,
   type Account,
+  type Draft,
   type Folder,
   type MessageRef,
   type SendMessageInput,
   type SendReceipt,
   type TriageAction,
+  type ProviderDraftRef,
 } from "../../shared/contracts";
 import type { GmailAccountCredentials } from "../security/credentials";
 import type {
@@ -19,7 +21,10 @@ import type {
   ProviderLocationMove,
   ProviderMessageDetail,
   ProviderMessageSummary,
+  ProviderDraft,
+  ProviderDraftScope,
 } from "./provider";
+import { buildProviderDraftMessage, parseProviderDraftMarkers } from "./provider-draft";
 import { normalizeIdentificationFields, normalizeReferenceSequences } from "./message-id";
 import { MailSendPreDispatchError, type ConversationSendContext, type MailSender } from "./sender";
 
@@ -57,6 +62,15 @@ const gmailMessageSchema = z.object({
   raw: z.string().optional(),
 });
 const sentMessageSchema = z.object({ id: z.string().min(1), threadId: z.string().min(1).optional() });
+const draftStubSchema = z.object({ id: z.string().min(1) });
+const draftListSchema = z.object({
+  drafts: z.array(draftStubSchema).default([]),
+  nextPageToken: z.string().min(1).optional(),
+});
+const gmailDraftSchema = z.object({
+  id: z.string().min(1),
+  message: gmailMessageSchema,
+});
 
 export type HttpFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -139,6 +153,90 @@ export class GmailMailClient implements MailProvider, MailSender {
     this.#assertAccount(accountId);
     await this.#userLabel(path);
     await this.#request(`/labels/${encodeURIComponent(path)}`, z.null(), { method: "DELETE" });
+  }
+
+  async createDraft(scope: ProviderDraftScope, draft: Draft): Promise<ProviderDraftRef> {
+    this.#assertDraftScope(scope, draft);
+    const matches = (await this.listDrafts(scope)).filter(({ postreeveId }) => postreeveId === draft.id);
+    if (matches.length > 0) return this.#putDraft(scope, draft, matches[0]!.ref, matches);
+    return this.#postDraft(scope, draft, [], new Set());
+  }
+
+  async #postDraft(
+    scope: ProviderDraftScope,
+    draft: Draft,
+    duplicateCandidates: readonly ProviderDraft[],
+    excludedRecoveryIds: ReadonlySet<string>,
+  ): Promise<ProviderDraftRef> {
+    try {
+      const created = await this.#request("/drafts", gmailDraftSchema, {
+        method: "POST",
+        body: JSON.stringify({ message: await gmailDraftMessage(scope, draft) }),
+      });
+      const ref = { kind: "gmail", draftId: created.id } as const;
+      await this.#removeDuplicateDrafts(ref, duplicateCandidates);
+      return ref;
+    } catch (error) {
+      const recovered = (await this.listDrafts(scope))
+        .filter((candidate) => candidate.postreeveId === draft.id
+          && candidate.version === draft.version
+          && candidate.ref.kind === "gmail"
+          && !excludedRecoveryIds.has(candidate.ref.draftId));
+      if (recovered.length === 0) throw error;
+      await this.#removeDuplicateDrafts(recovered[0]!.ref, [...duplicateCandidates, ...recovered]);
+      return recovered[0]!.ref;
+    }
+  }
+
+  async updateDraft(scope: ProviderDraftScope, draft: Draft, ref: ProviderDraftRef): Promise<ProviderDraftRef> {
+    this.#assertDraftScope(scope, draft);
+    if (ref.kind !== "gmail") throw new Error("Gmail cannot update a draft reference from another provider");
+    const discovered = (await this.listDrafts(scope)).filter(({ postreeveId }) => postreeveId === draft.id);
+    const exact = discovered.some((candidate) => candidate.ref.kind === "gmail" && candidate.ref.draftId === ref.draftId)
+      ? null
+      : await this.#resolveExactProviderDraft(scope, draft.id, ref.draftId);
+    const matches = exact ? [...discovered, exact] : discovered;
+    return matches.length === 0
+      ? this.#postDraft(scope, draft, [], new Set())
+      : this.#putDraft(scope, draft, ref, matches);
+  }
+
+  async listDrafts(scope: ProviderDraftScope): Promise<ProviderDraft[]> {
+    this.#assertDraftScope(scope);
+    const listed: ProviderDraft[] = [];
+    let pageToken: string | undefined;
+    for (let page = 0; page < 20; page += 1) {
+      const query = new URLSearchParams({ maxResults: "100" });
+      if (pageToken) query.set("pageToken", pageToken);
+      const response = await this.#request(`/drafts?${query.toString()}`, draftListSchema);
+      for (const { id } of response.drafts) {
+        const container = await this.#request(`/drafts/${encodeURIComponent(id)}?format=raw`, gmailDraftSchema);
+        const raw = container.message.raw;
+        if (raw === undefined) throw new Error(`Gmail did not return raw content for draft ${container.id}`);
+        const markers = parseProviderDraftMarkers(fromBase64Url(raw));
+        if (markers?.tenantId === scope.tenantId && markers.accountId === scope.accountId) {
+          listed.push({ ...markers, ref: { kind: "gmail", draftId: container.id } });
+        }
+      }
+      pageToken = response.nextPageToken;
+      if (!pageToken) return listed;
+    }
+    throw new Error("Gmail draft pagination exceeded the reconciliation bound");
+  }
+
+  async removeDraft(scope: ProviderDraftScope, postreeveId: string, ref?: ProviderDraftRef): Promise<void> {
+    this.#assertDraftScope(scope);
+    if (ref?.kind === "imap") throw new Error("Gmail cannot remove a draft reference from another provider");
+    const matches = (await this.listDrafts(scope)).filter((draft) => draft.postreeveId === postreeveId);
+    const ids = new Set(matches.map(({ ref: candidate }) => candidate.kind === "gmail" ? candidate.draftId : ""));
+    if (ref?.kind === "gmail" && !ids.has(ref.draftId)) {
+      const exact = await this.#resolveExactProviderDraft(scope, postreeveId, ref.draftId);
+      if (exact) ids.add(ref.draftId);
+    }
+    for (const id of ids) {
+      if (!id) continue;
+      await this.#deleteDraftContainer(id);
+    }
   }
 
   async listMessages(accountId: string, mailbox: string, limit: number): Promise<ProviderMessageSummary[]> {
@@ -291,6 +389,96 @@ export class GmailMailClient implements MailProvider, MailSender {
     });
   }
 
+  async #putDraft(
+    scope: ProviderDraftScope,
+    draft: Draft,
+    requestedRef: ProviderDraftRef,
+    matches: readonly ProviderDraft[],
+  ): Promise<ProviderDraftRef> {
+    if (requestedRef.kind !== "gmail") throw new Error("Gmail cannot update a draft reference from another provider");
+    const selected = matches.find(({ ref }) => ref.kind === "gmail" && ref.draftId === requestedRef.draftId) ?? matches[0];
+    if (!selected || selected.ref.kind !== "gmail") return this.#postDraft(scope, draft, matches, new Set());
+    const selectedDraftId = selected.ref.draftId;
+    let resultRef: ProviderDraftRef;
+    let duplicateCandidates = matches;
+    try {
+      const updated = await this.#request(`/drafts/${encodeURIComponent(selected.ref.draftId)}`, gmailDraftSchema, {
+        method: "PUT",
+        body: JSON.stringify({ message: await gmailDraftMessage(scope, draft) }),
+      });
+      resultRef = { kind: "gmail", draftId: updated.id };
+    } catch (error) {
+      const recovered = (await this.listDrafts(scope))
+        .filter((candidate) => candidate.postreeveId === draft.id
+          && candidate.version === draft.version
+          && !(error instanceof GmailHttpError
+            && error.status === 404
+            && candidate.ref.kind === "gmail"
+            && candidate.ref.draftId === selectedDraftId));
+      if (recovered.length === 0) {
+        if (error instanceof GmailHttpError && error.status === 404) {
+          const staleIds = new Set(matches.flatMap(({ ref }) => ref.kind === "gmail" ? [ref.draftId] : []));
+          return this.#postDraft(scope, draft, matches, staleIds);
+        }
+        throw error;
+      }
+      resultRef = recovered[0]!.ref;
+      duplicateCandidates = [...matches, ...recovered];
+    }
+    await this.#removeDuplicateDrafts(resultRef, duplicateCandidates);
+    return resultRef;
+  }
+
+  async #removeDuplicateDrafts(
+    keep: ProviderDraftRef,
+    candidates: readonly ProviderDraft[],
+  ): Promise<void> {
+    if (keep.kind !== "gmail") throw new Error("Gmail cannot retain a draft reference from another provider");
+    const duplicateIds = new Set(candidates.flatMap(({ ref }) => ref.kind === "gmail" && ref.draftId !== keep.draftId
+      ? [ref.draftId]
+      : []));
+    for (const id of duplicateIds) {
+      await this.#deleteDraftContainer(id);
+    }
+  }
+
+  async #deleteDraftContainer(id: string): Promise<void> {
+    try {
+      await this.#request(`/drafts/${encodeURIComponent(id)}`, z.null(), { method: "DELETE" });
+    } catch (error) {
+      if (error instanceof GmailHttpError && error.status === 404) return;
+      try {
+        await this.#request(`/drafts/${encodeURIComponent(id)}?format=minimal`, gmailDraftSchema);
+      } catch (recheckError) {
+        if (recheckError instanceof GmailHttpError && recheckError.status === 404) return;
+      }
+      throw error;
+    }
+  }
+
+  async #resolveExactProviderDraft(
+    scope: ProviderDraftScope,
+    postreeveId: string,
+    id: string,
+  ): Promise<ProviderDraft | null> {
+    let container: z.infer<typeof gmailDraftSchema>;
+    try {
+      container = await this.#request(`/drafts/${encodeURIComponent(id)}?format=raw`, gmailDraftSchema);
+    } catch (error) {
+      if (error instanceof GmailHttpError && error.status === 404) return null;
+      throw error;
+    }
+    if (container.id !== id) throw new Error(`Gmail returned the wrong draft while resolving ${id}`);
+    const raw = container.message.raw;
+    if (raw === undefined) throw new Error(`Gmail did not return raw content for draft ${container.id}`);
+    const markers = parseProviderDraftMarkers(fromBase64Url(raw));
+    return markers?.tenantId === scope.tenantId
+      && markers.accountId === scope.accountId
+      && markers.postreeveId === postreeveId
+      ? { ...markers, ref: { kind: "gmail", draftId: container.id } }
+      : null;
+  }
+
   async #listPage(mailbox: string, query: string, limit: number): Promise<MailboxPage> {
     if (!Number.isInteger(limit) || limit < 1) throw new Error("Message limit must be a positive integer");
     const params = new URLSearchParams({ maxResults: String(limit) });
@@ -375,6 +563,12 @@ export class GmailMailClient implements MailProvider, MailSender {
 
   #assertAccount(accountId: string): void {
     if (accountId !== this.#account.id) throw new Error("This Gmail client cannot access another account");
+  }
+
+  #assertDraftScope(scope: ProviderDraftScope, draft?: Draft): void {
+    this.#assertAccount(scope.accountId);
+    if (!scope.tenantId.trim()) throw new Error("A tenant ID is required for provider drafts");
+    if (draft) this.#assertAccount(draft.accountId);
   }
 
   #assertReference(reference: MessageRef): void {
@@ -599,6 +793,10 @@ function preDispatchError(error: unknown): MailSendPreDispatchError {
   return error instanceof MailSendPreDispatchError && error.message.trim()
     ? error
     : new MailSendPreDispatchError(error instanceof Error ? error.message : "Mail preparation failed", { cause: error });
+}
+
+async function gmailDraftMessage(scope: ProviderDraftScope, draft: Draft): Promise<{ raw: string }> {
+  return { raw: toBase64Url(await buildProviderDraftMessage(scope, draft)) };
 }
 
 async function buildMessage(
