@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   Account,
@@ -234,7 +234,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     conversationId: source.conversationId,
     ...(source.providerConversationId ? { providerConversationId: source.providerConversationId } : {}),
   } : undefined);
-  const ownAddresses = new Set([account.email, ...(source?.deliveredTo ?? [])].map((address) => address.toLowerCase()));
+  const ownAddresses = new Set([account.email.toLowerCase()]);
   const replyRecipients = source
     ? (source.replyTo?.length ? source.replyTo : source.from)
       .filter(({ address }) => !ownAddresses.has(address.toLowerCase()))
@@ -267,6 +267,8 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   const [validationError, setValidationError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<SendReceipt | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(saved?.updatedAt ?? null);
+  const autosaveTimeout = useRef<number | null>(null);
+  const autosaveSuppressed = useRef(false);
   const backendPending = from !== account.email || attachments.length > 0 || (conversationMode && !conversationSource);
 
   function currentDraft(): LocalDraft {
@@ -281,13 +283,18 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   }
 
   useEffect(() => {
+    if (autosaveSuppressed.current) return;
     if (![to, cc, bcc, subject, body].some((value) => value.trim()) && attachments.length === 0) return;
     const timeout = window.setTimeout(() => {
       const draft = currentDraft();
       onSaveDraft(draft);
       setSavedAt(draft.updatedAt);
     }, 700);
-    return () => window.clearTimeout(timeout);
+    autosaveTimeout.current = timeout;
+    return () => {
+      window.clearTimeout(timeout);
+      if (autosaveTimeout.current === timeout) autosaveTimeout.current = null;
+    };
   }, [attachments, bcc, body, cc, effectiveMode, from, subject, to]);
 
   const mutation = useMutation({
@@ -303,6 +310,12 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
           : []),
         queryClient.invalidateQueries({ queryKey: ["folders", account.id] }),
       ]);
+    },
+    onError: () => {
+      autosaveSuppressed.current = false;
+      const draft = currentDraft();
+      onSaveDraft(draft);
+      setSavedAt(draft.updatedAt);
     },
   });
 
@@ -321,6 +334,11 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       return;
     }
     setValidationError(null);
+    autosaveSuppressed.current = true;
+    if (autosaveTimeout.current !== null) {
+      window.clearTimeout(autosaveTimeout.current);
+      autosaveTimeout.current = null;
+    }
     mutation.mutate({
       accountId: account.id,
       to: toAddresses,

@@ -412,6 +412,67 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   });
 });
 
+test("keeps trace-header recipients and does not restore a sent draft", async ({ page }) => {
+  const tracedMessage: CanonicalMessageDetail = {
+    ...message,
+    deliveredTo: ["planning-replies@example.com", "taylor@example.com"],
+  };
+  const sentMessages: SendMessageInput[] = [];
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
+    if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, [tracedMessage]);
+    if (request.method() === "POST" && url.pathname === "/api/messages/read") return json(route, [tracedMessage]);
+    if (request.method() === "POST" && url.pathname === "/api/messages/send") {
+      const input = sendMessageInputSchema.parse(request.postDataJSON());
+      sentMessages.push(input);
+      if (sentMessages.length === 1) return json(route, { error: "Temporary delivery failure." }, 503);
+      return json(route, {
+        id: "sent-traced-reply",
+        accountId: account.id,
+        messageId: "sent-traced-reply@example.com",
+        accepted: [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address),
+        rejected: [],
+        submittedAt: "2026-08-29T09:01:00.000Z",
+      });
+    }
+    if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
+    return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
+  });
+
+  await page.clock.install();
+  await page.goto("/");
+  await page.getByText(tracedMessage.subject, { exact: true }).click();
+  await page.getByRole("button", { name: "Reply all" }).click();
+  await expect(page.getByLabel("To", { exact: true })).toHaveValue("planning-replies@example.com");
+  await expect(page.getByLabel("Cc", { exact: true })).toHaveValue("taylor@example.com");
+
+  await page.getByLabel("Message", { exact: true }).fill("Preserve this reply if delivery fails.");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByText("Temporary delivery failure.")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("postreeve.local-drafts.v1")))
+    .toContain("Preserve this reply if delivery fails.");
+
+  await page.getByLabel("Message", { exact: true }).fill("Normal autosave still works after failure.");
+  await page.clock.fastForward(700);
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("postreeve.local-drafts.v1")))
+    .toContain("Normal autosave still works after failure.");
+
+  await page.getByLabel("Message", { exact: true }).fill("Fast reply before autosave runs.");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByRole("heading", { name: "Message sent" })).toBeVisible();
+  expect(sentMessages).toHaveLength(2);
+  await page.clock.fastForward(1_000);
+  await page.getByRole("button", { name: "Done" }).click();
+  await page.getByRole("button", { name: /Local drafts/ }).click();
+  await expect(page.getByText("No local drafts. Start composing and Postreeve autosaves your work here.")).toBeVisible();
+});
+
 test("reads a message and returns to the list on a narrow screen", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.route("**/api/**", async (route) => {
