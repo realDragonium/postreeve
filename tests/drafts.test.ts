@@ -3,7 +3,14 @@ import { Database } from "bun:sqlite";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { Account, CreateDraftInput, Draft, DraftContent, UpdateDraftInput } from "../src/shared/contracts";
+import type {
+  Account,
+  CreateDraftInput,
+  Draft,
+  DraftContent,
+  ProviderDraftRef,
+  UpdateDraftInput,
+} from "../src/shared/contracts";
 import { AccountConflictError, DraftDeletedError } from "../src/server/core/errors";
 import { Store } from "../src/server/db/store";
 import type { ProviderDraft } from "../src/server/mail/provider";
@@ -1286,7 +1293,12 @@ describe("server-authoritative drafts", () => {
     const started = new Promise<void>((resolve) => { markStarted = resolve; });
     const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
     let blockFirst = true;
+    const updateRefs: ProviderDraftRef[] = [];
     const harness = await createEmptyTestHarness({
+      rotateDraftRefOnUpdate: true,
+      onDraftUpdate: (_draft, ref) => {
+        updateRefs.push(ref);
+      },
       onDraftMirror: async (draft) => {
         if (draft.version !== 1 || !blockFirst) return;
         blockFirst = false;
@@ -1316,6 +1328,71 @@ describe("server-authoritative drafts", () => {
     expect(completed).toMatchObject({ version: updated.version, body: "Winning body", mirror: { status: "synced", mirroredVersion: 2 } });
     expect(await harness.providerDrafts(account.id)).toEqual([
       { tenantId: "test-tenant", accountId: account.id, postreeveId: stored.id, version: 2, ref: expect.objectContaining({ kind: "imap" }) },
+    ]);
+    expect(updateRefs).toEqual([expect.objectContaining({ kind: "imap", uid: 1 })]);
+    harness.store.close();
+  });
+
+  test("repairs a stale replacement with the completed provider ref instead of the older stored ref", async () => {
+    let releaseVersionTwo: (() => void) | undefined;
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseVersionTwo = resolve; });
+    let blockVersionTwo = false;
+    const updateRefs: ProviderDraftRef[] = [];
+    const harness = await createEmptyTestHarness({
+      rotateDraftRefOnUpdate: true,
+      onDraftUpdate: (_draft, ref) => {
+        updateRefs.push(ref);
+      },
+      onDraftMirror: async (draft) => {
+        if (!blockVersionTwo || draft.version !== 2) return;
+        blockVersionTwo = false;
+        markStarted?.();
+        await gate;
+      },
+    });
+    const account = await harness.service.createAccount(testAccountInput());
+    const created = await harness.service.createDraft({ ...draftInput(account), clientId: "stable-replacement-id" });
+    blockVersionTwo = true;
+    const replacing = harness.service.updateDraft(
+      account.id,
+      created.id,
+      updateInput(created, { body: "Provider version two" }),
+    );
+    await started;
+    const versionTwo = await harness.store.getDraft("test-tenant", account.id, created.id);
+    if (!versionTwo) throw new Error("Expected version two before provider completion");
+    const directUpdate = updateInput(versionTwo, { body: "Winning version three" });
+    const { version, ...content } = directUpdate;
+    const winning = await harness.store.updateDraft(
+      "test-tenant",
+      account.id,
+      created.id,
+      version,
+      content,
+      new Date().toISOString(),
+    );
+    releaseVersionTwo?.();
+    const completed = await replacing;
+
+    expect(completed).toMatchObject({
+      version: winning.version,
+      body: "Winning version three",
+      mirror: { status: "synced", mirroredVersion: 3, ref: expect.objectContaining({ kind: "imap", uid: 3 }) },
+    });
+    expect(updateRefs).toEqual([
+      expect.objectContaining({ kind: "imap", uid: 1 }),
+      expect.objectContaining({ kind: "imap", uid: 2 }),
+    ]);
+    expect(await harness.providerDrafts(account.id)).toEqual([
+      {
+        tenantId: "test-tenant",
+        accountId: account.id,
+        postreeveId: created.id,
+        version: 3,
+        ref: expect.objectContaining({ kind: "imap", uid: 3 }),
+      },
     ]);
     harness.store.close();
   });

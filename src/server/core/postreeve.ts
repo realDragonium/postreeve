@@ -608,12 +608,17 @@ export class PostreeveService {
     }
   }
 
-  async #mirrorDraftLocked(draft: Draft, repairStale: boolean): Promise<Draft> {
+  async #mirrorDraftLocked(
+    draft: Draft,
+    repairStale: boolean,
+    preferredRef?: ProviderDraftRef,
+  ): Promise<Draft> {
     const provider = this.#providers.forAccount(draft.accountId);
+    const candidateRef = preferredRef ?? draft.mirror.ref;
     let ref: ProviderDraftRef;
     try {
-      ref = draft.mirror.ref
-        ? await provider.updateDraft(this.#draftScope(draft.accountId), draft, draft.mirror.ref)
+      ref = candidateRef
+        ? await provider.updateDraft(this.#draftScope(draft.accountId), draft, candidateRef)
         : await provider.createDraft(this.#draftScope(draft.accountId), draft);
     } catch (error) {
       const message = errorMessage(error);
@@ -625,7 +630,7 @@ export class PostreeveService {
           draft.version,
           message,
         );
-        if (!recorded && repairStale) return this.#repairStaleMirrorLocked(draft, undefined);
+        if (!recorded && repairStale) return this.#repairStaleMirrorLocked(draft, candidateRef);
         return await this.#store.getDraft(this.#context.tenantId, draft.accountId, draft.id) ?? {
           ...draft,
           mirror: mirrorFailure(draft, message),
@@ -667,10 +672,10 @@ export class PostreeveService {
       return completed;
     }
     if (current.delivery.status === "sent") {
-      await this.#cleanupProviderDraftLocked(current);
+      await this.#cleanupProviderDraftLocked(current, ref);
       return current;
     }
-    return this.#mirrorDraftLocked(current, false);
+    return this.#mirrorDraftLocked(current, false, ref);
   }
 
   async #reconcileDrafts(accountId: string): Promise<void> {
@@ -712,10 +717,10 @@ export class PostreeveService {
     });
   }
 
-  async #cleanupProviderDraftLocked(draft: Draft): Promise<string | undefined> {
+  async #cleanupProviderDraftLocked(draft: Draft, preferredRef?: ProviderDraftRef): Promise<string | undefined> {
     try {
       await this.#providers.forAccount(draft.accountId)
-        .removeDraft(this.#draftScope(draft.accountId), draft.id, draft.mirror.ref);
+        .removeDraft(this.#draftScope(draft.accountId), draft.id, preferredRef ?? draft.mirror.ref);
       return undefined;
     } catch (error) {
       const message = `Message delivery succeeded, but the provider draft could not be removed: ${errorMessage(error)}`;

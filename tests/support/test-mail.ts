@@ -77,6 +77,8 @@ interface TestHarnessOptions {
   };
   readOverrides?: Partial<ProviderMessageDetail>;
   onDraftMirror?: (draft: Draft) => void | Promise<void>;
+  onDraftUpdate?: (draft: Draft, ref: ProviderDraftRef) => void | Promise<void>;
+  rotateDraftRefOnUpdate?: boolean;
   onDraftRemove?: (draftId: string) => void | Promise<void>;
   draftRemoveFailure?: () => Error | undefined;
   providerDraftState?: Map<string, ProviderDraft>;
@@ -122,6 +124,8 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
         options.onDraftRemove,
         options.draftRemoveFailure,
         options.providerDraftState,
+        options.onDraftUpdate,
+        options.rotateDraftRefOnUpdate ?? false,
       );
       providers.set(accountId, provider);
       return provider;
@@ -183,6 +187,8 @@ class TestMailProvider implements MailProvider {
   readonly #onDraftMirror: (draft: Draft) => void | Promise<void>;
   readonly #onDraftRemove: ((draftId: string) => void | Promise<void>) | undefined;
   readonly #draftRemoveFailure: (() => Error | undefined) | undefined;
+  readonly #onDraftUpdate: ((draft: Draft, ref: ProviderDraftRef) => void | Promise<void>) | undefined;
+  readonly #rotateDraftRefOnUpdate: boolean;
 
   constructor(
     accountId: string,
@@ -196,6 +202,8 @@ class TestMailProvider implements MailProvider {
     onDraftRemove: ((draftId: string) => void | Promise<void>) | undefined,
     draftRemoveFailure: (() => Error | undefined) | undefined,
     draftState: Map<string, ProviderDraft> | undefined,
+    onDraftUpdate: ((draft: Draft, ref: ProviderDraftRef) => void | Promise<void>) | undefined,
+    rotateDraftRefOnUpdate: boolean,
   ) {
     this.#accountId = accountId;
     this.#messages = testMessages(accountId, duplicateDelivery, archiveDelivery);
@@ -204,6 +212,8 @@ class TestMailProvider implements MailProvider {
     this.#onDraftMirror = onDraftMirror;
     this.#onDraftRemove = onDraftRemove;
     this.#draftRemoveFailure = draftRemoveFailure;
+    this.#onDraftUpdate = onDraftUpdate;
+    this.#rotateDraftRefOnUpdate = rotateDraftRefOnUpdate;
     this.#drafts = draftState ?? new Map();
     if (missingMessageId) {
       this.#messages[0]!.messageId = "missing-message-id";
@@ -267,7 +277,17 @@ class TestMailProvider implements MailProvider {
     this.#assertDraftScope(scope, draft);
     if (ref.kind !== "imap") throw new Error("Test IMAP provider received another provider's reference");
     const current = this.#drafts.get(draftStateKey(scope, draft.id));
-    return this.#storeDraft(scope, draft, current?.ref.kind === "imap" ? current.ref.uid : undefined);
+    if (this.#rotateDraftRefOnUpdate && current?.ref.kind === "imap"
+      && (current.ref.mailbox !== ref.mailbox
+        || current.ref.uidValidity !== ref.uidValidity
+        || current.ref.uid !== ref.uid)) {
+      throw new Error("Test provider received a stale draft reference");
+    }
+    await this.#onDraftUpdate?.(draft, structuredClone(ref));
+    const existingUid = !this.#rotateDraftRefOnUpdate && current?.ref.kind === "imap"
+      ? current.ref.uid
+      : undefined;
+    return this.#storeDraft(scope, draft, existingUid);
   }
 
   async listDrafts(scope: ProviderDraftScope): Promise<ProviderDraft[]> {

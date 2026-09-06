@@ -446,16 +446,24 @@ export class ImapMailProvider implements MailProvider {
       client.capabilities.has("UIDPLUS"),
     ))
       .filter((candidate) => candidate.postreeveId === draft.id);
+    const currentUidValidity = opened.uidValidity.toString();
+    const currentGenerationPriorMatches = priorMatches.filter(({ ref: candidate }) =>
+      candidate.kind === "imap"
+      && candidate.mailbox === mailbox
+      && candidate.uidValidity === currentUidValidity);
     const discoveredUids = new Set(discovered.flatMap(({ ref: candidate }) =>
       candidate.kind === "imap" ? [candidate.uid] : []));
     const matches = [
       ...discovered,
-      ...priorMatches.filter(({ ref: candidate }) => candidate.kind === "imap" && !discoveredUids.has(candidate.uid)),
+      ...currentGenerationPriorMatches.filter(({ ref: candidate }) =>
+        candidate.kind === "imap" && !discoveredUids.has(candidate.uid)),
     ];
-    const current = appended && appended.uid !== undefined && appended.uidValidity !== undefined
+    const appendedCurrent = appended && appended.uid !== undefined && appended.uidValidity !== undefined
       ? matches.find(({ deleted, ref }) => !deleted && ref.kind === "imap" && ref.uid === appended.uid
         && ref.uidValidity === appended.uidValidity?.toString())
-      : matches.find((candidate) => !candidate.deleted && candidate.version === draft.version);
+      : undefined;
+    const current = appendedCurrent
+      ?? matches.find((candidate) => !candidate.deleted && candidate.version === draft.version);
     if (!current) {
       if (appendError) throw appendError;
       throw new Error("IMAP appended a draft but its Postreeve marker could not be found");
@@ -675,8 +683,8 @@ async function retireDraftUids(client: ImapClient, uids: readonly number[]): Pro
   if (uids.length === 0) return;
   if (client.capabilities.has("UIDPLUS")) {
     for (const uid of uids) {
-      const deleted = await client.messageDelete(uid, { uid: true });
-      if (!deleted && await client.fetchOne(uid, { uid: true }, { uid: true })) {
+      await client.messageDelete(uid, { uid: true });
+      if (await client.fetchOne(uid, { uid: true }, { uid: true })) {
         throw new Error(`IMAP server did not confirm selective removal of draft UID ${uid}`);
       }
     }
