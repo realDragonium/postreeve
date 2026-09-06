@@ -209,7 +209,9 @@ export class GmailMailClient implements MailProvider, MailSender {
         const container = await this.#request(`/drafts/${encodeURIComponent(id)}?format=raw`, gmailDraftSchema);
         const raw = container.message.raw;
         const markers = raw ? parseProviderDraftMarkers(fromBase64Url(raw)) : null;
-        if (markers) listed.push({ ...markers, ref: { kind: "gmail", draftId: container.id } });
+        if (markers?.accountId === accountId) {
+          listed.push({ ...markers, ref: { kind: "gmail", draftId: container.id } });
+        }
       }
       pageToken = response.nextPageToken;
       if (!pageToken) return listed;
@@ -222,7 +224,6 @@ export class GmailMailClient implements MailProvider, MailSender {
     if (ref?.kind === "imap") throw new Error("Gmail cannot remove a draft reference from another provider");
     const matches = (await this.listDrafts(accountId)).filter((draft) => draft.postreeveId === postreeveId);
     const ids = new Set(matches.map(({ ref: candidate }) => candidate.kind === "gmail" ? candidate.draftId : ""));
-    if (ref?.kind === "gmail") ids.add(ref.draftId);
     for (const id of ids) {
       if (!id) continue;
       await this.#deleteDraftContainer(id);
@@ -408,7 +409,7 @@ export class GmailMailClient implements MailProvider, MailSender {
         throw error;
       }
       resultRef = recovered[0]!.ref;
-      duplicateCandidates = recovered;
+      duplicateCandidates = [...matches, ...recovered];
     }
     await this.#removeDuplicateDrafts(resultRef, duplicateCandidates);
     return resultRef;
@@ -419,10 +420,11 @@ export class GmailMailClient implements MailProvider, MailSender {
     candidates: readonly ProviderDraft[],
   ): Promise<void> {
     if (keep.kind !== "gmail") throw new Error("Gmail cannot retain a draft reference from another provider");
-    for (const candidate of candidates) {
-      if (candidate.ref.kind === "gmail" && candidate.ref.draftId !== keep.draftId) {
-        await this.#deleteDraftContainer(candidate.ref.draftId);
-      }
+    const duplicateIds = new Set(candidates.flatMap(({ ref }) => ref.kind === "gmail" && ref.draftId !== keep.draftId
+      ? [ref.draftId]
+      : []));
+    for (const id of duplicateIds) {
+      await this.#deleteDraftContainer(id);
     }
   }
 

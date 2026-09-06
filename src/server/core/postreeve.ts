@@ -682,11 +682,11 @@ export class PostreeveService {
     const allLocal = await this.#store.listDrafts(this.#context.tenantId, accountId);
     let providerDrafts: ProviderDraft[];
     try {
-      providerDrafts = await this.#providers.forAccount(accountId).listDrafts(accountId);
+      providerDrafts = (await this.#providers.forAccount(accountId).listDrafts(accountId))
+        .filter((draft) => draft.accountId === accountId);
     } catch {
       return;
     }
-    const localById = new Map(allLocal.map((draft) => [draft.id, draft]));
     let remainingRepairs = draftReconciliationLimit;
     for (const draft of allLocal) {
       if (draft.delivery.status === "sending") continue;
@@ -699,20 +699,6 @@ export class PostreeveService {
       if (!healthy && remainingRepairs > 0) {
         await this.#mirrorDraftLocked(draft, false);
         remainingRepairs -= 1;
-      }
-    }
-    const orphans = new Set(providerDrafts.map(({ postreeveId }) => postreeveId)
-      .filter((id) => !localById.has(id)));
-    for (const id of [...orphans].slice(0, remainingRepairs)) {
-      try {
-        const current = await this.#store.getDraft(this.#context.tenantId, accountId, id);
-        if (current && current.delivery.status !== "sent") {
-          await this.#mirrorDraftLocked(current, false);
-          continue;
-        }
-        await this.#providers.forAccount(accountId).removeDraft(accountId, id, current?.mirror.ref);
-      } catch {
-        // The backend list stays available; the next bounded pass retries cleanup.
       }
     }
   }

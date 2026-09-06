@@ -29,22 +29,23 @@ export interface ComposeIntent {
   readonly message?: CanonicalMessageDetail;
 }
 
-export function Sheet({ title, meta, onClose, children, footer, onSubmit }: {
+export function Sheet({ title, meta, onClose, closeDisabled = false, children, footer, onSubmit }: {
   title: string;
   meta?: string | undefined;
   onClose: () => void;
+  closeDisabled?: boolean | undefined;
   children: ReactNode;
   footer: ReactNode;
   onSubmit?: ((event: FormEvent) => void) | undefined;
 }) {
   const Body = onSubmit ? "form" : "div";
   return <div className="overlay">
-    <button className="backdrop" aria-label="Dismiss overlay" onClick={onClose} />
+    <button className="backdrop" aria-label="Dismiss overlay" disabled={closeDisabled} onClick={closeDisabled ? undefined : onClose} />
     <Body className="sheet" {...(onSubmit ? { onSubmit } : {})}>
       <div className="sheet-head">
         <h2 style={{ fontSize: 13, fontWeight: 600 }}>{title}</h2>
         {meta ? <span className="t-dim">{meta}</span> : null}
-        <button type="button" className="btn-quiet" style={{ marginLeft: "auto" }} aria-label={`Close ${title}`} onClick={onClose}>Close</button>
+        <button type="button" className="btn-quiet" style={{ marginLeft: "auto" }} aria-label={`Close ${title}`} disabled={closeDisabled} onClick={closeDisabled ? undefined : onClose}>Close</button>
       </div>
       <div className="sheet-body">{children}</div>
       <div className="sheet-foot">{footer}</div>
@@ -63,8 +64,12 @@ function draftRecipientsText(value: Draft["to"]): string {
   return typeof value === "string" ? value : addressList(value);
 }
 
-export function DraftsSheet({ drafts, onClose, onCreate, onOpen, onRemove }: {
+export function DraftsSheet({ drafts, loaded, loading, refreshing, loadError, onClose, onCreate, onOpen, onRemove }: {
   drafts: readonly Draft[];
+  loaded: boolean;
+  loading: boolean;
+  refreshing: boolean;
+  loadError: string | null;
   onClose: () => void;
   onCreate: () => void;
   onOpen: (draft: Draft) => void;
@@ -74,17 +79,26 @@ export function DraftsSheet({ drafts, onClose, onCreate, onOpen, onRemove }: {
   const [error, setError] = useState<string | null>(null);
   return <Sheet
     title="Drafts"
-    meta="saved to your mail provider"
+    meta="saved in Postreeve"
     onClose={onClose}
-    footer={<><span className="t-dim">Available from every Postreeve client and your provider’s Drafts folder.</span><button className="btn push" onClick={onCreate}>New message</button></>}
+    footer={<><span className="t-dim">Provider synchronization status is shown for each draft.</span><button className="btn push" onClick={onCreate}>New message</button></>}
   >
     {error ? <div className="alert error">{error}</div> : null}
-    {drafts.length === 0 ? <p className="t-dim" style={{ margin: 0 }}>No drafts. Start composing and Postreeve will autosave here.</p> : null}
+    {loadError ? <div className="alert error">Could not load drafts: {loadError}</div> : null}
+    {loading && drafts.length === 0 ? <p className="t-dim" style={{ margin: 0 }}>Loading drafts…</p> : null}
+    {refreshing ? <p className="t-dim" style={{ margin: 0 }}>Refreshing drafts…</p> : null}
+    {loaded && !loading && !refreshing && !loadError && drafts.length === 0
+      ? <p className="t-dim" style={{ margin: 0 }}>No drafts. Start composing and Postreeve will autosave here.</p>
+      : null}
     {drafts.map((draft) => <div key={draft.id} style={{ display: "flex", alignItems: "center", gap: 12, borderTop: "1px solid var(--div)", padding: "10px 0" }}>
       <button style={{ flex: 1, minWidth: 0 }} onClick={() => onOpen(draft)}>
         <div className="t-ink truncate">{draft.subject || "(No subject)"}</div>
         <div className="t-dim truncate">{draftRecipientsText(draft.to) || "No recipient"} · {formatDate(draft.updatedAt, true)}</div>
-        {draft.mirror.status === "failed" ? <div className="t-dim truncate">Saved in Postreeve · provider mirror needs repair</div> : null}
+        <div className="t-dim truncate">{draft.mirror.status === "synced"
+          ? "Saved in Postreeve · mirrored to provider"
+          : draft.mirror.status === "pending"
+            ? "Saved in Postreeve · awaiting provider synchronization"
+            : "Saved in Postreeve · provider mirror needs repair"}</div>
       </button>
       <button className="btn-danger" disabled={removing === draft.id} aria-label={`Delete draft ${draft.subject || "without subject"}`} onClick={() => {
         setRemoving(draft.id);
@@ -431,7 +445,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   });
 
   async function closeCurrent(): Promise<void> {
-    if (closing.current) return;
+    if (mutation.isPending || closing.current) return;
     if (!saver.current!.isDirty(currentDraft())) {
       onClose();
       return;
@@ -491,6 +505,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     title={modeLabel}
     meta={account.email}
     onClose={() => void closeCurrent()}
+    closeDisabled={mutation.isPending}
     onSubmit={submit}
     footer={<>
       <span className="t-dim">{saving
@@ -500,35 +515,35 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
           : savedAt
             ? `Draft saved ${formatDate(savedAt, true)}`
             : "Drafts autosave to the backend"}</span>
-      <button type="button" className="chip push" disabled={saving} onClick={() => void saveCurrent(true).catch(() => undefined)}>Save draft</button>
+      <button type="button" className="chip push" disabled={saving || mutation.isPending} onClick={() => void saveCurrent(true).catch(() => undefined)}>Save draft</button>
       <button className="btn" disabled={mutation.isPending || !body.trim() || backendPending} title={backendPending ? "Backend support is required before this message can be sent" : undefined}>
         {mutation.isPending ? "Sending…" : "Send message"}
       </button>
     </>}
   >
     <label className="field"><span className="field-label">From</span>
-      <select className="input" aria-label="From identity" value={from} onChange={(event) => { edited.current.from = true; setFrom(event.target.value); }}>
+      <select className="input" aria-label="From identity" value={from} disabled={mutation.isPending} onChange={(event) => { edited.current.from = true; setFrom(event.target.value); }}>
         <option value={account.email}>{account.email}</option>
         {identities.map((identity) => <option value={identity.email} key={identity.id}>{identity.name} · {identity.email}</option>)}
       </select>
     </label>
-    <label className="field"><span className="field-label">To</span><input className="input" autoFocus required aria-label="To" placeholder="person@example.com, team@example.com" value={to} onChange={(event) => { edited.current.to = true; setTo(event.target.value); }} /></label>
+    <label className="field"><span className="field-label">To</span><input className="input" autoFocus required aria-label="To" placeholder="person@example.com, team@example.com" value={to} disabled={mutation.isPending} onChange={(event) => { edited.current.to = true; setTo(event.target.value); }} /></label>
     <div className="field-grid">
-      <label className="field"><span className="field-label">Cc</span><input className="input" aria-label="Cc" value={cc} onChange={(event) => { edited.current.cc = true; setCc(event.target.value); }} /></label>
-      <label className="field"><span className="field-label">Bcc</span><input className="input" aria-label="Bcc" value={bcc} onChange={(event) => { edited.current.bcc = true; setBcc(event.target.value); }} /></label>
+      <label className="field"><span className="field-label">Cc</span><input className="input" aria-label="Cc" value={cc} disabled={mutation.isPending} onChange={(event) => { edited.current.cc = true; setCc(event.target.value); }} /></label>
+      <label className="field"><span className="field-label">Bcc</span><input className="input" aria-label="Bcc" value={bcc} disabled={mutation.isPending} onChange={(event) => { edited.current.bcc = true; setBcc(event.target.value); }} /></label>
     </div>
-    <label className="field"><span className="field-label">Subject</span><input className="input" maxLength={998} aria-label="Subject" value={subject} onChange={(event) => setSubject(event.target.value)} /></label>
-    <label className="field"><span className="field-label">Message</span><textarea className="input" required rows={12} maxLength={2_000_000} aria-label="Message" value={body} onChange={(event) => setBody(event.target.value)} /></label>
+    <label className="field"><span className="field-label">Subject</span><input className="input" maxLength={998} aria-label="Subject" value={subject} disabled={mutation.isPending} onChange={(event) => setSubject(event.target.value)} /></label>
+    <label className="field"><span className="field-label">Message</span><textarea className="input" required rows={12} maxLength={2_000_000} aria-label="Message" value={body} disabled={mutation.isPending} onChange={(event) => setBody(event.target.value)} /></label>
     <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-      <label className="chip">Add attachments<input type="file" multiple style={{ display: "none" }} onChange={(event) => setAttachments((current) => [...current, ...[...(event.target.files ?? [])].map((file) => ({ name: file.name, size: file.size, type: file.type }))])} /></label>
+      <label className="chip" aria-disabled={mutation.isPending}>Add attachments<input type="file" multiple disabled={mutation.isPending} style={{ display: "none" }} onChange={(event) => setAttachments((current) => [...current, ...[...(event.target.files ?? [])].map((file) => ({ name: file.name, size: file.size, type: file.type }))])} /></label>
       <span className="t-dim">File bytes are not stored yet.</span>
     </div>
     {attachments.map((attachment, index) => <div key={`${attachment.name}:${index}`} style={{ display: "flex", alignItems: "center", gap: 12 }}>
       <span className="t-body">{attachment.name}</span><span className="t-dim">{Math.max(1, Math.round(attachment.size / 1024))} KB</span>
-      <button type="button" className="btn-danger" style={{ marginLeft: "auto" }} aria-label={`Remove ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, candidate) => candidate !== index))}>Remove</button>
+      <button type="button" className="btn-danger" style={{ marginLeft: "auto" }} aria-label={`Remove ${attachment.name}`} disabled={mutation.isPending} onClick={() => setAttachments((current) => current.filter((_, candidate) => candidate !== index))}>Remove</button>
     </div>)}
     {backendPending ? <div className="alert"><strong>Sending is unavailable.</strong>{conversationMode && !conversationSource
-      ? <> This draft no longer has its source conversation. <button type="button" className="btn-underline" onClick={() => setEffectiveMode("new")}>Convert to a new message</button></>
+      ? <> This draft no longer has its source conversation. <button type="button" className="btn-underline" disabled={mutation.isPending} onClick={() => setEffectiveMode("new")}>Convert to a new message</button></>
       : null}{from !== account.email ? " Alternate From identities are not supported yet." : ""}{attachments.length > 0 ? " Attachment delivery is not supported yet." : ""}</div> : null}
     {validationError ? <div className="alert error">{validationError}</div> : null}
     {saveError ? <div className="alert error">Draft not saved: {saveError}. Your form content was kept.</div> : null}

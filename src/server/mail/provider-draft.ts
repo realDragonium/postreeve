@@ -1,13 +1,16 @@
 import { createHash } from "node:crypto";
 import MailComposer from "nodemailer/lib/mail-composer";
 import {
+  accountIdSchema,
   conversationSendSourceSchema,
+  draftIdSchema,
   type ConversationSendSource,
   type Draft,
   type DraftRecipientField,
 } from "../../shared/contracts";
 
 export interface ProviderDraftMarkers {
+  readonly accountId: string;
   readonly postreeveId: string;
   readonly version: number;
 }
@@ -21,8 +24,9 @@ export async function buildProviderDraftMessage(draft: Draft): Promise<Buffer> {
     subject: sanitizeHeader(draft.subject),
     text: "Postreeve draft body",
     date: new Date(draft.updatedAt),
-    messageId: `<postreeve-draft-${boundedId(draft.id)}-${draft.version}@postreeve.local>`,
+    messageId: `<postreeve-draft-${boundedId(`${draft.accountId}\0${draft.id}`)}-${draft.version}@postreeve.local>`,
     headers: [
+      { key: "X-Postreeve-Draft-Account-ID", value: foldableEncoded(draft.accountId) },
       { key: "X-Postreeve-Draft-ID", value: foldableEncoded(draft.id) },
       { key: "X-Postreeve-Draft-Version", value: String(draft.version) },
       { key: "X-Postreeve-Draft-Mode", value: draft.mode },
@@ -46,13 +50,19 @@ export async function buildProviderDraftMessage(draft: Draft): Promise<Buffer> {
 
 export function parseProviderDraftMarkers(source: Buffer | string): ProviderDraftMarkers | null {
   const headers = parseHeaders(source);
+  const encodedAccountId = headers.get("x-postreeve-draft-account-id")?.replace(/\s/g, "");
   const encodedId = headers.get("x-postreeve-draft-id")?.replace(/\s/g, "");
   const rawVersion = headers.get("x-postreeve-draft-version");
-  if (!encodedId || !rawVersion || !/^\d+$/.test(rawVersion)) return null;
+  if (!encodedAccountId || !encodedId
+    || !/^[A-Za-z0-9_-]+$/.test(encodedAccountId)
+    || !/^[A-Za-z0-9_-]+$/.test(encodedId)
+    || !rawVersion
+    || !/^\d+$/.test(rawVersion)) return null;
   try {
-    const postreeveId = Buffer.from(encodedId, "base64url").toString("utf8");
+    const accountId = accountIdSchema.parse(Buffer.from(encodedAccountId, "base64url").toString("utf8"));
+    const postreeveId = draftIdSchema.parse(Buffer.from(encodedId, "base64url").toString("utf8"));
     const version = Number(rawVersion);
-    return postreeveId && Number.isSafeInteger(version) && version > 0 ? { postreeveId, version } : null;
+    return Number.isSafeInteger(version) && version > 0 ? { accountId, postreeveId, version } : null;
   } catch {
     return null;
   }

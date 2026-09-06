@@ -121,6 +121,15 @@ function App() {
     queries: accounts.map((account) => ({ queryKey: ["drafts", account.id], queryFn: () => api.drafts(account.id) })),
   });
   const drafts: readonly Draft[] = draftResults.flatMap((result) => result.data ?? []);
+  const draftsLoaded = draftResults.length === accounts.length && draftResults.every(({ data }) => data !== undefined);
+  const draftsLoading = draftResults.some(({ isPending }) => isPending);
+  const draftsRefreshing = draftResults.some(({ data, isFetching }) => data !== undefined && isFetching);
+  const draftLoadFailure = draftResults.find(({ error }) => error !== null)?.error;
+  const draftLoadError = draftLoadFailure instanceof Error
+    ? draftLoadFailure.message
+    : draftLoadFailure
+      ? "Draft loading failed"
+      : null;
   const migrationAccountSnapshot = accounts.map(({ id }) => id).sort().join("\0");
   const migratedAccountSnapshot = useRef<string | null>(null);
   useEffect(() => {
@@ -655,6 +664,10 @@ function App() {
 
     {overlay?.kind === "drafts" ? <DraftsSheet
       drafts={accountDrafts}
+      loaded={draftsLoaded}
+      loading={draftsLoading}
+      refreshing={draftsRefreshing}
+      loadError={draftLoadError}
       onClose={() => setOverlay(null)}
       onCreate={() => setOverlay({ kind: "compose", accountId: composeAccountId, intent: { mode: "new" } })}
       onOpen={(draft) => setOverlay({ kind: "compose", accountId: draft.accountId, intent: { mode: "draft", draft } })}

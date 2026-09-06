@@ -97,13 +97,14 @@ class BrowserDraftFixture {
   getRequests = 0;
   failedWriteRequests = 0;
   writeFailure: { readonly message: string; readonly status: number } | null = null;
+  listFailure: { readonly message: string; readonly status: number } | null = null;
   readonly updates: UpdateDraftInput[] = [];
   #nextId = 1;
 
   async handle(
     route: Route,
     accountId: string,
-    send: (input: SendMessageInput) => { value: unknown; status?: number } = (input) => ({
+    send: (input: SendMessageInput) => Promise<{ value: unknown; status?: number }> | { value: unknown; status?: number } = (input) => ({
       value: {
         id: "sent-browser-draft",
         accountId,
@@ -119,6 +120,10 @@ class BrowserDraftFixture {
     const root = `/api/accounts/${accountId}/drafts`;
     if (request.method() === "GET" && url.pathname === root) {
       this.listRequests += 1;
+      if (this.listFailure) {
+        await json(route, { error: this.listFailure.message }, this.listFailure.status);
+        return true;
+      }
       await json(route, this.drafts.filter((draft) => draft.accountId === accountId));
       return true;
     }
@@ -156,7 +161,7 @@ class BrowserDraftFixture {
         await json(route, { error: "Draft not found", code: "draft_not_found" }, 404);
         return true;
       }
-      const result = send(draftSendInput(draft));
+      const result = await send(draftSendInput(draft));
       if ((result.status ?? 200) < 400) this.drafts = this.drafts.filter((candidate) => candidate.id !== id);
       await json(route, result.value, result.status);
       return true;
@@ -740,6 +745,112 @@ test("refetches backend drafts on reopen and leaves unchanged structured drafts 
   await page.getByRole("button", { name: /Drafts/ }).click();
   await expect.poll(() => fixture.listRequests).toBeGreaterThan(beforeThirdOpen);
   await expect(page.getByText("Other client autosave", { exact: true })).toHaveCount(0);
+});
+
+test("shows draft list failures truthfully and distinguishes pending provider mirrors", async ({ page }) => {
+  const fixture = new BrowserDraftFixture();
+  fixture.listFailure = { message: "Draft listing unavailable", status: 503 };
+  fixture.drafts = [{
+    id: "pending-provider-draft",
+    accountId: account.id,
+    mode: "new",
+    to: "unfinished@",
+    cc: "",
+    bcc: "",
+    subject: "Pending provider mirror",
+    body: "Saved backend content",
+    identity: { name: account.name, address: account.email },
+    attachments: [],
+    delivery: { status: "editable" },
+    mirror: { status: "pending" },
+    createdAt: "2026-09-05T10:00:00.000Z",
+    updatedAt: "2026-09-05T10:00:00.000Z",
+    version: 1,
+  }];
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
+    if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, []);
+    if (await fixture.handle(route, account.id)) return;
+    if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
+    return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
+  });
+
+  await page.goto("/");
+  await expect.poll(() => fixture.listRequests).toBeGreaterThanOrEqual(2);
+  await page.getByRole("button", { name: /Drafts/ }).click();
+  await expect(page.getByText("Could not load drafts: Draft listing unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByText(/No drafts/)).toHaveCount(0);
+
+  fixture.listFailure = null;
+  await page.getByRole("button", { name: "Close Drafts" }).click();
+  await page.getByRole("button", { name: /Drafts/ }).click();
+  await expect(page.getByText("Pending provider mirror", { exact: true })).toBeVisible();
+  await expect(page.getByText("Saved in Postreeve · awaiting provider synchronization", { exact: true })).toBeVisible();
+  await expect(page.getByText("Provider synchronization status is shown for each draft.", { exact: true })).toBeVisible();
+});
+
+test("freezes compose controls and close paths while a draft send is pending", async ({ page }) => {
+  const fixture = new BrowserDraftFixture();
+  let releaseSend: () => void = () => undefined;
+  let markSendStarted: () => void = () => undefined;
+  const sendGate = new Promise<void>((resolve) => { releaseSend = resolve; });
+  const sendStarted = new Promise<void>((resolve) => { markSendStarted = resolve; });
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
+    if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, []);
+    if (await fixture.handle(route, account.id, async (input) => {
+      markSendStarted();
+      await sendGate;
+      return {
+        value: {
+          id: "delayed-send",
+          accountId: account.id,
+          messageId: "delayed-send@example.test",
+          accepted: input.to.map(({ address }) => address),
+          rejected: [],
+          submittedAt: "2026-09-05T10:00:02.000Z",
+        },
+      };
+    })) return;
+    if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
+    return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "New message" }).click();
+  await page.getByLabel("To", { exact: true }).fill("recipient@example.test");
+  await page.getByLabel("Subject", { exact: true }).fill("Delayed send");
+  await page.getByLabel("Message", { exact: true }).fill("Immutable while pending");
+  await page.getByRole("button", { name: "Save draft" }).click();
+  await expect.poll(() => fixture.drafts).toHaveLength(1);
+  await page.getByRole("button", { name: "Send message" }).click();
+  await sendStarted;
+
+  for (const label of ["From identity", "To", "Cc", "Bcc", "Subject", "Message"]) {
+    await expect(page.getByLabel(label, { exact: true })).toBeDisabled();
+  }
+  await expect(page.locator('input[type="file"]')).toBeDisabled();
+  await expect(page.getByText("Add attachments", { exact: true })).toHaveAttribute("aria-disabled", "true");
+  await expect(page.getByRole("button", { name: "Save draft" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Sending…" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Close New message" })).toBeDisabled();
+  await expect(page.getByLabel("Dismiss overlay")).toBeDisabled();
+  await page.getByLabel("Dismiss overlay").evaluate((element) => (element as HTMLButtonElement).click());
+  await expect(page.getByRole("heading", { name: "New message" })).toBeVisible();
+
+  releaseSend();
+  await expect(page.getByRole("heading", { name: "Message sent" })).toBeVisible();
+  expect(fixture.drafts).toEqual([]);
 });
 
 test("keeps dirty compose content open until a failed backend save can be retried", async ({ page }) => {

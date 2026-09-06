@@ -32,7 +32,9 @@ describe("Gmail provider drafts", () => {
     expect(parsed.text).toBe(editable.body);
     expect(raw.toString()).toContain("To: <unfinished@>");
     expect(raw.toString()).not.toContain("\r\nX-Injected: blocked\r\n");
-    expect(parseProviderDraftMarkers(raw)).toEqual({ postreeveId: editable.id, version: 7 });
+    expect(parseProviderDraftMarkers(raw)).toEqual({ accountId: editable.accountId, postreeveId: editable.id, version: 7 });
+    expect(parseProviderDraftMarkers("X-Postreeve-Draft-ID: c2NvcGVsZXNz\r\nX-Postreeve-Draft-Version: 1\r\n\r\n"))
+      .toBeNull();
   });
 
   test("folds maximum Unicode and arbitrary editable headers without changing backend content", async () => {
@@ -44,6 +46,7 @@ describe("Gmail provider drafts", () => {
       providerConversationId: `provider/${"p".repeat(1_200)}`,
     };
     const editable = draft(9, {
+      accountId: `account/${"a".repeat(1_200)}`,
       id: `draft/${"d".repeat(1_500)}`,
       to: `${"unfinished".repeat(180)}@\r\nBcc: injected@example.test`,
       cc: `Jöhn ${"pending".repeat(150)}@`,
@@ -61,7 +64,11 @@ describe("Gmail provider drafts", () => {
       expect(encodedWord.length).toBeLessThanOrEqual(75);
     }
     expect(headerBlock).not.toContain("\r\nX-Injected: blocked");
-    expect(parseProviderDraftMarkers(raw)).toEqual({ postreeveId: editable.id, version: editable.version });
+    expect(parseProviderDraftMarkers(raw)).toEqual({
+      accountId: editable.accountId,
+      postreeveId: editable.id,
+      version: editable.version,
+    });
     expect(parseProviderDraftSource(raw)).toEqual(source);
     expect((await simpleParser(raw)).subject).toBe(subject.replace(/[\r\n]+/g, " "));
     expect(editable).toEqual(original);
@@ -173,6 +180,132 @@ describe("Gmail provider drafts", () => {
       .rejects.toThrow("another account");
   });
 
+  test("keeps same-id drafts isolated between accounts sharing a Gmail mailbox", async () => {
+    const otherAccount = { ...gmailAccount, id: "gmail-drafts-other-account" };
+    const containers = new Map<string, string>();
+    let nextId = 1;
+    const request: HttpFetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      const method = init?.method ?? "GET";
+      if (url.origin === "https://oauth2.googleapis.com") {
+        return Response.json({ access_token: "draft-token", expires_in: 3600 });
+      }
+      const draftId = /^\/gmail\/v1\/users\/me\/drafts\/([^/]+)$/.exec(url.pathname)?.[1];
+      if (url.pathname.endsWith("/drafts") && method === "GET") {
+        return Response.json({ drafts: [...containers.keys()].map((id) => ({ id })) });
+      }
+      if (url.pathname.endsWith("/drafts") && method === "POST") {
+        const body = parseBody(init?.body);
+        const id = `shared-provider-${nextId++}`;
+        containers.set(id, body.message.raw);
+        return Response.json({ id, message: { id: `message-${id}`, raw: body.message.raw } });
+      }
+      if (draftId && method === "GET") {
+        const raw = containers.get(draftId);
+        return raw
+          ? Response.json({ id: draftId, message: { id: `message-${draftId}`, raw } })
+          : Response.json({ error: { message: "missing" } }, { status: 404 });
+      }
+      if (draftId && method === "PUT") {
+        const raw = parseBody(init?.body).message.raw;
+        if (!containers.has(draftId)) return Response.json({ error: { message: "missing" } }, { status: 404 });
+        containers.set(draftId, raw);
+        return Response.json({ id: draftId, message: { id: `message-${draftId}`, raw } });
+      }
+      if (draftId && method === "DELETE") {
+        containers.delete(draftId);
+        return Response.json(null);
+      }
+      return Response.json({ error: { message: "unexpected fixture request" } }, { status: 500 });
+    };
+    const firstClient = new GmailMailClient({
+      account: gmailAccount,
+      credentials: { kind: "gmail", refreshToken: "refresh" },
+      clientId: "client",
+      fetch: request,
+    });
+    const secondClient = new GmailMailClient({
+      account: otherAccount,
+      credentials: { kind: "gmail", refreshToken: "refresh" },
+      clientId: "client",
+      fetch: request,
+    });
+    const firstDraft = draft(1);
+    const secondDraft = draft(1, { accountId: otherAccount.id, identity: { name: otherAccount.name, address: otherAccount.email } });
+
+    const firstRef = await firstClient.createDraft(gmailAccount.id, firstDraft);
+    const secondRef = await secondClient.createDraft(otherAccount.id, secondDraft);
+    expect(await firstClient.listDrafts(gmailAccount.id)).toEqual([
+      { accountId: gmailAccount.id, postreeveId: firstDraft.id, version: 1, ref: firstRef },
+    ]);
+    expect(await secondClient.listDrafts(otherAccount.id)).toEqual([
+      { accountId: otherAccount.id, postreeveId: secondDraft.id, version: 1, ref: secondRef },
+    ]);
+
+    const updatedFirst = { ...firstDraft, body: "First account update", version: 2 };
+    await firstClient.updateDraft(gmailAccount.id, updatedFirst, secondRef);
+    await firstClient.removeDraft(gmailAccount.id, firstDraft.id, secondRef);
+    expect(await firstClient.listDrafts(gmailAccount.id)).toEqual([]);
+    expect(await secondClient.listDrafts(otherAccount.id)).toEqual([
+      { accountId: otherAccount.id, postreeveId: secondDraft.id, version: 1, ref: secondRef },
+    ]);
+    expect(containers).toHaveLength(1);
+  });
+
+  test("cleans an older duplicate after recovering an ambiguous Gmail update", async () => {
+    const initial = draft(1);
+    const updated = draft(2, { body: "Updated remotely before the response was lost" });
+    const initialRaw = (await buildProviderDraftMessage(initial)).toString("base64url");
+    const containers = new Map<string, string>([["selected", initialRaw], ["stale", initialRaw]]);
+    let ambiguousUpdate = true;
+    const request: HttpFetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      const method = init?.method ?? "GET";
+      if (url.origin === "https://oauth2.googleapis.com") {
+        return Response.json({ access_token: "draft-token", expires_in: 3600 });
+      }
+      const draftId = /^\/gmail\/v1\/users\/me\/drafts\/([^/]+)$/.exec(url.pathname)?.[1];
+      if (url.pathname.endsWith("/drafts") && method === "GET") {
+        return Response.json({ drafts: [...containers.keys()].map((id) => ({ id })) });
+      }
+      if (draftId && method === "GET") {
+        const raw = containers.get(draftId);
+        return raw
+          ? Response.json({ id: draftId, message: { id: `message-${draftId}`, raw } })
+          : Response.json({ error: { message: "missing" } }, { status: 404 });
+      }
+      if (draftId === "selected" && method === "PUT") {
+        const raw = parseBody(init?.body).message.raw;
+        containers.set(draftId, raw);
+        if (ambiguousUpdate) {
+          ambiguousUpdate = false;
+          return Response.json({ error: { message: "lost update response" } }, { status: 503 });
+        }
+        return Response.json({ id: draftId, message: { id: `message-${draftId}`, raw } });
+      }
+      if (draftId && method === "DELETE") {
+        containers.delete(draftId);
+        return Response.json(null);
+      }
+      return Response.json({ error: { message: "unexpected fixture request" } }, { status: 500 });
+    };
+    const client = new GmailMailClient({
+      account: gmailAccount,
+      credentials: { kind: "gmail", refreshToken: "refresh" },
+      clientId: "client",
+      fetch: request,
+    });
+
+    const ref = await client.updateDraft(gmailAccount.id, updated, { kind: "gmail", draftId: "selected" });
+
+    expect(ref).toEqual({ kind: "gmail", draftId: "selected" });
+    expect(containers).toHaveLength(1);
+    expect(containers.has("selected")).toBe(true);
+    expect(await client.listDrafts(gmailAccount.id)).toEqual([
+      { accountId: gmailAccount.id, postreeveId: updated.id, version: 2, ref },
+    ]);
+  });
+
   test("bounds stale-listing PUT-404 recovery and succeeds on a later retry without duplicates", async () => {
     const current = draft(4, { body: "Authoritative body" });
     const staleRaw = (await buildProviderDraftMessage(current)).toString("base64url");
@@ -236,7 +369,7 @@ describe("Gmail provider drafts", () => {
     expect(staleListed).toBe(false);
     expect(containers).toHaveLength(1);
     expect(await client.listDrafts(gmailAccount.id)).toEqual([
-      { postreeveId: current.id, version: current.version, ref: recovered },
+      { accountId: gmailAccount.id, postreeveId: current.id, version: current.version, ref: recovered },
     ]);
   });
 });

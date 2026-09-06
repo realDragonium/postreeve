@@ -6,6 +6,7 @@ import { basename, dirname, join } from "node:path";
 import type { Account, CreateDraftInput, Draft, DraftContent, UpdateDraftInput } from "../src/shared/contracts";
 import { AccountConflictError, DraftDeletedError } from "../src/server/core/errors";
 import { Store } from "../src/server/db/store";
+import type { ProviderDraft } from "../src/server/mail/provider";
 import { MailSendPreDispatchError } from "../src/server/mail/sender";
 import { DraftRecoveryConflictError, DraftSaveQueue, migrationDraftId } from "../src/web/draft-state";
 import { createEmptyTestHarness, createTestHarness, testAccountInput } from "./support/test-mail";
@@ -214,7 +215,7 @@ describe("server-authoritative drafts", () => {
     expect(saved).toMatchObject({ id: "lost-create-draft", version: 2, body: "Newest local body" });
     expect(await harness.service.listDrafts(account.id)).toEqual([saved]);
     expect(await harness.providerDrafts(account.id)).toEqual([
-      { postreeveId: saved.id, version: saved.version, ref: saved.mirror.ref },
+      { accountId: account.id, postreeveId: saved.id, version: saved.version, ref: saved.mirror.ref },
     ]);
     expect(harness.draftMirrorAttempts.map(({ version }) => version)).toEqual([1, 1, 2]);
     harness.store.close();
@@ -283,7 +284,7 @@ describe("server-authoritative drafts", () => {
     expect(await first.store.getDraft("test-tenant", independentAccount.id, independent.id)).toEqual(independent);
     expect(await first.providerDrafts(deletedAccount.id)).toEqual([]);
     expect(await first.providerDrafts(independentAccount.id)).toEqual([
-      { postreeveId: independent.id, version: independent.version, ref: independent.mirror.ref },
+      { accountId: independentAccount.id, postreeveId: independent.id, version: independent.version, ref: independent.mirror.ref },
     ]);
     expect(first.draftMirrorAttempts.filter(({ accountId }) => accountId === deletedAccount.id).map(({ version }) => version))
       .toEqual([1]);
@@ -357,7 +358,7 @@ describe("server-authoritative drafts", () => {
     expect(await first.service.getDraft(account.id, otherEdit.id)).toEqual(otherEdit);
     expect(await second.service.getDraft(account.id, otherEdit.id)).toEqual(otherEdit);
     expect(await first.providerDrafts(account.id)).toEqual([
-      { postreeveId: otherEdit.id, version: otherEdit.version, ref: otherEdit.mirror.ref },
+      { accountId: account.id, postreeveId: otherEdit.id, version: otherEdit.version, ref: otherEdit.mirror.ref },
     ]);
     second.store.close();
     first.store.close();
@@ -437,7 +438,7 @@ describe("server-authoritative drafts", () => {
     expect(await first.service.getDraft(account.id, otherEdit.id)).toEqual(otherEdit);
     expect(await second.service.getDraft(account.id, otherEdit.id)).toEqual(otherEdit);
     expect(await first.providerDrafts(account.id)).toEqual([
-      { postreeveId: otherEdit.id, version: otherEdit.version, ref: otherEdit.mirror.ref },
+      { accountId: account.id, postreeveId: otherEdit.id, version: otherEdit.version, ref: otherEdit.mirror.ref },
     ]);
     expect(first.sendAttempts).toHaveLength(1);
     second.store.close();
@@ -540,10 +541,42 @@ describe("server-authoritative drafts", () => {
 
     expect(removedDrafts).toEqual([]);
     expect(await provider.listDrafts(account.id)).toEqual([
-      { postreeveId: created.id, version: created.version, ref: created.mirror.ref },
+      { accountId: account.id, postreeveId: created.id, version: created.version, ref: created.mirror.ref },
     ]);
     expect(await first.store.getAccount(account.id)).toBeNull();
     expect(await second.store.getDraft("test-tenant", account.id, created.id)).toBeNull();
+    second.store.close();
+    first.store.close();
+  });
+
+  test("does not delete marker-only drafts when the same physical mailbox reconnects as another account", async () => {
+    const physicalDrafts = new Map<string, ProviderDraft>();
+    const removedDrafts: string[] = [];
+    const first = await createEmptyTestHarness({
+      providerDraftState: physicalDrafts,
+      onDraftRemove: (draftId) => { removedDrafts.push(draftId); },
+    });
+    const disconnectedAccount = await first.service.createAccount(testAccountInput());
+    const created = await first.service.createDraft({
+      ...draftInput(disconnectedAccount),
+      clientId: "retained-provider-draft",
+    });
+    if (created.mirror.status !== "synced") throw new Error("Expected synced provider draft");
+    await first.service.removeAccount(disconnectedAccount.id);
+
+    const second = await createEmptyTestHarness({
+      providerDraftState: physicalDrafts,
+      onDraftRemove: (draftId) => { removedDrafts.push(draftId); },
+    });
+    const reconnectedAccount = await second.service.createAccount(testAccountInput());
+
+    expect(await second.service.listDrafts(reconnectedAccount.id)).toEqual([]);
+    expect(removedDrafts).toEqual([]);
+    expect(physicalDrafts.size).toBe(1);
+    expect(await first.providerDrafts(disconnectedAccount.id)).toEqual([
+      { accountId: disconnectedAccount.id, postreeveId: created.id, version: created.version, ref: created.mirror.ref },
+    ]);
+    expect(await second.providerDrafts(reconnectedAccount.id)).toEqual([]);
     second.store.close();
     first.store.close();
   });
@@ -1221,7 +1254,7 @@ describe("server-authoritative drafts", () => {
 
     expect(completed).toMatchObject({ version: updated.version, body: "Winning body", mirror: { status: "synced", mirroredVersion: 2 } });
     expect(await harness.providerDrafts(account.id)).toEqual([
-      { postreeveId: stored.id, version: 2, ref: expect.objectContaining({ kind: "imap" }) },
+      { accountId: account.id, postreeveId: stored.id, version: 2, ref: expect.objectContaining({ kind: "imap" }) },
     ]);
     harness.store.close();
   });
@@ -1310,7 +1343,7 @@ describe("server-authoritative drafts", () => {
     const repaired = await harness.service.getDraft(account.id, created.id);
     expect(repaired).toMatchObject({ body: "Authoritative body", version: 1, mirror: { status: "synced", mirroredVersion: 1 } });
     expect(await harness.providerDrafts(account.id)).toEqual([
-      { postreeveId: created.id, version: 1, ref: expect.objectContaining({ kind: "imap" }) },
+      { accountId: account.id, postreeveId: created.id, version: 1, ref: expect.objectContaining({ kind: "imap" }) },
     ]);
     harness.store.close();
   });
@@ -1327,7 +1360,7 @@ describe("server-authoritative drafts", () => {
     await expect(harness.service.removeDraft(account.id, created.id, { version: created.version }))
       .rejects.toThrow("fixture local deletion failure");
     expect(await harness.providerDrafts(account.id)).toEqual([
-      { postreeveId: created.id, version: created.version, ref: expect.objectContaining({ kind: "imap" }) },
+      { accountId: account.id, postreeveId: created.id, version: created.version, ref: expect.objectContaining({ kind: "imap" }) },
     ]);
     expect(await harness.store.getDraft("test-tenant", account.id, created.id)).toMatchObject({ body: "Keep authoritative content" });
     harness.store.deleteDraft = remove;

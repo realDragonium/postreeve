@@ -205,9 +205,6 @@ export class ImapMailProvider implements MailProvider {
       ))
         .filter((draft) => draft.postreeveId === postreeveId);
       const uids = new Set(matches.map(({ ref: candidate }) => candidate.kind === "imap" ? candidate.uid : 0));
-      if (ref?.kind === "imap" && ref.mailbox === mailbox && ref.uidValidity === opened.uidValidity.toString()) {
-        uids.add(ref.uid);
-      }
       const selected = [...uids].filter((uid) => uid > 0);
       await retireDraftUids(client, selected);
       const remaining = (await this.#listSelectedProviderDrafts(client, mailbox, opened))
@@ -452,13 +449,17 @@ export class ImapMailProvider implements MailProvider {
     const drafts: ListedProviderDraft[] = [];
     for await (const message of client.fetch(
       selected,
-      { uid: true, flags: true, headers: ["X-Postreeve-Draft-ID", "X-Postreeve-Draft-Version"] },
+      { uid: true, flags: true, headers: [
+        "X-Postreeve-Draft-Account-ID",
+        "X-Postreeve-Draft-ID",
+        "X-Postreeve-Draft-Version",
+      ] },
       { uid: true },
     )) {
       const deleted = hasFlag(message.flags, DELETED_FLAG);
       if (!hasFlag(message.flags, DRAFT_FLAG) || (!includeDeleted && deleted) || !message.headers) continue;
       const markers = parseProviderDraftMarkers(message.headers);
-      if (!markers) continue;
+      if (!markers || markers.accountId !== this.#config.accountId) continue;
       drafts.push({
         ...markers,
         deleted,

@@ -76,6 +76,7 @@ export interface MailboxPage {
 }
 
 export interface ProviderDraft {
+  readonly accountId: string;
   readonly postreeveId: string;
   readonly version: number;
   readonly ref: ProviderDraftRef;

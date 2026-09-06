@@ -77,6 +77,7 @@ interface TestHarnessOptions {
   onDraftMirror?: (draft: Draft) => void | Promise<void>;
   onDraftRemove?: (draftId: string) => void | Promise<void>;
   draftRemoveFailure?: () => Error | undefined;
+  providerDraftState?: Map<string, ProviderDraft>;
   providerForAccount?: (accountId: string) => MailProvider | undefined;
 }
 
@@ -117,6 +118,7 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
         },
         options.onDraftRemove,
         options.draftRemoveFailure,
+        options.providerDraftState,
       );
       providers.set(accountId, provider);
       return provider;
@@ -171,7 +173,7 @@ class TestMailProvider implements MailProvider {
     ["Trash", { name: "Trash", specialUse: "trash" }],
     ["Drafts", { name: "Drafts", specialUse: "drafts" }],
   ]);
-  readonly #drafts = new Map<string, ProviderDraft>();
+  readonly #drafts: Map<string, ProviderDraft>;
   #nextDraftUid = 1;
   readonly #verificationFailure: Error | undefined;
   readonly #moveChangesUid: boolean;
@@ -191,6 +193,7 @@ class TestMailProvider implements MailProvider {
     onDraftMirror: (draft: Draft) => void | Promise<void>,
     onDraftRemove: ((draftId: string) => void | Promise<void>) | undefined,
     draftRemoveFailure: (() => Error | undefined) | undefined,
+    draftState: Map<string, ProviderDraft> | undefined,
   ) {
     this.#accountId = accountId;
     this.#messages = testMessages(accountId, duplicateDelivery, archiveDelivery);
@@ -199,6 +202,7 @@ class TestMailProvider implements MailProvider {
     this.#onDraftMirror = onDraftMirror;
     this.#onDraftRemove = onDraftRemove;
     this.#draftRemoveFailure = draftRemoveFailure;
+    this.#drafts = draftState ?? new Map();
     if (missingMessageId) {
       this.#messages[0]!.messageId = "missing-message-id";
       this.#messages[0]!.inReplyTo = "<parent@example.test>";
@@ -265,7 +269,9 @@ class TestMailProvider implements MailProvider {
 
   async listDrafts(accountId: string): Promise<ProviderDraft[]> {
     this.#assertAccount(accountId);
-    return [...this.#drafts.values()].map((draft) => structuredClone(draft));
+    return [...this.#drafts.values()]
+      .filter((draft) => draft.accountId === accountId)
+      .map((draft) => structuredClone(draft));
   }
 
   async removeDraft(accountId: string, postreeveId: string, ref?: ProviderDraftRef): Promise<void> {
@@ -274,7 +280,7 @@ class TestMailProvider implements MailProvider {
     await this.#onDraftRemove?.(postreeveId);
     const failure = this.#draftRemoveFailure?.();
     if (failure) throw failure;
-    this.#drafts.delete(postreeveId);
+    this.#drafts.delete(draftStateKey(accountId, postreeveId));
   }
 
   async listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]> {
@@ -378,9 +384,10 @@ class TestMailProvider implements MailProvider {
   }
 
   replaceDraftVersion(id: string, version: number): void {
-    const draft = this.#drafts.get(id);
+    const key = draftStateKey(this.#accountId, id);
+    const draft = this.#drafts.get(key);
     if (!draft) throw new Error("Test provider draft is missing");
-    this.#drafts.set(id, { ...draft, version });
+    this.#drafts.set(key, { ...draft, version });
   }
 
   #folder(path: string, name: string, specialUse: Folder["specialUse"]): Folder {
@@ -402,9 +409,18 @@ class TestMailProvider implements MailProvider {
   async #storeDraft(draft: Draft, uid = this.#nextDraftUid++): Promise<ProviderDraftRef> {
     await this.#onDraftMirror(draft);
     const ref: ProviderDraftRef = { kind: "imap", mailbox: "Drafts", uidValidity, uid };
-    this.#drafts.set(draft.id, { postreeveId: draft.id, version: draft.version, ref });
+    this.#drafts.set(draftStateKey(draft.accountId, draft.id), {
+      accountId: draft.accountId,
+      postreeveId: draft.id,
+      version: draft.version,
+      ref,
+    });
     return ref;
   }
+}
+
+function draftStateKey(accountId: string, draftId: string): string {
+  return JSON.stringify([accountId, draftId]);
 }
 
 class TestMailSender implements MailSender {

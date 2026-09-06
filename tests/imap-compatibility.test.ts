@@ -378,7 +378,7 @@ describe("Bun IMAP compatibility", () => {
     const updatedRef = await provider.updateDraft(config.accountId, updated, firstRef);
     await provider.updateDraft(config.accountId, updated, updatedRef);
     const listed = await provider.listDrafts(config.accountId);
-    expect(listed).toEqual([{ postreeveId: updated.id, version: 2, ref: expect.objectContaining({ kind: "imap", mailbox: "Drafts" }) }]);
+    expect(listed).toEqual([{ accountId: config.accountId, postreeveId: updated.id, version: 2, ref: expect.objectContaining({ kind: "imap", mailbox: "Drafts" }) }]);
     const draftsMailbox = state.mailboxes.get("Drafts");
     if (!draftsMailbox) throw new Error("Expected special-use Drafts mailbox");
     expect(draftsMailbox.messages.size).toBe(1);
@@ -399,6 +399,49 @@ describe("Bun IMAP compatibility", () => {
     await expect(provider.createDraft("account-b", first)).rejects.toThrow("cannot access account account-b");
     await expect(provider.createDraft(config.accountId, { ...first, accountId: "account-b" }))
       .rejects.toThrow("cannot access account account-b");
+  });
+
+  test("keeps same-id drafts isolated between accounts sharing an IMAP mailbox", async () => {
+    const state = fakeState();
+    const draftsMailbox = state.mailboxes.get("Drafts");
+    if (!draftsMailbox) throw new Error("Expected special-use Drafts mailbox");
+    const unscopedSource = Buffer.from(
+      `X-Postreeve-Draft-ID: ${Buffer.from("imap-postreeve-draft").toString("base64url")}\r\nX-Postreeve-Draft-Version: 1\r\n\r\n`,
+    );
+    draftsMailbox.messages.set(900, {
+      ...fakeMessage(900, 1n, "Legacy unscoped draft", "Keep", new Set(["\\Draft"])),
+      source: unscopedSource,
+      headers: unscopedSource,
+    });
+    const otherConfig = { ...config, accountId: "account-b" };
+    const firstProvider = new ImapMailProvider(config, fakeFactory(state));
+    const secondProvider = new ImapMailProvider(otherConfig, fakeFactory(state));
+    const firstDraft = providerDraft(1);
+    const secondDraft = providerDraft(1, {
+      accountId: otherConfig.accountId,
+      identity: { name: "Human", address: otherConfig.username },
+    });
+
+    const firstRef = await firstProvider.createDraft(config.accountId, firstDraft);
+    const secondRef = await secondProvider.createDraft(otherConfig.accountId, secondDraft);
+    expect(await firstProvider.listDrafts(config.accountId)).toEqual([
+      { accountId: config.accountId, postreeveId: firstDraft.id, version: 1, ref: firstRef },
+    ]);
+    expect(await secondProvider.listDrafts(otherConfig.accountId)).toEqual([
+      { accountId: otherConfig.accountId, postreeveId: secondDraft.id, version: 1, ref: secondRef },
+    ]);
+
+    const updatedFirst = providerDraft(2, { body: "First account update" });
+    const updatedRef = await firstProvider.updateDraft(config.accountId, updatedFirst, secondRef);
+    await firstProvider.removeDraft(config.accountId, firstDraft.id, secondRef);
+
+    expect(await firstProvider.listDrafts(config.accountId)).toEqual([]);
+    expect(await secondProvider.listDrafts(otherConfig.accountId)).toEqual([
+      { accountId: otherConfig.accountId, postreeveId: secondDraft.id, version: 1, ref: secondRef },
+    ]);
+    expect(draftsMailbox.messages.has(900)).toBe(true);
+    expect(state.messageDeletes.flatMap(({ uids }) => uids).includes(secondRef.kind === "imap" ? secondRef.uid : 0)).toBe(false);
+    expect(state.messageDeletes.flatMap(({ uids }) => uids).includes(updatedRef.kind === "imap" ? updatedRef.uid : 0)).toBe(true);
   });
 
   test("reconciles drafts without UIDPLUS by marking only managed UIDs deleted", async () => {
@@ -423,6 +466,7 @@ describe("Bun IMAP compatibility", () => {
     const retriedRef = await provider.updateDraft(config.accountId, current, currentRef);
 
     expect(await provider.listDrafts(config.accountId)).toEqual([{
+      accountId: config.accountId,
       postreeveId: current.id,
       version: 2,
       ref: retriedRef,
@@ -442,7 +486,6 @@ describe("Bun IMAP compatibility", () => {
     await provider.removeDraft(config.accountId, current.id, retriedRef);
     expect(await provider.listDrafts(config.accountId)).toEqual([]);
     expect(state.flagAdds.slice(2)).toEqual([
-      { uid: 3, flags: ["\\Deleted"], options: { uid: true } },
       { uid: 3, flags: ["\\Deleted"], options: { uid: true } },
     ]);
     expect([...draftsMailbox.messages.keys()]).toEqual([900, 1, 2, 3]);
@@ -464,7 +507,7 @@ describe("Bun IMAP compatibility", () => {
     await expect(provider.updateDraft(config.accountId, current, firstRef))
       .rejects.toThrow("did not confirm selective removal of draft UID 1");
     expect(await provider.listDrafts(config.accountId)).toEqual([
-      { postreeveId: current.id, version: 2, ref: expect.objectContaining({ kind: "imap", uid: 2 }) },
+      { accountId: config.accountId, postreeveId: current.id, version: 2, ref: expect.objectContaining({ kind: "imap", uid: 2 }) },
     ]);
     expect(draftsMailbox.messages.get(1)?.flags).toContain("\\Deleted");
     expect(draftsMailbox.messages.has(900)).toBe(true);
@@ -473,7 +516,7 @@ describe("Bun IMAP compatibility", () => {
     const retried = await provider.updateDraft(config.accountId, current, firstRef);
     expect(retried).toMatchObject({ kind: "imap", uid: 3 });
     expect(await provider.listDrafts(config.accountId)).toEqual([
-      { postreeveId: current.id, version: 2, ref: retried },
+      { accountId: config.accountId, postreeveId: current.id, version: 2, ref: retried },
     ]);
     expect([...draftsMailbox.messages.keys()]).toEqual([900, 3]);
     expect(state.messageDeletes.flatMap(({ uids }) => uids)).toEqual([1, 2, 1]);
@@ -490,7 +533,7 @@ describe("Bun IMAP compatibility", () => {
     const current = providerDraft(2);
     await expect(provider.updateDraft(config.accountId, current, firstRef)).resolves.toMatchObject({ kind: "imap", uid: 2 });
     expect(await provider.listDrafts(config.accountId)).toEqual([
-      { postreeveId: current.id, version: 2, ref: expect.objectContaining({ kind: "imap", uid: 2 }) },
+      { accountId: config.accountId, postreeveId: current.id, version: 2, ref: expect.objectContaining({ kind: "imap", uid: 2 }) },
     ]);
   });
 
@@ -556,7 +599,7 @@ describe("Bun IMAP compatibility", () => {
     if (repaired.mirror.status !== "synced") throw new Error("Expected repaired IMAP mirror");
     expect(repaired).toMatchObject({ version: 2, body: "Authoritative version two", mirror: { status: "synced", mirroredVersion: 2 } });
     expect(await provider.listDrafts(config.accountId)).toEqual([
-      { postreeveId: repaired.id, version: 2, ref: repaired.mirror.ref },
+      { accountId: config.accountId, postreeveId: repaired.id, version: 2, ref: repaired.mirror.ref },
     ]);
     store.close();
   });
@@ -928,7 +971,11 @@ class FakeImapClient implements ImapClient {
       flags: new Set(flags),
       internalDate: idate ? new Date(idate) : new Date(),
       source,
-      headers: selectedHeaders(source, ["X-Postreeve-Draft-ID", "X-Postreeve-Draft-Version"]),
+      headers: selectedHeaders(source, [
+        "X-Postreeve-Draft-Account-ID",
+        "X-Postreeve-Draft-ID",
+        "X-Postreeve-Draft-Version",
+      ]),
     });
     if (this.#state.ambiguousAppendFailures > 0) {
       this.#state.ambiguousAppendFailures -= 1;
