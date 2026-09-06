@@ -114,6 +114,7 @@ describe("durable uploaded draft files", () => {
         return stored;
       };
       await expect(queue.uploadFile(draft, attachment.id, selected, upload)).rejects.toThrow("Response lost");
+      await expect(queue.save({ ...draft, body: "Edited after upload response was lost" })).rejects.toThrow("version conflict");
       const stored = await queue.uploadFile({ ...draft, body: "Edited after upload response was lost" }, attachment.id, selected, upload);
       expect(stored.version).toBe(3);
       expect(stored.body).toBe("Edited after upload response was lost");
@@ -132,12 +133,52 @@ describe("durable uploaded draft files", () => {
         await harness.service.uploadDraftFile(accountId, id, version, attachment);
         throw new Error("Response lost");
       })).rejects.toThrow("Response lost");
+      await expect(queue.save({ ...draft, body: "Keep this later edit" })).rejects.toThrow("version conflict");
       const saved = await queue.cancelUpload({ ...draft, body: "Keep this later edit" }, attachment.id, (accountId, id) => harness.service.getDraft(accountId, id));
       expect(saved.body).toBe("Keep this later edit");
       expect(saved.attachments).toEqual([]);
       await expect(harness.service.downloadDraftFile(draft.accountId, draft.id, attachment.id)).rejects.toThrow();
     } finally { harness.store.close(); }
   });
+
+  for (const action of ["retry", "remove"] as const) {
+    for (const autosave of [false, true]) test(`recovers a pre-commit upload failure ${autosave ? "after" : "before"} acknowledged local autosave: ${action}`, async () => {
+      const harness = await createEmptyTestHarness();
+      try {
+        const draft = await createDraft(harness);
+        const queue = new DraftSaveQueue(draft.accountId, draft, (input) => harness.service.createDraft(input), (accountId, id, input) => harness.service.updateDraft(accountId, id, input));
+        const attachment = file();
+        const selected = new File([binary], attachment.name, { type: attachment.type });
+        await expect(queue.uploadFile(draft, attachment.id, selected, async () => { throw new Error("Offline before upload"); })).rejects.toThrow("Offline");
+        const edited = { ...draft, body: "Acknowledged local autosave" };
+        if (autosave) await queue.save(edited);
+        const result = action === "retry"
+          ? await queue.uploadFile(edited, attachment.id, selected, (accountId, id, version) => harness.service.uploadDraftFile(accountId, id, version, attachment))
+          : await queue.cancelUpload(edited, attachment.id, (accountId, id) => harness.service.getDraft(accountId, id));
+        expect(result.body).toBe(edited.body);
+        expect(result.attachments).toHaveLength(action === "retry" ? 1 : 0);
+        expect(queue.isDirty(result)).toBe(false);
+      } finally { harness.store.close(); }
+    });
+
+    test(`does not adopt another client's edit during pending upload ${action}`, async () => {
+      const harness = await createEmptyTestHarness();
+      try {
+        const draft = await createDraft(harness);
+        const queue = new DraftSaveQueue(draft.accountId, draft, (input) => harness.service.createDraft(input), (accountId, id, input) => harness.service.updateDraft(accountId, id, input));
+        const attachment = file();
+        const selected = new File([binary], attachment.name, { type: attachment.type });
+        await expect(queue.uploadFile(draft, attachment.id, selected, async () => { throw new Error("Offline before upload"); })).rejects.toThrow("Offline");
+        const external = await harness.service.updateDraft(draft.accountId, draft.id, { ...draft, body: "Other client's winning content" });
+        const result = action === "retry"
+          ? queue.uploadFile({ ...draft, body: "My local edit" }, attachment.id, selected, (accountId, id, version) => harness.service.uploadDraftFile(accountId, id, version, attachment))
+          : queue.cancelUpload({ ...draft, body: "My local edit" }, attachment.id, (accountId, id) => harness.service.getDraft(accountId, id));
+        await expect(result).rejects.toThrow();
+        expect(queue.current?.body).toBe(draft.body);
+        expect((await harness.service.getDraft(draft.accountId, draft.id)).body).toBe(external.body);
+      } finally { harness.store.close(); }
+    });
+  }
 
   test("preserves long valid outgoing names through storage and MIME", async () => {
     const harness = await createEmptyTestHarness();

@@ -3,6 +3,7 @@ import {
   sendMessageInputSchema,
   sendReceiptSchema,
   type CreateAccountInput,
+  type Account,
   type Draft,
   type Folder,
   type MessageDetail,
@@ -88,6 +89,7 @@ interface TestHarnessOptions {
   onDraftRemove?: (draftId: string) => void | Promise<void>;
   draftRemoveFailure?: () => Error | undefined;
   providerDraftState?: Map<string, ProviderDraft>;
+  senderForAccount?: (account: Account) => MailSender;
   providerForAccount?: (accountId: string) => MailProvider | undefined;
   downloadAttachment?: (
     accountId: string,
@@ -147,6 +149,8 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
     },
     (account, credentials) => {
       connections.push(structuredClone(credentials));
+      const custom = options.senderForAccount?.(account);
+      if (custom) return custom;
       return new TestMailSender(account.id, async (input, receipt, context) => {
         sent.push(structuredClone(input));
         sendContexts.push(context ? structuredClone(context) : undefined);

@@ -1,3 +1,6 @@
+import { createServer } from "node:net";
+import { MailSendPreDispatchError } from "../src/server/mail/sender";
+import { createEmptyTestHarness, testAccountInput } from "./support/test-mail";
 import { simpleParser } from "mailparser";
 import { describe, expect, spyOn, test } from "bun:test";
 import type { SendMailOptions } from "nodemailer";
@@ -195,3 +198,85 @@ function messageInput(): SendMessageInput {
     text: "The plain-text body.",
   };
 }
+
+test("actual SMTP recipient refusal is retryable while a lost DATA response remains uncertain", async () => {
+  const sockets = new Set<import("node:net").Socket>();
+  let behavior: "reject" | "lose-data-response" = "reject";
+  let dataCommands = 0;
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+    socket.on("error", () => undefined);
+    socket.setEncoding("utf8");
+    socket.write("220 localhost synthetic mail\r\n");
+    let pending = "";
+    let readingMessage = false;
+    socket.on("data", (chunk: string) => {
+      pending += chunk;
+      for (;;) {
+        const end = pending.indexOf("\n");
+        if (end < 0) break;
+        const line = pending.slice(0, end).replace(/\r$/, "");
+        pending = pending.slice(end + 1);
+        if (readingMessage) {
+          if (line === ".") {
+            readingMessage = false;
+            socket.destroy();
+          }
+        } else if (line.startsWith("EHLO")) {
+          socket.write("250-localhost\r\n250 AUTH PLAIN\r\n");
+        } else if (line.startsWith("AUTH")) {
+          socket.write("235 authenticated\r\n");
+        } else if (line.startsWith("MAIL FROM")) {
+          socket.write("250 sender accepted\r\n");
+        } else if (line.startsWith("RCPT TO")) {
+          socket.write(behavior === "reject" ? "550 recipient rejected\r\n" : "250 recipient accepted\r\n");
+        } else if (line === "DATA") {
+          dataCommands += 1;
+          readingMessage = true;
+          socket.write("354 send content\r\n");
+        } else if (line === "QUIT") {
+          socket.end("221 closing\r\n");
+        } else {
+          socket.write("250 ok\r\n");
+        }
+      }
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing synthetic SMTP port");
+  const harness = await createEmptyTestHarness({ senderForAccount: (account) => new SmtpMailSender({
+    ...smtpConfig, accountId: account.id, fromAddress: account.email,
+    host: "127.0.0.1", port: address.port, secure: false,
+  }) });
+  try {
+    const account = await harness.service.createAccount(testAccountInput());
+    let draft = await harness.service.createDraft({
+      accountId: account.id, mode: "new", to: "recipient@example.test", cc: "", bcc: "",
+      subject: "Synthetic refusal", body: "Retain this draft and file",
+      identity: { name: "Sender", address: account.email }, attachments: [],
+    });
+    const fileId = crypto.randomUUID();
+    const bytes = Buffer.from([0, 255, 128]);
+    draft = await harness.service.uploadDraftFile(account.id, draft.id, draft.version, { id: fileId, name: "file.bin", type: "application/octet-stream", content: bytes });
+    await expect(harness.service.sendDraft(account.id, draft.id, { version: draft.version })).rejects.toBeInstanceOf(MailSendPreDispatchError);
+    expect(dataCommands).toBe(0);
+    draft = await harness.service.getDraft(account.id, draft.id);
+    expect(draft.delivery.status).toBe("failed");
+    expect((await harness.service.downloadDraftFile(account.id, draft.id, fileId)).content).toEqual(bytes);
+    behavior = "lose-data-response";
+    await expect(harness.service.sendDraft(account.id, draft.id, { version: draft.version })).rejects.toThrow();
+    expect(dataCommands).toBe(1);
+    draft = await harness.service.getDraft(account.id, draft.id);
+    expect(draft.delivery.status).toBe("uncertain");
+    expect((await harness.service.downloadDraftFile(account.id, draft.id, fileId)).content).toEqual(bytes);
+  } finally {
+    harness.store.close();
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

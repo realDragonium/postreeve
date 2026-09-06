@@ -102,13 +102,22 @@ export class SmtpMailSender implements MailSender {
     } catch (error) {
       throw new MailSendPreDispatchError(error instanceof Error ? error.message : "Mail preparation failed", { cause: error });
     }
-    const result = await this.#transport.sendMail({
-      raw,
-      envelope: { from: this.#config.fromAddress, to: [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address) },
-      messageId,
-      disableFileAccess: true,
-      disableUrlAccess: true,
-    });
+    let result: SmtpDeliveryResult;
+    try {
+      result = await this.#transport.sendMail({
+        raw,
+        envelope: { from: this.#config.fromAddress, to: [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address) },
+        messageId,
+        disableFileAccess: true,
+        disableUrlAccess: true,
+      });
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "EENVELOPE"
+        && "command" in error && (error.command === "MAIL FROM" || error.command === "RCPT TO")) {
+        throw new MailSendPreDispatchError(error.message, { cause: error });
+      }
+      throw error;
+    }
 
     return sendReceiptSchema.parse({
       id: crypto.randomUUID(),

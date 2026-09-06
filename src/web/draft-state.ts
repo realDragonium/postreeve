@@ -62,7 +62,7 @@ export class DraftSaveQueue {
         if (!sameDraftContent(stored, content)) {
           throw new DraftRecoveryConflictError("Draft changed in another client while it was being saved");
         }
-        this.#draft = stored;
+        this.#adoptSavedDraft(stored);
         return stored;
       }
 
@@ -81,9 +81,9 @@ export class DraftSaveQueue {
       if (!sameDraftContent(reconciled, content)) {
         throw new DraftRecoveryConflictError("Draft changed in another client while its first save was being recovered");
       }
-      this.#draft = reconciled;
+      this.#adoptSavedDraft(reconciled);
       this.#submittedCreateContent.clear();
-      return this.#draft;
+      return reconciled;
     });
     this.#tail = operation.then(() => undefined, () => undefined);
     return operation;
@@ -158,6 +158,18 @@ export class DraftSaveQueue {
     });
     this.#tail = operation.then(() => undefined, () => undefined);
     return operation;
+  }
+
+  #adoptSavedDraft(stored: Draft): void {
+    const previous = this.#draft;
+    if (previous) {
+      for (const [id, base] of this.#uploadBases) {
+        if (base.version === previous.version && sameDraftContent(base, previous)) {
+          this.#uploadBases.set(id, stored);
+        }
+      }
+    }
+    this.#draft = stored;
   }
 
   #assertBoundary(draft: Draft): void {
