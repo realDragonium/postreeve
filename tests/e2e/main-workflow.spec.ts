@@ -680,7 +680,7 @@ test("refetches backend drafts on reopen and leaves unchanged structured drafts 
     bcc: [],
     subject: "Shared structured draft",
     body: "Original body",
-    identity: { name: "Exact Identity", address: account.email },
+    identity: { name: "Saved Alternate", address: "alternate@example.com" },
     attachments: [{ name: "legacy.txt", size: 42, type: "text/plain" }],
     delivery: { status: "editable" },
     mirror: {
@@ -713,6 +713,9 @@ test("refetches backend drafts on reopen and leaves unchanged structured drafts 
   await page.getByRole("button", { name: /Drafts/ }).click();
   await expect.poll(() => fixture.listRequests).toBeGreaterThan(initialListRequests);
   await page.getByText(saved.subject, { exact: true }).click();
+  await expect(page.getByLabel("From identity")).toHaveValue(saved.identity.address);
+  await expect(page.getByLabel("From identity").locator("option:checked"))
+    .toHaveText("Saved Alternate · alternate@example.com");
   await page.clock.fastForward(800);
   expect(fixture.updates).toEqual([]);
   await expect(page.getByText("Attachment delivery is not supported yet.")).toBeVisible();

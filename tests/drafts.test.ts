@@ -22,6 +22,67 @@ afterEach(() => {
 });
 
 describe("server-authoritative drafts", () => {
+  test("keeps the same account and client draft identity independent across trusted tenants", async () => {
+    const path = temporaryStore();
+    const providerDraftState = new Map<string, ProviderDraft>();
+    const first = await createEmptyTestHarness({
+      storePath: path,
+      tenantId: "tenant-a",
+      providerDraftState,
+    });
+    const account = await first.service.createAccount(testAccountInput());
+    const second = await createEmptyTestHarness({
+      storePath: path,
+      tenantId: "tenant-b",
+      providerDraftState,
+    });
+    const clientId = "shared-tenant-client-id";
+
+    const firstDraft = await first.service.createDraft({
+      ...draftInput(account), clientId, body: "Tenant A body",
+    });
+    const secondDraft = await second.service.createDraft({
+      ...draftInput(account), clientId, body: "Tenant B body",
+    });
+    if (firstDraft.mirror.status !== "synced" || secondDraft.mirror.status !== "synced") {
+      throw new Error("Expected both tenant drafts to be mirrored");
+    }
+    expect(firstDraft.id).toBe(secondDraft.id);
+    expect(firstDraft.mirror.ref).not.toEqual(secondDraft.mirror.ref);
+    expect((await first.service.getDraft(account.id, clientId)).body).toBe("Tenant A body");
+    expect((await second.service.getDraft(account.id, clientId)).body).toBe("Tenant B body");
+    expect(first.draftMirrorAttempts.at(-1)?.body).toBe("Tenant A body");
+    expect(second.draftMirrorAttempts.at(-1)?.body).toBe("Tenant B body");
+    expect(await first.providerDrafts(account.id)).toEqual([{
+      tenantId: "tenant-a", accountId: account.id, postreeveId: clientId, version: 1, ref: firstDraft.mirror.ref,
+    }]);
+    expect(await second.providerDrafts(account.id)).toEqual([{
+      tenantId: "tenant-b", accountId: account.id, postreeveId: clientId, version: 1, ref: secondDraft.mirror.ref,
+    }]);
+
+    const updated = await first.service.updateDraft(
+      account.id,
+      firstDraft.id,
+      updateInput(firstDraft, { body: "Tenant A updated" }),
+    );
+    expect((await second.service.getDraft(account.id, secondDraft.id)).body).toBe("Tenant B body");
+    expect(first.draftMirrorAttempts.at(-1)?.body).toBe("Tenant A updated");
+    expect(await first.providerDrafts(account.id)).toEqual([{
+      tenantId: "tenant-a", accountId: account.id, postreeveId: clientId, version: 2, ref: firstDraft.mirror.ref,
+    }]);
+    expect((await second.providerDrafts(account.id))[0]).toMatchObject({
+      tenantId: "tenant-b", version: 1, ref: secondDraft.mirror.ref,
+    });
+
+    await first.service.removeDraft(account.id, updated.id, { version: updated.version });
+    expect(await first.service.listDrafts(account.id)).toEqual([]);
+    expect(await first.providerDrafts(account.id)).toEqual([]);
+    expect(await second.service.listDrafts(account.id)).toEqual([secondDraft]);
+    expect(await second.providerDrafts(account.id)).toHaveLength(1);
+    second.store.close();
+    first.store.close();
+  });
+
   test("persists the complete editable contract across reopen and scopes it by tenant and account", async () => {
     const path = temporaryStore();
     const first = await createEmptyTestHarness({ storePath: path });
@@ -215,7 +276,7 @@ describe("server-authoritative drafts", () => {
     expect(saved).toMatchObject({ id: "lost-create-draft", version: 2, body: "Newest local body" });
     expect(await harness.service.listDrafts(account.id)).toEqual([saved]);
     expect(await harness.providerDrafts(account.id)).toEqual([
-      { accountId: account.id, postreeveId: saved.id, version: saved.version, ref: saved.mirror.ref },
+      { tenantId: "test-tenant", accountId: account.id, postreeveId: saved.id, version: saved.version, ref: saved.mirror.ref },
     ]);
     expect(harness.draftMirrorAttempts.map(({ version }) => version)).toEqual([1, 1, 2]);
     harness.store.close();
@@ -284,7 +345,7 @@ describe("server-authoritative drafts", () => {
     expect(await first.store.getDraft("test-tenant", independentAccount.id, independent.id)).toEqual(independent);
     expect(await first.providerDrafts(deletedAccount.id)).toEqual([]);
     expect(await first.providerDrafts(independentAccount.id)).toEqual([
-      { accountId: independentAccount.id, postreeveId: independent.id, version: independent.version, ref: independent.mirror.ref },
+      { tenantId: "test-tenant", accountId: independentAccount.id, postreeveId: independent.id, version: independent.version, ref: independent.mirror.ref },
     ]);
     expect(first.draftMirrorAttempts.filter(({ accountId }) => accountId === deletedAccount.id).map(({ version }) => version))
       .toEqual([1]);
@@ -358,7 +419,7 @@ describe("server-authoritative drafts", () => {
     expect(await first.service.getDraft(account.id, otherEdit.id)).toEqual(otherEdit);
     expect(await second.service.getDraft(account.id, otherEdit.id)).toEqual(otherEdit);
     expect(await first.providerDrafts(account.id)).toEqual([
-      { accountId: account.id, postreeveId: otherEdit.id, version: otherEdit.version, ref: otherEdit.mirror.ref },
+      { tenantId: "test-tenant", accountId: account.id, postreeveId: otherEdit.id, version: otherEdit.version, ref: otherEdit.mirror.ref },
     ]);
     second.store.close();
     first.store.close();
@@ -438,7 +499,7 @@ describe("server-authoritative drafts", () => {
     expect(await first.service.getDraft(account.id, otherEdit.id)).toEqual(otherEdit);
     expect(await second.service.getDraft(account.id, otherEdit.id)).toEqual(otherEdit);
     expect(await first.providerDrafts(account.id)).toEqual([
-      { accountId: account.id, postreeveId: otherEdit.id, version: otherEdit.version, ref: otherEdit.mirror.ref },
+      { tenantId: "test-tenant", accountId: account.id, postreeveId: otherEdit.id, version: otherEdit.version, ref: otherEdit.mirror.ref },
     ]);
     expect(first.sendAttempts).toHaveLength(1);
     second.store.close();
@@ -540,8 +601,8 @@ describe("server-authoritative drafts", () => {
     await disconnecting;
 
     expect(removedDrafts).toEqual([]);
-    expect(await provider.listDrafts(account.id)).toEqual([
-      { accountId: account.id, postreeveId: created.id, version: created.version, ref: created.mirror.ref },
+    expect(await provider.listDrafts({ tenantId: "test-tenant", accountId: account.id })).toEqual([
+      { tenantId: "test-tenant", accountId: account.id, postreeveId: created.id, version: created.version, ref: created.mirror.ref },
     ]);
     expect(await first.store.getAccount(account.id)).toBeNull();
     expect(await second.store.getDraft("test-tenant", account.id, created.id)).toBeNull();
@@ -574,7 +635,7 @@ describe("server-authoritative drafts", () => {
     expect(removedDrafts).toEqual([]);
     expect(physicalDrafts.size).toBe(1);
     expect(await first.providerDrafts(disconnectedAccount.id)).toEqual([
-      { accountId: disconnectedAccount.id, postreeveId: created.id, version: created.version, ref: created.mirror.ref },
+      { tenantId: "test-tenant", accountId: disconnectedAccount.id, postreeveId: created.id, version: created.version, ref: created.mirror.ref },
     ]);
     expect(await second.providerDrafts(reconnectedAccount.id)).toEqual([]);
     second.store.close();
@@ -599,7 +660,7 @@ describe("server-authoritative drafts", () => {
     failRemoval = false;
     await harness.service.removeAccount(account.id);
     expect(removedDrafts).toEqual([draft.id]);
-    expect(await provider.listDrafts(account.id)).toHaveLength(1);
+    expect(await provider.listDrafts({ tenantId: "test-tenant", accountId: account.id })).toHaveLength(1);
     expect(await harness.store.getAccount(account.id)).toBeNull();
     expect(await harness.store.getDraft("test-tenant", account.id, draft.id)).toBeNull();
     harness.store.close();
@@ -1254,7 +1315,7 @@ describe("server-authoritative drafts", () => {
 
     expect(completed).toMatchObject({ version: updated.version, body: "Winning body", mirror: { status: "synced", mirroredVersion: 2 } });
     expect(await harness.providerDrafts(account.id)).toEqual([
-      { accountId: account.id, postreeveId: stored.id, version: 2, ref: expect.objectContaining({ kind: "imap" }) },
+      { tenantId: "test-tenant", accountId: account.id, postreeveId: stored.id, version: 2, ref: expect.objectContaining({ kind: "imap" }) },
     ]);
     harness.store.close();
   });
@@ -1343,7 +1404,7 @@ describe("server-authoritative drafts", () => {
     const repaired = await harness.service.getDraft(account.id, created.id);
     expect(repaired).toMatchObject({ body: "Authoritative body", version: 1, mirror: { status: "synced", mirroredVersion: 1 } });
     expect(await harness.providerDrafts(account.id)).toEqual([
-      { accountId: account.id, postreeveId: created.id, version: 1, ref: expect.objectContaining({ kind: "imap" }) },
+      { tenantId: "test-tenant", accountId: account.id, postreeveId: created.id, version: 1, ref: expect.objectContaining({ kind: "imap" }) },
     ]);
     harness.store.close();
   });
@@ -1360,7 +1421,7 @@ describe("server-authoritative drafts", () => {
     await expect(harness.service.removeDraft(account.id, created.id, { version: created.version }))
       .rejects.toThrow("fixture local deletion failure");
     expect(await harness.providerDrafts(account.id)).toEqual([
-      { accountId: account.id, postreeveId: created.id, version: created.version, ref: expect.objectContaining({ kind: "imap" }) },
+      { tenantId: "test-tenant", accountId: account.id, postreeveId: created.id, version: created.version, ref: expect.objectContaining({ kind: "imap" }) },
     ]);
     expect(await harness.store.getDraft("test-tenant", account.id, created.id)).toMatchObject({ body: "Keep authoritative content" });
     harness.store.deleteDraft = remove;

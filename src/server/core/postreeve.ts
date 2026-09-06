@@ -53,6 +53,7 @@ import {
   type ProviderLocationMove,
   type ProviderMessageSummary,
   type ProviderDraft,
+  type ProviderDraftScope,
 } from "../mail/provider";
 import {
   MailSendPreDispatchError,
@@ -436,7 +437,7 @@ export class PostreeveService {
     if (draft.version !== version) throw new DraftConflictError();
     if (draft.delivery.status === "sending") throw new DraftConflictError("Draft cannot be removed while delivery is sending");
     try {
-      await this.#providers.forAccount(accountId).removeDraft(accountId, id, draft.mirror.ref);
+      await this.#providers.forAccount(accountId).removeDraft(this.#draftScope(accountId), id, draft.mirror.ref);
     } catch (error) {
       await this.#store.failDraftMirror(this.#context.tenantId, accountId, id, version, errorMessage(error));
       throw error;
@@ -612,8 +613,8 @@ export class PostreeveService {
     let ref: ProviderDraftRef;
     try {
       ref = draft.mirror.ref
-        ? await provider.updateDraft(draft.accountId, draft, draft.mirror.ref)
-        : await provider.createDraft(draft.accountId, draft);
+        ? await provider.updateDraft(this.#draftScope(draft.accountId), draft, draft.mirror.ref)
+        : await provider.createDraft(this.#draftScope(draft.accountId), draft);
     } catch (error) {
       const message = errorMessage(error);
       try {
@@ -661,7 +662,8 @@ export class PostreeveService {
   async #repairStaleMirrorLocked(completed: Draft, ref: ProviderDraftRef | undefined): Promise<Draft> {
     const current = await this.#store.getDraft(this.#context.tenantId, completed.accountId, completed.id);
     if (!current) {
-      await this.#providers.forAccount(completed.accountId).removeDraft(completed.accountId, completed.id, ref);
+      await this.#providers.forAccount(completed.accountId)
+        .removeDraft(this.#draftScope(completed.accountId), completed.id, ref);
       return completed;
     }
     if (current.delivery.status === "sent") {
@@ -682,8 +684,8 @@ export class PostreeveService {
     const allLocal = await this.#store.listDrafts(this.#context.tenantId, accountId);
     let providerDrafts: ProviderDraft[];
     try {
-      providerDrafts = (await this.#providers.forAccount(accountId).listDrafts(accountId))
-        .filter((draft) => draft.accountId === accountId);
+      providerDrafts = (await this.#providers.forAccount(accountId).listDrafts(this.#draftScope(accountId)))
+        .filter((draft) => draft.tenantId === this.#context.tenantId && draft.accountId === accountId);
     } catch {
       return;
     }
@@ -712,7 +714,8 @@ export class PostreeveService {
 
   async #cleanupProviderDraftLocked(draft: Draft): Promise<string | undefined> {
     try {
-      await this.#providers.forAccount(draft.accountId).removeDraft(draft.accountId, draft.id, draft.mirror.ref);
+      await this.#providers.forAccount(draft.accountId)
+        .removeDraft(this.#draftScope(draft.accountId), draft.id, draft.mirror.ref);
       return undefined;
     } catch (error) {
       const message = `Message delivery succeeded, but the provider draft could not be removed: ${errorMessage(error)}`;
@@ -738,6 +741,10 @@ export class PostreeveService {
       draftId,
     ]);
     return serializeDraftLifecycle(accountKey, () => serializeDraftLifecycle(draftKey, operation));
+  }
+
+  #draftScope(accountId: string): ProviderDraftScope {
+    return { tenantId: this.#context.tenantId, accountId };
   }
 
   async #prepareMessageSend(input: SendMessageInput): Promise<PreparedMessageSend> {

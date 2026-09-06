@@ -8,14 +8,16 @@ import {
   type Draft,
   type DraftRecipientField,
 } from "../../shared/contracts";
+import type { ProviderDraftScope } from "./provider";
 
 export interface ProviderDraftMarkers {
+  readonly tenantId: string;
   readonly accountId: string;
   readonly postreeveId: string;
   readonly version: number;
 }
 
-export async function buildProviderDraftMessage(draft: Draft): Promise<Buffer> {
+export async function buildProviderDraftMessage(scope: ProviderDraftScope, draft: Draft): Promise<Buffer> {
   const message = new MailComposer({
     from: draft.identity,
     ...recipientOption("to", draft.to),
@@ -24,9 +26,10 @@ export async function buildProviderDraftMessage(draft: Draft): Promise<Buffer> {
     subject: sanitizeHeader(draft.subject),
     text: "Postreeve draft body",
     date: new Date(draft.updatedAt),
-    messageId: `<postreeve-draft-${boundedId(`${draft.accountId}\0${draft.id}`)}-${draft.version}@postreeve.local>`,
+    messageId: `<postreeve-draft-${boundedId(`${scope.tenantId}\0${scope.accountId}\0${draft.id}`)}-${draft.version}@postreeve.local>`,
     headers: [
-      { key: "X-Postreeve-Draft-Account-ID", value: foldableEncoded(draft.accountId) },
+      { key: "X-Postreeve-Draft-Tenant-ID", value: foldableEncoded(scope.tenantId) },
+      { key: "X-Postreeve-Draft-Account-ID", value: foldableEncoded(scope.accountId) },
       { key: "X-Postreeve-Draft-ID", value: foldableEncoded(draft.id) },
       { key: "X-Postreeve-Draft-Version", value: String(draft.version) },
       { key: "X-Postreeve-Draft-Mode", value: draft.mode },
@@ -50,19 +53,24 @@ export async function buildProviderDraftMessage(draft: Draft): Promise<Buffer> {
 
 export function parseProviderDraftMarkers(source: Buffer | string): ProviderDraftMarkers | null {
   const headers = parseHeaders(source);
+  const encodedTenantId = headers.get("x-postreeve-draft-tenant-id")?.replace(/\s/g, "");
   const encodedAccountId = headers.get("x-postreeve-draft-account-id")?.replace(/\s/g, "");
   const encodedId = headers.get("x-postreeve-draft-id")?.replace(/\s/g, "");
   const rawVersion = headers.get("x-postreeve-draft-version");
-  if (!encodedAccountId || !encodedId
+  if (!encodedTenantId || !encodedAccountId || !encodedId
+    || !/^[A-Za-z0-9_-]+$/.test(encodedTenantId)
     || !/^[A-Za-z0-9_-]+$/.test(encodedAccountId)
     || !/^[A-Za-z0-9_-]+$/.test(encodedId)
     || !rawVersion
     || !/^\d+$/.test(rawVersion)) return null;
   try {
+    const tenantId = Buffer.from(encodedTenantId, "base64url").toString("utf8");
     const accountId = accountIdSchema.parse(Buffer.from(encodedAccountId, "base64url").toString("utf8"));
     const postreeveId = draftIdSchema.parse(Buffer.from(encodedId, "base64url").toString("utf8"));
     const version = Number(rawVersion);
-    return Number.isSafeInteger(version) && version > 0 ? { accountId, postreeveId, version } : null;
+    return tenantId.trim() && Number.isSafeInteger(version) && version > 0
+      ? { tenantId, accountId, postreeveId, version }
+      : null;
   } catch {
     return null;
   }

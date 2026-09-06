@@ -22,6 +22,7 @@ import {
   type ProviderMessageDetail,
   type ProviderLocationMove,
   type ProviderDraft,
+  type ProviderDraftScope,
 } from "../../src/server/mail/provider";
 import {
   MailSenderRegistry,
@@ -57,6 +58,7 @@ export function testAccountInput(name = "Work", email = "person@example.test"): 
 }
 
 interface TestHarnessOptions {
+  tenantId?: string;
   storePath?: string;
   imapFailure?: Error;
   smtpFailure?: Error;
@@ -90,6 +92,7 @@ export async function createTestHarness(options: TestHarnessOptions = {}) {
 }
 
 export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
+  const tenantId = options.tenantId ?? "test-tenant";
   const store = new Store(options.storePath ?? ":memory:");
   const sent: SendMessageInput[] = [];
   const sendAttempts: SendMessageInput[] = [];
@@ -99,7 +102,7 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
   const providers = new Map<string, MailProvider>();
   const service = new PostreeveService(
     store,
-    { tenantId: "test-tenant" },
+    { tenantId },
     new MailProviderRegistry(),
     new MailSenderRegistry(),
     new CredentialVault(testMasterKey),
@@ -154,11 +157,11 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
     connections,
     draftMirrorAttempts,
     providerForAccount: (accountId: string): MailProvider | undefined => providers.get(accountId),
-    providerDrafts: async (accountId: string) => providers.get(accountId)?.listDrafts(accountId) ?? [],
+    providerDrafts: async (accountId: string) => providers.get(accountId)?.listDrafts({ tenantId, accountId }) ?? [],
     replaceProviderDraftVersion: (accountId: string, id: string, version: number) => {
       const provider = providers.get(accountId);
       if (!(provider instanceof TestMailProvider)) throw new Error("Test provider is missing");
-      provider.replaceDraftVersion(id, version);
+      provider.replaceDraftVersion(tenantId, id, version);
     },
   };
 }
@@ -174,7 +177,6 @@ class TestMailProvider implements MailProvider {
     ["Drafts", { name: "Drafts", specialUse: "drafts" }],
   ]);
   readonly #drafts: Map<string, ProviderDraft>;
-  #nextDraftUid = 1;
   readonly #verificationFailure: Error | undefined;
   readonly #moveChangesUid: boolean;
   readonly #readOverrides: Partial<ProviderMessageDetail>;
@@ -256,31 +258,32 @@ class TestMailProvider implements MailProvider {
     this.#folders.delete(path);
   }
 
-  async createDraft(accountId: string, draft: Draft): Promise<ProviderDraftRef> {
-    this.#assertAccount(accountId);
-    return this.#storeDraft(draft);
+  async createDraft(scope: ProviderDraftScope, draft: Draft): Promise<ProviderDraftRef> {
+    this.#assertDraftScope(scope, draft);
+    return this.#storeDraft(scope, draft);
   }
 
-  async updateDraft(accountId: string, draft: Draft, ref: ProviderDraftRef): Promise<ProviderDraftRef> {
-    this.#assertAccount(accountId);
+  async updateDraft(scope: ProviderDraftScope, draft: Draft, ref: ProviderDraftRef): Promise<ProviderDraftRef> {
+    this.#assertDraftScope(scope, draft);
     if (ref.kind !== "imap") throw new Error("Test IMAP provider received another provider's reference");
-    return this.#storeDraft(draft, ref.uid);
+    const current = this.#drafts.get(draftStateKey(scope, draft.id));
+    return this.#storeDraft(scope, draft, current?.ref.kind === "imap" ? current.ref.uid : undefined);
   }
 
-  async listDrafts(accountId: string): Promise<ProviderDraft[]> {
-    this.#assertAccount(accountId);
+  async listDrafts(scope: ProviderDraftScope): Promise<ProviderDraft[]> {
+    this.#assertDraftScope(scope);
     return [...this.#drafts.values()]
-      .filter((draft) => draft.accountId === accountId)
+      .filter((draft) => draft.tenantId === scope.tenantId && draft.accountId === scope.accountId)
       .map((draft) => structuredClone(draft));
   }
 
-  async removeDraft(accountId: string, postreeveId: string, ref?: ProviderDraftRef): Promise<void> {
-    this.#assertAccount(accountId);
+  async removeDraft(scope: ProviderDraftScope, postreeveId: string, ref?: ProviderDraftRef): Promise<void> {
+    this.#assertDraftScope(scope);
     if (ref?.kind === "gmail") throw new Error("Test IMAP provider received another provider's reference");
     await this.#onDraftRemove?.(postreeveId);
     const failure = this.#draftRemoveFailure?.();
     if (failure) throw failure;
-    this.#drafts.delete(draftStateKey(accountId, postreeveId));
+    this.#drafts.delete(draftStateKey(scope, postreeveId));
   }
 
   async listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]> {
@@ -383,8 +386,8 @@ class TestMailProvider implements MailProvider {
     });
   }
 
-  replaceDraftVersion(id: string, version: number): void {
-    const key = draftStateKey(this.#accountId, id);
+  replaceDraftVersion(tenantId: string, id: string, version: number): void {
+    const key = draftStateKey({ tenantId, accountId: this.#accountId }, id);
     const draft = this.#drafts.get(key);
     if (!draft) throw new Error("Test provider draft is missing");
     this.#drafts.set(key, { ...draft, version });
@@ -406,10 +409,18 @@ class TestMailProvider implements MailProvider {
     if (accountId !== this.#accountId) throw new Error("Account isolation violation");
   }
 
-  async #storeDraft(draft: Draft, uid = this.#nextDraftUid++): Promise<ProviderDraftRef> {
+  #assertDraftScope(scope: ProviderDraftScope, draft?: Draft): void {
+    this.#assertAccount(scope.accountId);
+    if (!scope.tenantId.trim()) throw new Error("A tenant ID is required for provider drafts");
+    if (draft) this.#assertAccount(draft.accountId);
+  }
+
+  async #storeDraft(scope: ProviderDraftScope, draft: Draft, existingUid?: number): Promise<ProviderDraftRef> {
     await this.#onDraftMirror(draft);
+    const uid = existingUid ?? Math.max(0, ...[...this.#drafts.values()].flatMap(({ ref }) => ref.kind === "imap" ? [ref.uid] : [])) + 1;
     const ref: ProviderDraftRef = { kind: "imap", mailbox: "Drafts", uidValidity, uid };
-    this.#drafts.set(draftStateKey(draft.accountId, draft.id), {
+    this.#drafts.set(draftStateKey(scope, draft.id), {
+      tenantId: scope.tenantId,
       accountId: draft.accountId,
       postreeveId: draft.id,
       version: draft.version,
@@ -419,8 +430,8 @@ class TestMailProvider implements MailProvider {
   }
 }
 
-function draftStateKey(accountId: string, draftId: string): string {
-  return JSON.stringify([accountId, draftId]);
+function draftStateKey(scope: ProviderDraftScope, draftId: string): string {
+  return JSON.stringify([scope.tenantId, scope.accountId, draftId]);
 }
 
 class TestMailSender implements MailSender {

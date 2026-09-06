@@ -295,6 +295,17 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   const [subject, setSubject] = useState(saved?.subject ?? (source ? effectiveMode === "forward" ? forwardSubject(source.subject) : replySubject(source.subject) : ""));
   const [body, setBody] = useState(saved?.body ?? initialBody);
   const [attachments, setAttachments] = useState<DraftAttachment[]>(saved?.attachments ?? []);
+  const savedIdentityOption: LocalIdentity | undefined = saved
+    && saved.identity.address !== account.email
+    && !identities.some(({ email }) => email === saved.identity.address)
+    ? {
+        id: `saved:${saved.id}`,
+        accountId: account.id,
+        name: saved.identity.name,
+        email: saved.identity.address,
+      }
+    : undefined;
+  const identityOptions = savedIdentityOption ? [savedIdentityOption, ...identities] : identities;
   const [validationError, setValidationError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<SendReceipt | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(saved?.updatedAt ?? null);
@@ -314,7 +325,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   const backendPending = from !== account.email || attachments.length > 0 || (conversationMode && !conversationSource);
 
   function currentDraft(): DraftContent {
-    const selectedIdentity = identities.find((identity) => identity.email === from);
+    const selectedIdentity = identityOptions.find((identity) => identity.email === from);
     return {
       mode: effectiveMode === "draft" ? "new" : effectiveMode,
       ...(conversationSource ? { source: conversationSource } : {}),
@@ -524,7 +535,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     <label className="field"><span className="field-label">From</span>
       <select className="input" aria-label="From identity" value={from} disabled={mutation.isPending} onChange={(event) => { edited.current.from = true; setFrom(event.target.value); }}>
         <option value={account.email}>{account.email}</option>
-        {identities.map((identity) => <option value={identity.email} key={identity.id}>{identity.name} · {identity.email}</option>)}
+        {identityOptions.map((identity) => <option value={identity.email} key={identity.id}>{identity.name} · {identity.email}</option>)}
       </select>
     </label>
     <label className="field"><span className="field-label">To</span><input className="input" autoFocus required aria-label="To" placeholder="person@example.com, team@example.com" value={to} disabled={mutation.isPending} onChange={(event) => { edited.current.to = true; setTo(event.target.value); }} /></label>
