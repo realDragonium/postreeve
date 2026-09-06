@@ -1,34 +1,83 @@
-import type { Draft, DraftRecipientField, OutboundAddress } from "../../shared/contracts";
+import { createHash } from "node:crypto";
+import MailComposer from "nodemailer/lib/mail-composer";
+import {
+  conversationSendSourceSchema,
+  type ConversationSendSource,
+  type Draft,
+  type DraftRecipientField,
+} from "../../shared/contracts";
 
 export interface ProviderDraftMarkers {
   readonly postreeveId: string;
   readonly version: number;
 }
 
-export function buildProviderDraftMessage(draft: Draft): Buffer {
-  const headers = [
-    `From: ${formatAddress(draft.identity)}`,
-    ...recipientHeader("To", draft.to),
-    ...recipientHeader("Cc", draft.cc),
-    ...recipientHeader("Bcc", draft.bcc),
-    `Subject: ${encodedWord(draft.subject)}`,
-    `Date: ${new Date(draft.updatedAt).toUTCString()}`,
-    `Message-ID: <postreeve-draft-${encodedMarker(draft.id)}-${draft.version}@postreeve.local>`,
-    `X-Postreeve-Draft-ID: ${encodedMarker(draft.id)}`,
-    `X-Postreeve-Draft-Version: ${draft.version}`,
-    `X-Postreeve-Draft-Mode: ${draft.mode}`,
-    ...(draft.source ? [`X-Postreeve-Draft-Source: ${encodedMarker(JSON.stringify(draft.source))}`] : []),
-    "MIME-Version: 1.0",
-    "Content-Type: text/plain; charset=utf-8",
+export async function buildProviderDraftMessage(draft: Draft): Promise<Buffer> {
+  const message = new MailComposer({
+    from: draft.identity,
+    ...recipientOption("to", draft.to),
+    ...recipientOption("cc", draft.cc),
+    ...recipientOption("bcc", draft.bcc),
+    subject: sanitizeHeader(draft.subject),
+    text: "Postreeve draft body",
+    date: new Date(draft.updatedAt),
+    messageId: `<postreeve-draft-${boundedId(draft.id)}-${draft.version}@postreeve.local>`,
+    headers: [
+      { key: "X-Postreeve-Draft-ID", value: foldableEncoded(draft.id) },
+      { key: "X-Postreeve-Draft-Version", value: String(draft.version) },
+      { key: "X-Postreeve-Draft-Mode", value: draft.mode },
+      ...(draft.source
+        ? [{ key: "X-Postreeve-Draft-Source", value: foldableEncoded(JSON.stringify(draft.source)) }]
+        : []),
+    ],
+    disableFileAccess: true,
+    disableUrlAccess: true,
+  }).compile();
+  message.keepBcc = true;
+  const composed = (await message.build()).toString("utf8");
+  const separator = composed.indexOf("\r\n\r\n");
+  if (separator < 0) throw new Error("Draft composer did not produce an RFC header block");
+  const headers = composed.slice(0, separator).replace(
+    /^Content-Transfer-Encoding:.*$/im,
     "Content-Transfer-Encoding: base64",
-    "",
-    wrapBase64(Buffer.from(draft.body, "utf8").toString("base64")),
-    "",
-  ];
-  return Buffer.from(headers.join("\r\n"), "utf8");
+  );
+  return Buffer.from(`${headers}\r\n\r\n${wrapBase64(Buffer.from(draft.body, "utf8").toString("base64"))}\r\n`, "utf8");
 }
 
 export function parseProviderDraftMarkers(source: Buffer | string): ProviderDraftMarkers | null {
+  const headers = parseHeaders(source);
+  const encodedId = headers.get("x-postreeve-draft-id")?.replace(/\s/g, "");
+  const rawVersion = headers.get("x-postreeve-draft-version");
+  if (!encodedId || !rawVersion || !/^\d+$/.test(rawVersion)) return null;
+  try {
+    const postreeveId = Buffer.from(encodedId, "base64url").toString("utf8");
+    const version = Number(rawVersion);
+    return postreeveId && Number.isSafeInteger(version) && version > 0 ? { postreeveId, version } : null;
+  } catch {
+    return null;
+  }
+}
+
+export function parseProviderDraftSource(source: Buffer | string): ConversationSendSource | null {
+  const encoded = parseHeaders(source).get("x-postreeve-draft-source")?.replace(/\s/g, "");
+  if (!encoded) return null;
+  try {
+    return conversationSendSourceSchema.parse(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")));
+  } catch {
+    return null;
+  }
+}
+
+function recipientOption(
+  name: "to" | "cc" | "bcc",
+  value: DraftRecipientField,
+): Partial<Record<"to" | "cc" | "bcc", DraftRecipientField>> {
+  if (Array.isArray(value)) return value.length > 0 ? { [name]: value } : {};
+  const sanitized = sanitizeHeader(value);
+  return sanitized ? { [name]: makeFoldable(sanitized) } : {};
+}
+
+function parseHeaders(source: Buffer | string): Map<string, string> {
   const headerBlock = source.toString("utf8").split(/\r?\n\r?\n/, 1)[0] ?? "";
   const headers = new Map<string, string>();
   let current = "";
@@ -42,40 +91,23 @@ export function parseProviderDraftMarkers(source: Buffer | string): ProviderDraf
     current = line.slice(0, separator).trim().toLowerCase();
     headers.set(current, line.slice(separator + 1).trim());
   }
-  const encodedId = headers.get("x-postreeve-draft-id");
-  const rawVersion = headers.get("x-postreeve-draft-version");
-  if (!encodedId || !rawVersion || !/^\d+$/.test(rawVersion)) return null;
-  try {
-    const postreeveId = Buffer.from(encodedId, "base64url").toString("utf8");
-    const version = Number(rawVersion);
-    return postreeveId && Number.isSafeInteger(version) && version > 0 ? { postreeveId, version } : null;
-  } catch {
-    return null;
-  }
+  return headers;
 }
 
-function recipientHeader(name: string, value: DraftRecipientField): string[] {
-  const formatted = typeof value === "string"
-    ? sanitizeRawHeader(value)
-    : value.map(formatAddress).join(", ");
-  return formatted ? [`${name}: ${formatted}`] : [];
-}
-
-function formatAddress(address: OutboundAddress): string {
-  const safeAddress = sanitizeRawHeader(address.address);
-  return address.name ? `${encodedWord(address.name)} <${safeAddress}>` : safeAddress;
-}
-
-function sanitizeRawHeader(value: string): string {
+function sanitizeHeader(value: string): string {
   return value.replace(/[\r\n]+/g, " ");
 }
 
-function encodedWord(value: string): string {
-  return value ? `=?UTF-8?B?${Buffer.from(value.replace(/[\r\n]+/g, " "), "utf8").toString("base64")}?=` : "";
+function makeFoldable(value: string): string {
+  return value.split(/(\s+)/).map((part) => part.length > 70 ? part.match(/.{1,70}/gu)?.join(" ") ?? part : part).join("");
 }
 
-function encodedMarker(value: string): string {
-  return Buffer.from(value, "utf8").toString("base64url");
+function foldableEncoded(value: string): string {
+  return Buffer.from(value, "utf8").toString("base64url").match(/.{1,60}/g)?.join(" ") ?? "";
+}
+
+function boundedId(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 32);
 }
 
 function wrapBase64(value: string): string {

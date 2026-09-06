@@ -3,6 +3,7 @@ import { check, foreignKey, index, integer, primaryKey, sqliteTable, text, uniqu
 import type {
   ConversationSendSource,
   DraftComposeMode,
+  DraftAttachment,
   DraftRecipientField,
   OperationResult,
   OutboundAddress,
@@ -34,6 +35,7 @@ export const drafts = sqliteTable("drafts", {
   body: text("body").notNull(),
   identity: text("identity", { mode: "json" }).$type<OutboundAddress>().notNull(),
   source: text("source", { mode: "json" }).$type<ConversationSendSource>(),
+  attachments: text("attachments", { mode: "json" }).$type<DraftAttachment[]>().notNull(),
   deliveryStatus: text("delivery_status", {
     enum: ["editable", "sending", "failed", "uncertain", "sent"],
   }).notNull(),

@@ -39,6 +39,7 @@ test("web API sends typed draft lifecycle requests", async () => {
     subject: "Typed draft",
     body: "Draft body",
     identity: { name: "Person", address: "person@example.test" },
+    attachments: [],
   };
   const draft = {
     id: "draft/one",
@@ -102,6 +103,7 @@ test("web API preserves typed lifecycle error codes and HTTP status", async () =
     subject: "",
     body: "",
     identity: { name: "Person", address: "person@example.test" },
+    attachments: [],
     version: 1,
   }).catch((error: unknown) => error);
   expect(conflict).toBeInstanceOf(ApiRequestError);

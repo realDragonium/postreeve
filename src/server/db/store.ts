@@ -149,10 +149,10 @@ export class Store {
       this.#sqlite.query(`
         INSERT INTO drafts (
           id, tenant_id, account_id, mode, recipients_to, recipients_cc, recipients_bcc,
-          subject, body, identity, source, delivery_status, delivery_receipt, delivery_error,
+          subject, body, identity, source, attachments, delivery_status, delivery_receipt, delivery_error,
           claimed_at, claim_owner, settled_at, mirror_status, mirror_ref, mirrored_version,
           mirror_error, created_at, updated_at, version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL,
           'pending', NULL, NULL, NULL, ?, ?, ?)
       `).run(
         draft.id,
@@ -166,6 +166,7 @@ export class Store {
         draft.body,
         JSON.stringify(draft.identity),
         draft.source ? JSON.stringify(draft.source) : null,
+        JSON.stringify(draft.attachments),
         draft.createdAt,
         draft.updatedAt,
         draft.version,
@@ -201,6 +202,7 @@ export class Store {
       UPDATE drafts SET
         mode = ?, recipients_to = ?, recipients_cc = ?, recipients_bcc = ?, subject = ?, body = ?,
         identity = ?, source = ?, delivery_status = 'editable', delivery_receipt = NULL,
+        attachments = ?,
         delivery_error = NULL, claimed_at = NULL, claim_owner = NULL, settled_at = NULL,
         mirror_status = 'pending', mirror_error = NULL,
         updated_at = ?, version = version + 1
@@ -216,6 +218,7 @@ export class Store {
       content.body,
       JSON.stringify(content.identity),
       content.source ? JSON.stringify(content.source) : null,
+      JSON.stringify(content.attachments),
       updatedAt,
       tenantId,
       accountId,
@@ -412,10 +415,10 @@ export class Store {
       this.#sqlite.query(`
         INSERT INTO drafts (
           id, tenant_id, account_id, mode, recipients_to, recipients_cc, recipients_bcc,
-          subject, body, identity, source, delivery_status, delivery_receipt, delivery_error,
+          subject, body, identity, source, attachments, delivery_status, delivery_receipt, delivery_error,
           claimed_at, claim_owner, settled_at, mirror_status, mirror_ref, mirrored_version,
           mirror_error, created_at, updated_at, version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL,
           'pending', NULL, NULL, NULL, ?, ?, 1)
       `).run(
         copyId,
@@ -429,6 +432,7 @@ export class Store {
         source.body,
         source.identity,
         source.source,
+        source.attachments,
         copiedAt,
         copiedAt,
       );
@@ -1118,6 +1122,7 @@ export class Store {
     this.#migrateSemanticMessageIds();
     this.#migrateDrafts();
     this.#migrateDraftMirrors();
+    this.#migrateDraftAttachments();
     const accountsTable = this.#sqlite.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
       .get() as { sql: string } | null;
     if (accountsTable && !accountsTable.sql.includes("'gmail'")) {
@@ -1220,6 +1225,17 @@ export class Store {
         ALTER TABLE drafts ADD COLUMN mirrored_version INTEGER CHECK (mirrored_version IS NULL OR mirrored_version > 0);
         ALTER TABLE drafts ADD COLUMN mirror_error TEXT;
         INSERT INTO schema_migrations (version, applied_at) VALUES (480, CURRENT_TIMESTAMP);
+      `);
+    });
+    migrate();
+  }
+
+  #migrateDraftAttachments(): void {
+    if (this.#sqlite.query("SELECT 1 FROM schema_migrations WHERE version = 480001").get()) return;
+    const migrate = this.#sqlite.transaction(() => {
+      this.#sqlite.exec(`
+        ALTER TABLE drafts ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]';
+        INSERT INTO schema_migrations (version, applied_at) VALUES (480001, CURRENT_TIMESTAMP);
       `);
     });
     migrate();
@@ -1616,6 +1632,7 @@ interface DraftRow {
   body: string;
   identity: string;
   source: string | null;
+  attachments: string;
   delivery_status: Draft["delivery"]["status"];
   delivery_receipt: string | null;
   delivery_error: string | null;
@@ -1697,6 +1714,7 @@ function toDraft(row: DraftRow): Draft {
     body: row.body,
     identity: parseJson(row.identity),
     ...(row.source ? { source: parseJson(row.source) } : {}),
+    attachments: parseJson(row.attachments),
     delivery,
     mirror,
     createdAt: row.created_at,

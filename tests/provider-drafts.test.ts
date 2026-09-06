@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { simpleParser } from "mailparser";
 import { GmailMailClient, type HttpFetch } from "../src/server/mail/gmail";
-import { buildProviderDraftMessage, parseProviderDraftMarkers } from "../src/server/mail/provider-draft";
+import { buildProviderDraftMessage, parseProviderDraftMarkers, parseProviderDraftSource } from "../src/server/mail/provider-draft";
 import type { Draft } from "../src/shared/contracts";
 
 const gmailAccount = {
@@ -26,18 +26,51 @@ describe("Gmail provider drafts", () => {
       },
     });
 
-    const raw = buildProviderDraftMessage(editable);
+    const raw = await buildProviderDraftMessage(editable);
     const parsed = await simpleParser(raw);
     expect(parsed.subject).toBe("Résumé 🌍 X-Injected: blocked");
     expect(parsed.text).toBe(editable.body);
-    expect(raw.toString()).toContain("To: unfinished@, Jöhn <person@example.test> X-Injected: blocked");
+    expect(raw.toString()).toContain("To: <unfinished@>");
     expect(raw.toString()).not.toContain("\r\nX-Injected: blocked\r\n");
     expect(parseProviderDraftMarkers(raw)).toEqual({ postreeveId: editable.id, version: 7 });
+  });
+
+  test("folds maximum Unicode and arbitrary editable headers without changing backend content", async () => {
+    const injection = "\r\nX-Injected: blocked";
+    const subject = `${"é".repeat(998 - injection.length)}${injection}`;
+    const source = {
+      canonicalMessageId: `message/${"m".repeat(1_200)}`,
+      conversationId: `conversation/${"c".repeat(1_200)}`,
+      providerConversationId: `provider/${"p".repeat(1_200)}`,
+    };
+    const editable = draft(9, {
+      id: `draft/${"d".repeat(1_500)}`,
+      to: `${"unfinished".repeat(180)}@\r\nBcc: injected@example.test`,
+      cc: `Jöhn ${"pending".repeat(150)}@`,
+      subject,
+      source,
+    });
+    const original = structuredClone(editable);
+
+    const raw = await buildProviderDraftMessage(editable);
+    const headerBlock = raw.toString("utf8").split("\r\n\r\n", 1)[0] ?? "";
+    for (const line of headerBlock.split("\r\n")) {
+      expect(Buffer.byteLength(line, "utf8")).toBeLessThan(998);
+    }
+    for (const encodedWord of headerBlock.match(/=\?[^?]+\?[bqBQ]\?[^?]*\?=/g) ?? []) {
+      expect(encodedWord.length).toBeLessThanOrEqual(75);
+    }
+    expect(headerBlock).not.toContain("\r\nX-Injected: blocked");
+    expect(parseProviderDraftMarkers(raw)).toEqual({ postreeveId: editable.id, version: editable.version });
+    expect(parseProviderDraftSource(raw)).toEqual(source);
+    expect((await simpleParser(raw)).subject).toBe(subject.replace(/[\r\n]+/g, " "));
+    expect(editable).toEqual(original);
   });
 
   test("creates, recovers ambiguous responses, paginates, updates without duplicates, and removes idempotently", async () => {
     const containers = new Map<string, string>([["external", Buffer.from("Subject: external\r\n\r\nbody").toString("base64url")]]);
     const requests: string[] = [];
+    const draftRequests: Array<{ raw: string; threadId?: string }> = [];
     let nextId = 1;
     let ambiguousCreate = true;
     let ambiguousDelete = true;
@@ -57,6 +90,7 @@ describe("Gmail provider drafts", () => {
       }
       if (url.pathname.endsWith("/drafts") && method === "POST") {
         const body = parseBody(init?.body);
+        draftRequests.push(body.message);
         const id = `provider-${nextId++}`;
         containers.set(id, body.message.raw);
         if (ambiguousCreate) {
@@ -74,6 +108,7 @@ describe("Gmail provider drafts", () => {
       if (draftId && method === "PUT") {
         if (!containers.has(draftId)) return Response.json({ error: { message: "missing" } }, { status: 404 });
         const body = parseBody(init?.body);
+        draftRequests.push(body.message);
         containers.set(draftId, body.message.raw);
         return Response.json({ id: draftId, message: { id: `message-${draftId}`, raw: body.message.raw } });
       }
@@ -93,7 +128,15 @@ describe("Gmail provider drafts", () => {
       clientId: "client",
       fetch: request,
     });
-    const first = draft(1, { to: "unfinished@, Person <person@example.test>", body: "First body\nexactly." });
+    const first = draft(1, {
+      to: "unfinished@, Person <person@example.test>",
+      body: "First body\nexactly.",
+      source: {
+        canonicalMessageId: "source-message",
+        conversationId: "source-conversation",
+        providerConversationId: "unvalidated-thread",
+      },
+    });
 
     const createdRef = await client.createDraft(gmailAccount.id, first);
     expect(createdRef).toEqual({ kind: "gmail", draftId: "provider-1" });
@@ -110,7 +153,7 @@ describe("Gmail provider drafts", () => {
     const raw = containers.get("provider-1");
     if (!raw) throw new Error("Expected mirrored Gmail draft");
     const decoded = Buffer.from(raw, "base64url");
-    expect(decoded.toString()).toContain("To: unfinished@, Person <person@example.test>");
+    expect(decoded.toString()).toContain("To: <unfinished@>, Person <person@example.test>");
     expect((await simpleParser(decoded)).text).toBe("Second body");
     expect(requests.some((entry) => entry.includes("pageToken=1"))).toBe(true);
 
@@ -124,9 +167,77 @@ describe("Gmail provider drafts", () => {
     await client.removeDraft(gmailAccount.id, first.id, updatedRef);
     expect(containers.has("provider-1")).toBe(false);
     expect(containers.has("external")).toBe(true);
+    expect(draftRequests.every(({ threadId }) => threadId === undefined)).toBe(true);
     await expect(client.listDrafts("another-account")).rejects.toThrow("another account");
     await expect(client.createDraft(gmailAccount.id, { ...first, accountId: "another-account" }))
       .rejects.toThrow("another account");
+  });
+
+  test("bounds stale-listing PUT-404 recovery and succeeds on a later retry without duplicates", async () => {
+    const current = draft(4, { body: "Authoritative body" });
+    const staleRaw = (await buildProviderDraftMessage(current)).toString("base64url");
+    const containers = new Map<string, string>();
+    const requests: string[] = [];
+    let staleListed = true;
+    let postFails = true;
+    const request: HttpFetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      const method = init?.method ?? "GET";
+      requests.push(`${method} ${url.pathname}${url.search}`);
+      if (url.origin === "https://oauth2.googleapis.com") {
+        return Response.json({ access_token: "draft-token", expires_in: 3600 });
+      }
+      if (url.pathname.endsWith("/drafts") && method === "GET") {
+        return Response.json({ drafts: [
+          ...(staleListed ? [{ id: "stale" }] : []),
+          ...[...containers.keys()].map((id) => ({ id })),
+        ] });
+      }
+      if (url.pathname.endsWith("/drafts") && method === "POST") {
+        if (postFails) return Response.json({ error: { message: "temporary failure" } }, { status: 503 });
+        const body = parseBody(init?.body);
+        containers.set("current", body.message.raw);
+        return Response.json({ id: "current", message: { id: "message-current", raw: body.message.raw } });
+      }
+      if (url.pathname.includes("/drafts/stale") && method === "GET") {
+        return Response.json({ id: "stale", message: { id: "message-stale", raw: staleRaw } });
+      }
+      if (url.pathname.includes("/drafts/stale") && method === "PUT") {
+        return Response.json({ error: { message: "stale container" } }, { status: 404 });
+      }
+      if (url.pathname.includes("/drafts/stale") && method === "DELETE") {
+        staleListed = false;
+        return Response.json(null);
+      }
+      if (url.pathname.includes("/drafts/current") && method === "GET") {
+        const raw = containers.get("current");
+        return raw
+          ? Response.json({ id: "current", message: { id: "message-current", raw } })
+          : Response.json({ error: { message: "missing" } }, { status: 404 });
+      }
+      return Response.json({ error: { message: "unexpected fixture request" } }, { status: 500 });
+    };
+    const client = new GmailMailClient({
+      account: gmailAccount,
+      credentials: { kind: "gmail", refreshToken: "refresh" },
+      clientId: "client",
+      fetch: request,
+    });
+    const staleRef = { kind: "gmail", draftId: "stale" } as const;
+
+    await expect(client.updateDraft(gmailAccount.id, current, staleRef)).rejects.toThrow("temporary failure");
+    expect(requests.filter((entry) => entry.startsWith("PUT "))).toHaveLength(1);
+    expect(requests.filter((entry) => entry.startsWith("POST ") && entry.includes("/drafts"))).toHaveLength(1);
+    expect(requests.length).toBeLessThanOrEqual(10);
+
+    postFails = false;
+    const recovered = await client.updateDraft(gmailAccount.id, current, staleRef);
+    expect(recovered).toEqual({ kind: "gmail", draftId: "current" });
+    expect(staleListed).toBe(false);
+    expect(containers).toHaveLength(1);
+    expect(await client.listDrafts(gmailAccount.id)).toEqual([
+      { postreeveId: current.id, version: current.version, ref: recovered },
+    ]);
   });
 });
 
@@ -141,6 +252,7 @@ function draft(version: number, changes: Partial<Draft> = {}): Draft {
     subject: "Provider draft",
     body: "Body",
     identity: { name: gmailAccount.name, address: gmailAccount.email },
+    attachments: [],
     delivery: { status: "editable" },
     mirror: { status: "pending" },
     createdAt: "2026-09-06T10:00:00.000Z",
@@ -150,7 +262,7 @@ function draft(version: number, changes: Partial<Draft> = {}): Draft {
   };
 }
 
-function parseBody(body: BodyInit | null | undefined): { message: { raw: string } } {
+function parseBody(body: BodyInit | null | undefined): { message: { raw: string; threadId?: string } } {
   if (typeof body !== "string") throw new Error("Expected JSON request body");
   const parsed: unknown = JSON.parse(body);
   if (typeof parsed !== "object" || parsed === null || !("message" in parsed)) throw new Error("Missing Gmail message body");

@@ -107,6 +107,8 @@ const DRAFT_FLAG = "\\Draft";
 const DELETED_FLAG = "\\Deleted";
 const MAX_PROVIDER_DRAFTS = 1_000;
 
+type ListedProviderDraft = ProviderDraft & { readonly deleted: boolean };
+
 const defaultClientFactory: ImapClientFactory = (options) => new ImapFlow(options);
 
 export class ImapMailProvider implements MailProvider {
@@ -195,7 +197,12 @@ export class ImapMailProvider implements MailProvider {
     await this.#withClient(async (client) => {
       const mailbox = await findDraftsMailbox(client);
       const opened = await client.mailboxOpen(mailbox);
-      const matches = (await this.#listSelectedProviderDrafts(client, mailbox, opened))
+      const matches = (await this.#listSelectedProviderDrafts(
+        client,
+        mailbox,
+        opened,
+        client.capabilities.has("UIDPLUS"),
+      ))
         .filter((draft) => draft.postreeveId === postreeveId);
       const uids = new Set(matches.map(({ ref: candidate }) => candidate.kind === "imap" ? candidate.uid : 0));
       if (ref?.kind === "imap" && ref.mailbox === mailbox && ref.uidValidity === opened.uidValidity.toString()) {
@@ -387,18 +394,23 @@ export class ImapMailProvider implements MailProvider {
     let appended: AppendResponseObject | false;
     let appendError: unknown;
     try {
-      appended = await client.append(mailbox, buildProviderDraftMessage(draft), [DRAFT_FLAG], new Date(draft.updatedAt));
+      appended = await client.append(mailbox, await buildProviderDraftMessage(draft), [DRAFT_FLAG], new Date(draft.updatedAt));
     } catch (error) {
       appended = false;
       appendError = error;
     }
     const opened = await client.mailboxOpen(mailbox);
-    const matches = (await this.#listSelectedProviderDrafts(client, mailbox, opened))
+    const matches = (await this.#listSelectedProviderDrafts(
+      client,
+      mailbox,
+      opened,
+      client.capabilities.has("UIDPLUS"),
+    ))
       .filter((candidate) => candidate.postreeveId === draft.id);
     const current = appended && appended.uid !== undefined && appended.uidValidity !== undefined
-      ? matches.find(({ ref }) => ref.kind === "imap" && ref.uid === appended.uid
+      ? matches.find(({ deleted, ref }) => !deleted && ref.kind === "imap" && ref.uid === appended.uid
         && ref.uidValidity === appended.uidValidity?.toString())
-      : matches.find((candidate) => candidate.version === draft.version);
+      : matches.find((candidate) => !candidate.deleted && candidate.version === draft.version);
     if (!current) {
       if (appendError) throw appendError;
       throw new Error("IMAP appended a draft but its Postreeve marker could not be found");
@@ -422,27 +434,34 @@ export class ImapMailProvider implements MailProvider {
   async #listProviderDrafts(client: ImapClient): Promise<ProviderDraft[]> {
     const mailbox = await findDraftsMailbox(client);
     const opened = await client.mailboxOpen(mailbox, { readOnly: true });
-    return this.#listSelectedProviderDrafts(client, mailbox, opened);
+    return (await this.#listSelectedProviderDrafts(client, mailbox, opened)).map(({ deleted: _deleted, ...draft }) => draft);
   }
 
   async #listSelectedProviderDrafts(
     client: ImapClient,
     mailbox: string,
     opened: MailboxObject,
-  ): Promise<ProviderDraft[]> {
-    const selected = await searchUids(client, { draft: true, deleted: false }, MAX_PROVIDER_DRAFTS + 1);
+    includeDeleted = false,
+  ): Promise<ListedProviderDraft[]> {
+    const selected = await searchUids(
+      client,
+      includeDeleted ? { draft: true } : { draft: true, deleted: false },
+      MAX_PROVIDER_DRAFTS + 1,
+    );
     if (selected.length > MAX_PROVIDER_DRAFTS) throw new Error("IMAP draft reconciliation exceeded its bound");
-    const drafts: ProviderDraft[] = [];
+    const drafts: ListedProviderDraft[] = [];
     for await (const message of client.fetch(
       selected,
       { uid: true, flags: true, headers: ["X-Postreeve-Draft-ID", "X-Postreeve-Draft-Version"] },
       { uid: true },
     )) {
-      if (!hasFlag(message.flags, DRAFT_FLAG) || hasFlag(message.flags, DELETED_FLAG) || !message.headers) continue;
+      const deleted = hasFlag(message.flags, DELETED_FLAG);
+      if (!hasFlag(message.flags, DRAFT_FLAG) || (!includeDeleted && deleted) || !message.headers) continue;
       const markers = parseProviderDraftMarkers(message.headers);
       if (!markers) continue;
       drafts.push({
         ...markers,
+        deleted,
         ref: {
           kind: "imap",
           mailbox,
@@ -563,7 +582,12 @@ export class ImapMailProvider implements MailProvider {
 async function retireDraftUids(client: ImapClient, uids: readonly number[]): Promise<void> {
   if (uids.length === 0) return;
   if (client.capabilities.has("UIDPLUS")) {
-    await client.messageDelete([...uids], { uid: true });
+    for (const uid of uids) {
+      const deleted = await client.messageDelete(uid, { uid: true });
+      if (!deleted && await client.fetchOne(uid, { uid: true }, { uid: true })) {
+        throw new Error(`IMAP server did not confirm selective removal of draft UID ${uid}`);
+      }
+    }
     return;
   }
   for (const uid of uids) {

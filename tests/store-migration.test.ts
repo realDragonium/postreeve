@@ -54,7 +54,7 @@ describe("Store migrations", () => {
     baseline.close();
 
     const pre479 = new Database(path);
-    pre479.exec("DROP TABLE drafts; DELETE FROM schema_migrations WHERE version IN (479, 480);");
+    pre479.exec("DROP TABLE drafts; DELETE FROM schema_migrations WHERE version IN (479, 480, 480001);");
     pre479.close();
 
     const migrated = new Store(path);
@@ -71,8 +71,11 @@ describe("Store migrations", () => {
     const inspected = new Database(path);
     expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 479").get()).toEqual({ version: 479 });
     expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 480").get()).toEqual({ version: 480 });
+    expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 480001").get()).toEqual({ version: 480001 });
     expect((inspected.query("PRAGMA table_info('drafts')").all() as Array<{ name: string }>).map(({ name }) => name))
       .toContain("mirror_status");
+    expect((inspected.query("PRAGMA table_info('drafts')").all() as Array<{ name: string }>).map(({ name }) => name))
+      .toContain("attachments");
     expect(inspected.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'drafts'").get())
       .toEqual({ name: "drafts" });
     expect(inspected.query("PRAGMA foreign_key_check").all()).toEqual([]);

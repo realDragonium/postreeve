@@ -124,6 +124,7 @@ describe("Gmail compatibility", () => {
       subject: "Healthy sibling",
       body: "",
       identity: { name: account.name, address: account.email },
+      attachments: [],
     });
     const failedDraft = await service.createDraft({
       accountId: account.id,
@@ -134,6 +135,7 @@ describe("Gmail compatibility", () => {
       subject: "Pre-dispatch",
       body: "No provider submission should occur.",
       identity: { name: account.name, address: account.email },
+      attachments: [],
     });
 
     const error = await service.sendDraft(account.id, failedDraft.id, { version: failedDraft.version })

@@ -379,6 +379,7 @@ describe("Hono RPC API", () => {
       subject: "Healthy sibling",
       body: "Structured recipients remain supported.",
       identity: { name: account.name, address: account.email },
+      attachments: [],
     });
     const client = hc<AppType>("http://postreeve.local", { fetch: createApi(service).request });
     const raw = {
@@ -389,6 +390,7 @@ describe("Hono RPC API", () => {
       subject: "Raw recipients",
       body: "Preserve unfinished input.",
       identity: { name: account.name, address: account.email },
+      attachments: [],
     };
 
     const createdResponse = await client.api.accounts[":accountId"].drafts.$post({
@@ -443,6 +445,7 @@ describe("Hono RPC API", () => {
       subject: "Active delivery",
       body: "Keep this draft until delivery settles.",
       identity: { name: account.name, address: account.email },
+      attachments: [],
     });
     const sending = service.sendDraft(account.id, draft.id, { version: draft.version });
     await attempted;
@@ -475,6 +478,7 @@ describe("Hono RPC API", () => {
       subject: "Recover me",
       body: "Preserve this content",
       identity: { name: account.name, address: account.email },
+      attachments: [],
     });
     await expect(service.sendDraft(account.id, draft.id, { version: draft.version }))
       .rejects.toThrow("provider outcome unknown");

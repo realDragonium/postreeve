@@ -3,10 +3,11 @@ import { Database } from "bun:sqlite";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import type { Account, CreateDraftInput, Draft, UpdateDraftInput } from "../src/shared/contracts";
+import type { Account, CreateDraftInput, Draft, DraftContent, UpdateDraftInput } from "../src/shared/contracts";
 import { AccountConflictError } from "../src/server/core/errors";
 import { Store } from "../src/server/db/store";
 import { MailSendPreDispatchError } from "../src/server/mail/sender";
+import { DraftRecoveryConflictError, DraftSaveQueue } from "../src/web/draft-state";
 import { createEmptyTestHarness, createTestHarness, testAccountInput } from "./support/test-mail";
 
 const paths: string[] = [];
@@ -33,12 +34,18 @@ describe("server-authoritative drafts", () => {
         conversationId: "conversation",
         providerConversationId: "provider-thread",
       },
+      attachments: [{ name: "legacy.txt", size: 42, type: "text/plain" }],
     });
     first.store.close();
 
     const reopened = await createEmptyTestHarness({ storePath: path });
     expect(await reopened.service.getDraft(account.id, created.id)).toEqual(created);
     expect(await reopened.service.listDrafts(account.id)).toEqual([created]);
+    await expect(reopened.service.sendDraft(account.id, created.id, { version: created.version }))
+      .rejects.toThrow("Draft attachment delivery is not supported yet");
+    expect(reopened.sendAttempts).toEqual([]);
+    const edited = await reopened.service.updateDraft(account.id, created.id, updateInput(created, { body: "Edited later" }));
+    expect(edited.attachments).toEqual(created.attachments);
     await expect(reopened.service.getDraft(other.id, created.id)).rejects.toThrow("Draft not found");
     expect(await reopened.store.getDraft("another-tenant", account.id, created.id)).toBeNull();
     reopened.store.close();
@@ -178,6 +185,301 @@ describe("server-authoritative drafts", () => {
     }
   });
 
+  test("retries a lost first create response with one compose identity and the newest content", async () => {
+    const harness = await createEmptyTestHarness();
+    const account = await harness.service.createAccount(testAccountInput());
+    let loseFirstResponse = true;
+    const queue = new DraftSaveQueue(
+      account.id,
+      undefined,
+      async (input) => {
+        const created = await harness.service.createDraft(input);
+        if (loseFirstResponse) {
+          loseFirstResponse = false;
+          throw new Error("response lost after commit");
+        }
+        return created;
+      },
+      (accountId, draftId, input) => harness.service.updateDraft(accountId, draftId, input),
+      "lost-create-draft",
+    );
+    const older = { ...draftInput(account), body: "Older committed body" };
+    const { accountId: _accountId, ...olderContent } = older;
+
+    await expect(queue.save(olderContent)).rejects.toThrow("response lost after commit");
+    const newerContent = { ...olderContent, body: "Newest local body" };
+    const saved = await queue.save(newerContent);
+    if (saved.mirror.status !== "synced") throw new Error("Expected synced draft");
+
+    expect(saved).toMatchObject({ id: "lost-create-draft", version: 2, body: "Newest local body" });
+    expect(await harness.service.listDrafts(account.id)).toEqual([saved]);
+    expect(await harness.providerDrafts(account.id)).toEqual([
+      { postreeveId: saved.id, version: saved.version, ref: saved.mirror.ref },
+    ]);
+    expect(harness.draftMirrorAttempts.map(({ version }) => version)).toEqual([1, 1, 2]);
+    harness.store.close();
+  });
+
+  test("keeps another client's edit when a lost create response is retried", async () => {
+    const path = temporaryStore();
+    const first = await createEmptyTestHarness({ storePath: path });
+    const account = await first.service.createAccount(testAccountInput());
+    const provider = first.providerForAccount(account.id);
+    if (!provider) throw new Error("Expected shared provider");
+    const second = await createEmptyTestHarness({
+      storePath: path,
+      providerForAccount: (accountId) => accountId === account.id ? provider : undefined,
+    });
+    let loseFirstResponse = true;
+    const queue = new DraftSaveQueue(
+      account.id,
+      undefined,
+      async (input) => {
+        const created = await first.service.createDraft(input);
+        if (loseFirstResponse) {
+          loseFirstResponse = false;
+          throw new Error("response lost after commit");
+        }
+        return created;
+      },
+      (accountId, draftId, input) => first.service.updateDraft(accountId, draftId, input),
+      "lost-create-with-intervening-edit",
+    );
+    const { accountId: _accountId, ...firstContent } = {
+      ...draftInput(account),
+      body: "First committed body",
+    };
+
+    await expect(queue.save(firstContent)).rejects.toThrow("response lost after commit");
+    const committed = await second.service.getDraft(account.id, "lost-create-with-intervening-edit");
+    const otherEdit = await second.service.updateDraft(
+      account.id,
+      committed.id,
+      updateInput(committed, { body: "Other client's authoritative edit" }),
+    );
+    if (otherEdit.mirror.status !== "synced") throw new Error("Expected the other client's provider mirror");
+    const latestLocalContent = { ...firstContent, body: "Latest unsaved local body" };
+    await expect(queue.save(latestLocalContent)).rejects.toBeInstanceOf(DraftRecoveryConflictError);
+
+    expect(queue.current).toBeNull();
+    expect(await first.service.getDraft(account.id, otherEdit.id)).toEqual(otherEdit);
+    expect(await second.service.getDraft(account.id, otherEdit.id)).toEqual(otherEdit);
+    expect(await first.providerDrafts(account.id)).toEqual([
+      { postreeveId: otherEdit.id, version: otherEdit.version, ref: otherEdit.mirror.ref },
+    ]);
+    second.store.close();
+    first.store.close();
+  });
+
+  test("refreshes an advanced failed-send version before the next autosave and retry", async () => {
+    let failSend = true;
+    const harness = await createEmptyTestHarness({
+      sendFailure: () => failSend ? new MailSendPreDispatchError("known pre-dispatch failure") : undefined,
+    });
+    const account = await harness.service.createAccount(testAccountInput());
+    const queue = new DraftSaveQueue(
+      account.id,
+      undefined,
+      (input) => harness.service.createDraft(input),
+      (accountId, draftId, input) => harness.service.updateDraft(accountId, draftId, input),
+      "failed-send-draft",
+    );
+    const { accountId: _accountId, ...content } = deliverableDraftInput(account);
+    const saved = await queue.save(content);
+
+    await expect(harness.service.sendDraft(account.id, saved.id, { version: saved.version }))
+      .rejects.toThrow("known pre-dispatch failure");
+    const refreshed = await queue.refreshAfterSend((accountId, draftId) => harness.service.getDraft(accountId, draftId));
+    expect(refreshed).toMatchObject({ version: 3, delivery: { status: "failed" } });
+
+    const edited = await queue.save({ ...content, body: "Edited after the failed attempt" });
+    failSend = false;
+    const receipt = await harness.service.sendDraft(account.id, edited.id, { version: edited.version });
+    expect(receipt.accepted).toEqual(["recipient@example.test"]);
+    expect(harness.sendAttempts).toHaveLength(2);
+    expect(await harness.providerDrafts(account.id)).toEqual([]);
+    expect((await harness.store.getDraft("test-tenant", account.id, edited.id))?.delivery.status).toBe("sent");
+    harness.store.close();
+  });
+
+  test("keeps local input stale when another client edits before failed-send refresh", async () => {
+    const path = temporaryStore();
+    const first = await createEmptyTestHarness({
+      storePath: path,
+      sendFailure: new MailSendPreDispatchError("known pre-dispatch failure"),
+    });
+    const account = await first.service.createAccount(testAccountInput());
+    const provider = first.providerForAccount(account.id);
+    if (!provider) throw new Error("Expected shared provider");
+    const second = await createEmptyTestHarness({
+      storePath: path,
+      providerForAccount: (accountId) => accountId === account.id ? provider : undefined,
+    });
+    const queue = new DraftSaveQueue(
+      account.id,
+      undefined,
+      (input) => first.service.createDraft(input),
+      (accountId, draftId, input) => first.service.updateDraft(accountId, draftId, input),
+      "failed-send-with-intervening-edit",
+    );
+    const { accountId: _accountId, ...content } = deliverableDraftInput(account);
+    const saved = await queue.save(content);
+
+    await expect(first.service.sendDraft(account.id, saved.id, { version: saved.version }))
+      .rejects.toThrow("known pre-dispatch failure");
+    const failed = await second.service.getDraft(account.id, saved.id);
+    expect(failed).toMatchObject({ version: 3, delivery: { status: "failed" } });
+    const otherEdit = await second.service.updateDraft(
+      account.id,
+      failed.id,
+      updateInput(failed, { body: "Other client's authoritative edit" }),
+    );
+    if (otherEdit.mirror.status !== "synced") throw new Error("Expected the other client's provider mirror");
+    const localInput = { ...content, body: "Unsaved local edit after failure" };
+
+    await expect(queue.refreshAfterSend((accountId, draftId) => first.service.getDraft(accountId, draftId)))
+      .rejects.toBeInstanceOf(DraftRecoveryConflictError);
+    expect(queue.current).toEqual(saved);
+    expect(localInput.body).toBe("Unsaved local edit after failure");
+    await expect(queue.save(localInput)).rejects.toThrow("Draft version conflict");
+    expect(await first.service.getDraft(account.id, otherEdit.id)).toEqual(otherEdit);
+    expect(await second.service.getDraft(account.id, otherEdit.id)).toEqual(otherEdit);
+    expect(await first.providerDrafts(account.id)).toEqual([
+      { postreeveId: otherEdit.id, version: otherEdit.version, ref: otherEdit.mirror.ref },
+    ]);
+    expect(first.sendAttempts).toHaveLength(1);
+    second.store.close();
+    first.store.close();
+  });
+
+  test("lists and removes a shared backend draft freshly through a second service handle", async () => {
+    const path = temporaryStore();
+    const first = await createEmptyTestHarness({ storePath: path });
+    const account = await first.service.createAccount(testAccountInput());
+    const provider = first.providerForAccount(account.id);
+    if (!provider) throw new Error("Expected shared provider");
+    const second = await createEmptyTestHarness({
+      storePath: path,
+      providerForAccount: (accountId) => accountId === account.id ? provider : undefined,
+    });
+
+    const created = await first.service.createDraft({
+      ...draftInput(account),
+      to: [{ name: "Display Name", address: "display@example.test" }],
+      body: "Visible across clients",
+      identity: { name: "Exact Identity", address: account.email },
+      attachments: [{ name: "legacy.txt", size: 42, type: "text/plain" }],
+    });
+    const firstSnapshot = await first.service.getDraft(account.id, created.id);
+    const secondSnapshot = (await second.service.listDrafts(account.id))[0];
+    if (!secondSnapshot) throw new Error("Expected shared draft snapshot");
+    const firstQueue = new DraftSaveQueue(
+      account.id,
+      firstSnapshot,
+      (input) => first.service.createDraft(input),
+      (accountId, draftId, input) => first.service.updateDraft(accountId, draftId, input),
+    );
+    const secondQueue = new DraftSaveQueue(
+      account.id,
+      secondSnapshot,
+      (input) => second.service.createDraft(input),
+      (accountId, draftId, input) => second.service.updateDraft(accountId, draftId, input),
+    );
+    const unchanged = contentOf(created);
+    const mirrorAttempts = first.draftMirrorAttempts.length;
+    expect(firstQueue.isDirty(unchanged)).toBe(false);
+    expect(secondQueue.isDirty(unchanged)).toBe(false);
+    expect(first.draftMirrorAttempts).toHaveLength(mirrorAttempts);
+
+    const edited = await firstQueue.save({ ...unchanged, body: "Body-only cross-client edit" });
+    expect(edited).toMatchObject({
+      to: created.to,
+      identity: created.identity,
+      attachments: created.attachments,
+      version: created.version + 1,
+    });
+    const reopened = await second.service.getDraft(account.id, created.id);
+    expect(reopened).toEqual(edited);
+    await second.service.removeDraft(account.id, reopened.id, { version: reopened.version });
+    expect(await first.service.listDrafts(account.id)).toEqual([]);
+    expect(await first.providerDrafts(account.id)).toEqual([]);
+    second.store.close();
+    first.store.close();
+  });
+
+  test("disconnect waits for an in-flight mirror, deletes only local state, and leaves provider mail untouched", async () => {
+    const path = temporaryStore();
+    let releaseMirror: () => void = () => {};
+    let markMirrorStarted: () => void = () => {};
+    const mirrorGate = new Promise<void>((resolve) => { releaseMirror = resolve; });
+    const mirrorStarted = new Promise<void>((resolve) => { markMirrorStarted = resolve; });
+    const removedDrafts: string[] = [];
+    const first = await createEmptyTestHarness({
+      storePath: path,
+      onDraftMirror: async (draft) => {
+        if (draft.id !== "disconnect-race") return;
+        markMirrorStarted();
+        await mirrorGate;
+      },
+      onDraftRemove: (draftId) => { removedDrafts.push(draftId); },
+    });
+    const account = await first.service.createAccount(testAccountInput());
+    const provider = first.providerForAccount(account.id);
+    if (!provider) throw new Error("Expected shared provider");
+    const second = await createEmptyTestHarness({
+      storePath: path,
+      providerForAccount: (accountId) => accountId === account.id ? provider : undefined,
+    });
+
+    const creating = first.service.createDraft({
+      ...draftInput(account),
+      clientId: "disconnect-race",
+      body: "Provider residue is intentional",
+    });
+    await mirrorStarted;
+    let disconnected = false;
+    const disconnecting = second.service.removeAccount(account.id).then(() => { disconnected = true; });
+    await Promise.resolve();
+    expect(disconnected).toBe(false);
+    releaseMirror();
+    const created = await creating;
+    if (created.mirror.status !== "synced") throw new Error("Expected synced provider residue");
+    await disconnecting;
+
+    expect(removedDrafts).toEqual([]);
+    expect(await provider.listDrafts(account.id)).toEqual([
+      { postreeveId: created.id, version: created.version, ref: created.mirror.ref },
+    ]);
+    expect(await first.store.getAccount(account.id)).toBeNull();
+    expect(await second.store.getDraft("test-tenant", account.id, created.id)).toBeNull();
+    second.store.close();
+    first.store.close();
+  });
+
+  test("disconnect does not retry deletion of sent provider-draft residue", async () => {
+    const removedDrafts: string[] = [];
+    let failRemoval = true;
+    const harness = await createEmptyTestHarness({
+      onDraftRemove: (draftId) => { removedDrafts.push(draftId); },
+      draftRemoveFailure: () => failRemoval ? new Error("cleanup unavailable") : undefined,
+    });
+    const account = await harness.service.createAccount(testAccountInput());
+    const provider = harness.providerForAccount(account.id);
+    if (!provider) throw new Error("Expected provider");
+    const draft = await harness.service.createDraft(deliverableDraftInput(account));
+    const receipt = await harness.service.sendDraft(account.id, draft.id, { version: draft.version });
+    expect(receipt.warning).toContain("provider draft could not be removed");
+    expect(removedDrafts).toEqual([draft.id]);
+
+    failRemoval = false;
+    await harness.service.removeAccount(account.id);
+    expect(removedDrafts).toEqual([draft.id]);
+    expect(await provider.listDrafts(account.id)).toHaveLength(1);
+    expect(await harness.store.getAccount(account.id)).toBeNull();
+    expect(await harness.store.getDraft("test-tenant", account.id, draft.id)).toBeNull();
+    harness.store.close();
+  });
+
   test("serializes provider lifecycle mutations across services sharing one database", async () => {
     const path = temporaryStore();
     let releaseFirst: (() => void) | undefined;
@@ -244,17 +546,17 @@ describe("server-authoritative drafts", () => {
       original.id,
       updateInput(original, { body: "Newer authoritative body" }),
     );
-    const edited = await waitForDraftVersion(second.store, account.id, original.id, 2);
-    const removing = first.service.removeDraft(account.id, original.id, { version: edited.version });
+    const staleRemoval = first.service.removeDraft(account.id, original.id, { version: original.version });
     await Promise.resolve();
 
     expect(activeMutations).toBe(1);
     expect(maxConcurrentMutations).toBe(1);
     releaseFirst?.();
     const [createdResult, editedResult] = await Promise.all([creating, editing]);
-    await removing;
+    await expect(staleRemoval).rejects.toThrow("Draft version conflict");
+    await first.service.removeDraft(account.id, original.id, { version: editedResult.version });
 
-    expect(createdResult).toMatchObject({ version: 2, body: "Newer authoritative body" });
+    expect(createdResult).toMatchObject({ version: 1, body: "Older body" });
     expect(editedResult).toMatchObject({ version: 2, body: "Newer authoritative body" });
     expect(providerVersionsBeforeRemoval).toEqual([[2]]);
     expect(maxConcurrentMutations).toBe(1);
@@ -811,7 +1113,16 @@ describe("server-authoritative drafts", () => {
     await started;
     const stored = await harness.store.getDraft("test-tenant", account.id, "stable-edit-id");
     if (!stored) throw new Error("Expected authoritative draft before provider completion");
-    const updating = harness.service.updateDraft(account.id, stored.id, updateInput(stored, { body: "Winning body" }));
+    const update = updateInput(stored, { body: "Winning body" });
+    const { version, ...content } = update;
+    const updating = harness.store.updateDraft(
+      "test-tenant",
+      account.id,
+      stored.id,
+      version,
+      content,
+      new Date().toISOString(),
+    );
     await waitForDraftVersion(harness.store, account.id, stored.id, 2);
     releaseFirst?.();
     const [updated, completed] = await Promise.all([updating, creating]);
@@ -987,6 +1298,7 @@ function draftInput(account: Account): CreateDraftInput {
     subject: "",
     body: "",
     identity: { name: account.name, address: account.email },
+    attachments: [],
   };
 }
 
@@ -1008,9 +1320,24 @@ function updateInput(draft: Draft, changes: Partial<UpdateDraftInput> = {}): Upd
     subject: draft.subject,
     body: draft.body,
     identity: draft.identity,
+    attachments: draft.attachments,
     ...(draft.source ? { source: draft.source } : {}),
     version: draft.version,
     ...changes,
+  };
+}
+
+function contentOf(draft: Draft): DraftContent {
+  return {
+    mode: draft.mode,
+    to: draft.to,
+    cc: draft.cc,
+    bcc: draft.bcc,
+    subject: draft.subject,
+    body: draft.body,
+    identity: draft.identity,
+    ...(draft.source ? { source: draft.source } : {}),
+    attachments: draft.attachments,
   };
 }
 

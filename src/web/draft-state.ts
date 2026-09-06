@@ -8,10 +8,19 @@ import {
 } from "../shared/contracts";
 import { isLocalDraft, localDraftsKey } from "./mail-ui-state";
 
+export class DraftRecoveryConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DraftRecoveryConflictError";
+  }
+}
+
 export class DraftSaveQueue {
   #draft: Draft | null;
   #tail: Promise<void> = Promise.resolve();
   readonly #accountId: string;
+  readonly #clientId: string;
+  readonly #submittedCreateContent = new Set<string>();
   readonly #create: (input: CreateDraftInput) => Promise<Draft>;
   readonly #update: (accountId: string, draftId: string, input: UpdateDraftInput) => Promise<Draft>;
 
@@ -20,11 +29,17 @@ export class DraftSaveQueue {
     initialDraft: Draft | undefined,
     create: (input: CreateDraftInput) => Promise<Draft>,
     update: (accountId: string, draftId: string, input: UpdateDraftInput) => Promise<Draft>,
+    clientId = initialDraft?.id ?? crypto.randomUUID(),
   ) {
     this.#accountId = accountId;
     this.#draft = initialDraft ?? null;
+    this.#clientId = clientId;
     this.#create = create;
     this.#update = update;
+  }
+
+  isDirty(content: DraftContent): boolean {
+    return this.#draft ? !sameDraftContent(this.#draft, content) : hasAuthoredContent(content);
   }
 
   get current(): Draft | null {
@@ -33,14 +48,97 @@ export class DraftSaveQueue {
 
   save(content: DraftContent): Promise<Draft> {
     const operation = this.#tail.then(async () => {
-      this.#draft = this.#draft
-        ? await this.#update(this.#accountId, this.#draft.id, { ...content, version: this.#draft.version })
-        : await this.#create({ accountId: this.#accountId, ...content });
+      if (this.#draft) {
+        const stored = await this.#update(
+          this.#accountId,
+          this.#draft.id,
+          { ...content, version: this.#draft.version },
+        );
+        this.#assertBoundary(stored);
+        if (!sameDraftContent(stored, content)) {
+          throw new DraftRecoveryConflictError("Draft changed in another client while it was being saved");
+        }
+        this.#draft = stored;
+        return stored;
+      }
+
+      this.#submittedCreateContent.add(draftContentKey(content));
+      const stored = await this.#create({ accountId: this.#accountId, clientId: this.#clientId, ...content });
+      this.#assertBoundary(stored);
+      if (stored.version !== 1
+        || stored.delivery.status !== "editable"
+        || !this.#submittedCreateContent.has(draftContentKey(stored))) {
+        throw new DraftRecoveryConflictError("Draft changed in another client after its first save");
+      }
+      const reconciled = sameDraftContent(stored, content)
+        ? stored
+        : await this.#update(this.#accountId, stored.id, { ...content, version: stored.version });
+      this.#assertBoundary(reconciled);
+      if (!sameDraftContent(reconciled, content)) {
+        throw new DraftRecoveryConflictError("Draft changed in another client while its first save was being recovered");
+      }
+      this.#draft = reconciled;
+      this.#submittedCreateContent.clear();
       return this.#draft;
     });
     this.#tail = operation.then(() => undefined, () => undefined);
     return operation;
   }
+
+  refreshAfterSend(load: (accountId: string, draftId: string) => Promise<Draft>): Promise<Draft | null> {
+    const operation = this.#tail.then(async () => {
+      if (!this.#draft) return null;
+      const refreshed = await load(this.#accountId, this.#draft.id);
+      this.#assertBoundary(refreshed);
+      if (!sameDraftContent(refreshed, this.#draft)) {
+        throw new DraftRecoveryConflictError("Draft changed in another client while send status was being recovered");
+      }
+      this.#draft = refreshed;
+      return refreshed;
+    });
+    this.#tail = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  #assertBoundary(draft: Draft): void {
+    if (draft.accountId !== this.#accountId || draft.id !== this.#clientId) {
+      throw new Error("Draft response crossed its account or compose identity boundary");
+    }
+  }
+}
+
+function sameDraftContent(draft: Draft, content: DraftContent): boolean {
+  return draftContentKey(draft) === draftContentKey(content);
+}
+
+function draftContentKey(content: DraftContent): string {
+  return JSON.stringify([
+    content.mode,
+    recipientContentKey(content.to),
+    recipientContentKey(content.cc),
+    recipientContentKey(content.bcc),
+    content.subject,
+    content.body,
+    [content.identity.name, content.identity.address],
+    content.source
+      ? [content.source.canonicalMessageId, content.source.conversationId, content.source.providerConversationId ?? null]
+      : null,
+    content.attachments.map(({ name, size, type }) => [name, size, type]),
+  ]);
+}
+
+function recipientContentKey(value: DraftContent["to"]) {
+  return typeof value === "string"
+    ? ["text", value]
+    : ["structured", value.map(({ name, address }) => [name, address])];
+}
+
+function hasAuthoredContent(content: DraftContent): boolean {
+  return [content.to, content.cc, content.bcc]
+    .some((value) => typeof value === "string" ? value.trim().length > 0 : value.length > 0)
+    || content.subject.trim().length > 0
+    || content.body.trim().length > 0
+    || content.attachments.length > 0;
 }
 
 export const localDraftMigrationKey = "postreeve.local-drafts.migrated.v2";
@@ -78,7 +176,7 @@ export async function migrateLocalDraftsOnce(
     return { migrated: 0, ignored: 1, retryable: 0 };
   }
 
-  const accountIds = new Set(accounts.map(({ id }) => id));
+  const accountsById = new Map(accounts.map((account) => [account.id, account]));
   const remaining: unknown[] = [];
   let migrated = 0;
   let ignored = 0;
@@ -86,6 +184,12 @@ export async function migrateLocalDraftsOnce(
   for (const candidate of parsed) {
     if (!isLocalDraft(candidate)) {
       ignored += 1;
+      continue;
+    }
+    const account = accountsById.get(candidate.accountId);
+    if (!account) {
+      retryable += 1;
+      remaining.push(candidate);
       continue;
     }
     const clientId = await migrationDraftId(candidate.accountId, candidate.id);
@@ -98,16 +202,12 @@ export async function migrateLocalDraftsOnce(
       bcc: candidate.bcc,
       subject: candidate.subject,
       body: candidate.body,
-      identity: { name: "", address: candidate.from },
+      identity: { name: account.name, address: account.email },
+      attachments: candidate.attachments,
       ...(candidate.source ? { source: candidate.source } : {}),
     });
     if (!input.success) {
       ignored += 1;
-      continue;
-    }
-    if (!accountIds.has(candidate.accountId)) {
-      retryable += 1;
-      remaining.push(candidate);
       continue;
     }
     try {

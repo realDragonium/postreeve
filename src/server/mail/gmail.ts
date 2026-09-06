@@ -159,17 +159,30 @@ export class GmailMailClient implements MailProvider, MailSender {
     this.#assertAccount(draft.accountId);
     const matches = (await this.listDrafts(accountId)).filter(({ postreeveId }) => postreeveId === draft.id);
     if (matches.length > 0) return this.#putDraft(draft, matches[0]!.ref, matches);
+    return this.#postDraft(draft, [], new Set());
+  }
+
+  async #postDraft(
+    draft: Draft,
+    duplicateCandidates: readonly ProviderDraft[],
+    excludedRecoveryIds: ReadonlySet<string>,
+  ): Promise<ProviderDraftRef> {
     try {
       const created = await this.#request("/drafts", gmailDraftSchema, {
         method: "POST",
-        body: JSON.stringify({ message: gmailDraftMessage(draft) }),
+        body: JSON.stringify({ message: await gmailDraftMessage(draft) }),
       });
-      return { kind: "gmail", draftId: created.id };
+      const ref = { kind: "gmail", draftId: created.id } as const;
+      await this.#removeDuplicateDrafts(ref, duplicateCandidates);
+      return ref;
     } catch (error) {
-      const recovered = (await this.listDrafts(accountId))
-        .filter((candidate) => candidate.postreeveId === draft.id && candidate.version === draft.version);
+      const recovered = (await this.listDrafts(this.#account.id))
+        .filter((candidate) => candidate.postreeveId === draft.id
+          && candidate.version === draft.version
+          && candidate.ref.kind === "gmail"
+          && !excludedRecoveryIds.has(candidate.ref.draftId));
       if (recovered.length === 0) throw error;
-      await this.#removeDuplicateDrafts(recovered[0]!.ref, recovered);
+      await this.#removeDuplicateDrafts(recovered[0]!.ref, [...duplicateCandidates, ...recovered]);
       return recovered[0]!.ref;
     }
   }
@@ -179,7 +192,9 @@ export class GmailMailClient implements MailProvider, MailSender {
     this.#assertAccount(draft.accountId);
     if (ref.kind !== "gmail") throw new Error("Gmail cannot update a draft reference from another provider");
     const matches = (await this.listDrafts(accountId)).filter(({ postreeveId }) => postreeveId === draft.id);
-    return matches.length === 0 ? this.createDraft(accountId, draft) : this.#putDraft(draft, ref, matches);
+    return matches.length === 0
+      ? this.#postDraft(draft, [], new Set())
+      : this.#putDraft(draft, ref, matches);
   }
 
   async listDrafts(accountId: string): Promise<ProviderDraft[]> {
@@ -367,20 +382,29 @@ export class GmailMailClient implements MailProvider, MailSender {
   async #putDraft(draft: Draft, requestedRef: ProviderDraftRef, matches: readonly ProviderDraft[]): Promise<ProviderDraftRef> {
     if (requestedRef.kind !== "gmail") throw new Error("Gmail cannot update a draft reference from another provider");
     const selected = matches.find(({ ref }) => ref.kind === "gmail" && ref.draftId === requestedRef.draftId) ?? matches[0];
-    if (!selected || selected.ref.kind !== "gmail") return this.createDraft(this.#account.id, draft);
+    if (!selected || selected.ref.kind !== "gmail") return this.#postDraft(draft, matches, new Set());
+    const selectedDraftId = selected.ref.draftId;
     let resultRef: ProviderDraftRef;
     let duplicateCandidates = matches;
     try {
       const updated = await this.#request(`/drafts/${encodeURIComponent(selected.ref.draftId)}`, gmailDraftSchema, {
         method: "PUT",
-        body: JSON.stringify({ message: gmailDraftMessage(draft) }),
+        body: JSON.stringify({ message: await gmailDraftMessage(draft) }),
       });
       resultRef = { kind: "gmail", draftId: updated.id };
     } catch (error) {
       const recovered = (await this.listDrafts(this.#account.id))
-        .filter((candidate) => candidate.postreeveId === draft.id && candidate.version === draft.version);
+        .filter((candidate) => candidate.postreeveId === draft.id
+          && candidate.version === draft.version
+          && !(error instanceof GmailHttpError
+            && error.status === 404
+            && candidate.ref.kind === "gmail"
+            && candidate.ref.draftId === selectedDraftId));
       if (recovered.length === 0) {
-        if (error instanceof GmailHttpError && error.status === 404) return this.createDraft(this.#account.id, draft);
+        if (error instanceof GmailHttpError && error.status === 404) {
+          const staleIds = new Set(matches.flatMap(({ ref }) => ref.kind === "gmail" ? [ref.draftId] : []));
+          return this.#postDraft(draft, matches, staleIds);
+        }
         throw error;
       }
       resultRef = recovered[0]!.ref;
@@ -726,11 +750,8 @@ function preDispatchError(error: unknown): MailSendPreDispatchError {
     : new MailSendPreDispatchError(error instanceof Error ? error.message : "Mail preparation failed", { cause: error });
 }
 
-function gmailDraftMessage(draft: Draft): { raw: string; threadId?: string } {
-  return {
-    raw: toBase64Url(buildProviderDraftMessage(draft)),
-    ...(draft.source?.providerConversationId ? { threadId: draft.source.providerConversationId } : {}),
-  };
+async function gmailDraftMessage(draft: Draft): Promise<{ raw: string }> {
+  return { raw: toBase64Url(await buildProviderDraftMessage(draft)) };
 }
 
 async function buildMessage(

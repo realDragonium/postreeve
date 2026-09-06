@@ -497,7 +497,10 @@ function App() {
           onView={(next) => { setView(next); setOpenKey(null); }}
           onSection={(next) => setSection(next as SettingsSection)}
           onManageFolders={(accountId) => setOverlay({ kind: "folders", accountId })}
-          onDrafts={() => setOverlay({ kind: "drafts" })}
+          onDrafts={() => {
+            setOverlay({ kind: "drafts" });
+            void queryClient.refetchQueries({ queryKey: ["drafts"], type: "active" });
+          }}
           draftCount={accountDrafts.length}
         /> : null}
       </div>

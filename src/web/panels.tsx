@@ -5,6 +5,7 @@ import type {
   CanonicalMessageDetail,
   CreateAccountInput,
   Draft,
+  DraftAttachment,
   DraftContent,
   Folder,
   OutboundAddress,
@@ -19,7 +20,7 @@ import {
   quotedMessage,
   replySubject,
 } from "./format";
-import type { ComposeMode, LocalAttachment, LocalIdentity } from "./mail-ui-state";
+import type { ComposeMode, LocalIdentity } from "./mail-ui-state";
 import { DraftSaveQueue } from "./draft-state";
 
 export interface ComposeIntent {
@@ -279,41 +280,55 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   const [bcc, setBcc] = useState(saved ? draftRecipientsText(saved.bcc) : "");
   const [subject, setSubject] = useState(saved?.subject ?? (source ? effectiveMode === "forward" ? forwardSubject(source.subject) : replySubject(source.subject) : ""));
   const [body, setBody] = useState(saved?.body ?? initialBody);
-  const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
+  const [attachments, setAttachments] = useState<DraftAttachment[]>(saved?.attachments ?? []);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<SendReceipt | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(saved?.updatedAt ?? null);
   const [mirrorError, setMirrorError] = useState<string | null>(saved?.mirror.status === "failed" ? saved.mirror.error : null);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const autosaveTimeout = useRef<number | null>(null);
   const autosaveSuppressed = useRef(false);
   const active = useRef(true);
   const saveSequence = useRef(0);
+  const edited = useRef({ from: false, to: false, cc: false, bcc: false });
   const saver = useRef<DraftSaveQueue | null>(null);
   if (!saver.current) saver.current = new DraftSaveQueue(account.id, saved, api.createDraft, api.updateDraft);
   const backendPending = from !== account.email || attachments.length > 0 || (conversationMode && !conversationSource);
 
   function currentDraft(): DraftContent {
+    const selectedIdentity = identities.find((identity) => identity.email === from);
     return {
       mode: effectiveMode === "draft" ? "new" : effectiveMode,
       ...(conversationSource ? { source: conversationSource } : {}),
-      identity: { name: account.name, address: from },
-      to, cc, bcc, subject, body,
+      identity: saved && !edited.current.from
+        ? saved.identity
+        : { name: selectedIdentity?.name ?? account.name, address: from },
+      to: saved && !edited.current.to ? saved.to : to,
+      cc: saved && !edited.current.cc ? saved.cc : cc,
+      bcc: saved && !edited.current.bcc ? saved.bcc : bcc,
+      subject,
+      body,
+      attachments,
     };
   }
 
-  async function saveCurrent(): Promise<Draft> {
+  async function saveCurrent(force = false): Promise<Draft> {
+    const content = currentDraft();
+    const current = saver.current!.current;
+    if (!force && !saver.current!.isDirty(content) && current) return current;
     const sequence = ++saveSequence.current;
     if (active.current) {
       setSaving(true);
       setMirrorError(null);
     }
     try {
-      const draft = await saver.current!.save(currentDraft());
+      const draft = await saver.current!.save(content);
       onSaveDraft(draft);
       if (active.current) {
         setSavedAt(draft.updatedAt);
         setMirrorError(draft.mirror.status === "failed" ? draft.mirror.error : null);
+        setRecoveryError(null);
       }
       return draft;
     } finally {
@@ -327,7 +342,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
 
   useEffect(() => {
     if (autosaveSuppressed.current) return;
-    if (![to, cc, bcc, subject, body].some((value) => value.trim()) && attachments.length === 0) return;
+    if (!saver.current!.isDirty(currentDraft())) return;
     const timeout = window.setTimeout(() => {
       void saveCurrent().catch((cause: unknown) => {
         if (active.current) setMirrorError(cause instanceof Error ? cause.message : "Draft save failed");
@@ -342,11 +357,13 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
 
   const mutation = useMutation({
     mutationFn: async (content: DraftContent) => {
-      const draft = await saver.current!.save(content);
+      const current = saver.current!.current;
+      const draft = !saver.current!.isDirty(content) && current ? current : await saver.current!.save(content);
       onSaveDraft(draft);
       return { receipt: await api.sendDraft(account.id, draft.id, { version: draft.version }), draftId: draft.id };
     },
     onSuccess: async ({ receipt: nextReceipt, draftId }) => {
+      setRecoveryError(null);
       setReceipt(nextReceipt);
       onSent(draftId);
       await Promise.all([
@@ -358,8 +375,33 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
         queryClient.invalidateQueries({ queryKey: ["folders", account.id] }),
       ]);
     },
-    onError: () => {
+    onError: async () => {
       autosaveSuppressed.current = false;
+      try {
+        const refreshed = await saver.current!.refreshAfterSend(api.draft);
+        if (!refreshed) return;
+        onSaveDraft(refreshed);
+        if (active.current) setRecoveryError(null);
+        if (refreshed.delivery.status === "sent") {
+          setReceipt(refreshed.delivery.receipt);
+          onSent(refreshed.id);
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ["messages"] }),
+            queryClient.invalidateQueries({ queryKey: ["message"] }),
+            ...(conversationSource
+              ? [queryClient.invalidateQueries({ queryKey: ["conversation", conversationSource.conversationId] })]
+              : []),
+            queryClient.invalidateQueries({ queryKey: ["folders", account.id] }),
+          ]);
+        } else if (active.current) {
+          setSavedAt(refreshed.updatedAt);
+          setMirrorError(refreshed.mirror.status === "failed" ? refreshed.mirror.error : null);
+        }
+      } catch (cause: unknown) {
+        if (active.current) {
+          setRecoveryError(cause instanceof Error ? cause.message : "Could not recover the latest send status");
+        }
+      }
     },
   });
 
@@ -403,34 +445,34 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     title={modeLabel}
     meta={account.email}
     onClose={() => {
-      if ([to, cc, bcc, subject, body].some((value) => value.trim())) void saveCurrent().catch(() => undefined);
+      if (saver.current!.isDirty(currentDraft())) void saveCurrent().catch(() => undefined);
       onClose();
     }}
     onSubmit={submit}
     footer={<>
       <span className="t-dim">{saving ? "Saving draft…" : savedAt ? `Draft saved ${formatDate(savedAt, true)}` : "Drafts autosave to the backend"}</span>
-      <button type="button" className="chip push" disabled={saving} onClick={() => void saveCurrent().catch((cause: unknown) => setMirrorError(cause instanceof Error ? cause.message : "Draft save failed"))}>Save draft</button>
+      <button type="button" className="chip push" disabled={saving} onClick={() => void saveCurrent(true).catch((cause: unknown) => setMirrorError(cause instanceof Error ? cause.message : "Draft save failed"))}>Save draft</button>
       <button className="btn" disabled={mutation.isPending || !body.trim() || backendPending} title={backendPending ? "Backend support is required before this message can be sent" : undefined}>
         {mutation.isPending ? "Sending…" : "Send message"}
       </button>
     </>}
   >
     <label className="field"><span className="field-label">From</span>
-      <select className="input" aria-label="From identity" value={from} onChange={(event) => setFrom(event.target.value)}>
+      <select className="input" aria-label="From identity" value={from} onChange={(event) => { edited.current.from = true; setFrom(event.target.value); }}>
         <option value={account.email}>{account.email}</option>
         {identities.map((identity) => <option value={identity.email} key={identity.id}>{identity.name} · {identity.email}</option>)}
       </select>
     </label>
-    <label className="field"><span className="field-label">To</span><input className="input" autoFocus required aria-label="To" placeholder="person@example.com, team@example.com" value={to} onChange={(event) => setTo(event.target.value)} /></label>
+    <label className="field"><span className="field-label">To</span><input className="input" autoFocus required aria-label="To" placeholder="person@example.com, team@example.com" value={to} onChange={(event) => { edited.current.to = true; setTo(event.target.value); }} /></label>
     <div className="field-grid">
-      <label className="field"><span className="field-label">Cc</span><input className="input" aria-label="Cc" value={cc} onChange={(event) => setCc(event.target.value)} /></label>
-      <label className="field"><span className="field-label">Bcc</span><input className="input" aria-label="Bcc" value={bcc} onChange={(event) => setBcc(event.target.value)} /></label>
+      <label className="field"><span className="field-label">Cc</span><input className="input" aria-label="Cc" value={cc} onChange={(event) => { edited.current.cc = true; setCc(event.target.value); }} /></label>
+      <label className="field"><span className="field-label">Bcc</span><input className="input" aria-label="Bcc" value={bcc} onChange={(event) => { edited.current.bcc = true; setBcc(event.target.value); }} /></label>
     </div>
     <label className="field"><span className="field-label">Subject</span><input className="input" maxLength={998} aria-label="Subject" value={subject} onChange={(event) => setSubject(event.target.value)} /></label>
     <label className="field"><span className="field-label">Message</span><textarea className="input" required rows={12} maxLength={2_000_000} aria-label="Message" value={body} onChange={(event) => setBody(event.target.value)} /></label>
     <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
       <label className="chip">Add attachments<input type="file" multiple style={{ display: "none" }} onChange={(event) => setAttachments((current) => [...current, ...[...(event.target.files ?? [])].map((file) => ({ name: file.name, size: file.size, type: file.type }))])} /></label>
-      <span className="t-dim">Files stay local in this UI pass.</span>
+      <span className="t-dim">File bytes are not stored yet.</span>
     </div>
     {attachments.map((attachment, index) => <div key={`${attachment.name}:${index}`} style={{ display: "flex", alignItems: "center", gap: 12 }}>
       <span className="t-body">{attachment.name}</span><span className="t-dim">{Math.max(1, Math.round(attachment.size / 1024))} KB</span>
@@ -441,6 +483,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       : null}{from !== account.email ? " Alternate From identities are not supported yet." : ""}{attachments.length > 0 ? " Attachment delivery is not supported yet." : ""}</div> : null}
     {validationError ? <div className="alert error">{validationError}</div> : null}
     {mirrorError ? <div className="alert">Saved in Postreeve. Provider mirror needs repair: {mirrorError}</div> : null}
+    {recoveryError ? <div className="alert error">Send status recovery failed: {recoveryError}. Your form content was kept.</div> : null}
     {mutation.isError ? <div className="alert error">{mutation.error.message}</div> : null}
   </Sheet>;
 }

@@ -274,6 +274,11 @@ export const draftRecipientFieldSchema = z.union([
   z.string(),
   z.array(outboundAddressSchema).max(100),
 ]);
+export const draftAttachmentSchema = z.object({
+  name: z.string(),
+  size: z.number().finite().nonnegative(),
+  type: z.string(),
+});
 
 export const draftContentSchema = z.object({
   mode: draftComposeModeSchema,
@@ -284,6 +289,7 @@ export const draftContentSchema = z.object({
   body: z.string().max(2_000_000),
   identity: outboundAddressSchema,
   source: conversationSendSourceSchema.optional(),
+  attachments: z.array(draftAttachmentSchema).default([]),
 });
 
 export const draftDeliverySchema = z.discriminatedUnion("status", [
@@ -414,6 +420,7 @@ export type SendMessageInput = z.infer<typeof sendMessageInputSchema>;
 export type SendReceipt = z.infer<typeof sendReceiptSchema>;
 export type DraftComposeMode = z.infer<typeof draftComposeModeSchema>;
 export type DraftRecipientField = z.infer<typeof draftRecipientFieldSchema>;
+export type DraftAttachment = z.infer<typeof draftAttachmentSchema>;
 export type DraftContent = z.infer<typeof draftContentSchema>;
 export type DraftDelivery = z.infer<typeof draftDeliverySchema>;
 export type ProviderDraftRef = z.infer<typeof providerDraftRefSchema>;

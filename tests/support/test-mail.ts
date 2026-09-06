@@ -60,7 +60,7 @@ interface TestHarnessOptions {
   storePath?: string;
   imapFailure?: Error;
   smtpFailure?: Error;
-  sendFailure?: Error;
+  sendFailure?: Error | (() => Error | undefined);
   sendWait?: Promise<void>;
   onSendAttempt?: () => void;
   rejectRecipients?: readonly string[];
@@ -418,7 +418,7 @@ class TestMailSender implements MailSender {
   readonly #behavior: {
     readonly onAttempt: (input: SendMessageInput) => void;
     readonly wait: Promise<void> | undefined;
-    readonly failure: Error | undefined;
+    readonly failure: Error | (() => Error | undefined) | undefined;
     readonly rejectRecipients: readonly string[];
     readonly receiptAccountId: string;
   };
@@ -430,7 +430,7 @@ class TestMailSender implements MailSender {
     behavior: {
       readonly onAttempt: (input: SendMessageInput) => void;
       readonly wait: Promise<void> | undefined;
-      readonly failure: Error | undefined;
+      readonly failure: Error | (() => Error | undefined) | undefined;
       readonly rejectRecipients: readonly string[];
       readonly receiptAccountId: string;
     } = {
@@ -456,7 +456,10 @@ class TestMailSender implements MailSender {
     if (input.accountId !== this.#accountId) throw new Error("Account isolation violation");
     this.#behavior.onAttempt(input);
     await this.#behavior.wait;
-    if (this.#behavior.failure) throw this.#behavior.failure;
+    const failure = typeof this.#behavior.failure === "function"
+      ? this.#behavior.failure()
+      : this.#behavior.failure;
+    if (failure) throw failure;
     const id = crypto.randomUUID();
     const recipients = [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address);
     const rejected = new Set(this.#behavior.rejectRecipients.map((address) => address.toLocaleLowerCase()));

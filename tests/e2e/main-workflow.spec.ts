@@ -16,6 +16,7 @@ import {
   type OperationBatch,
   type SendMessageInput,
   type Draft,
+  type UpdateDraftInput,
 } from "../../src/shared/contracts";
 
 const account: Account = {
@@ -92,6 +93,9 @@ function draftSendInput(draft: Draft): SendMessageInput {
 
 class BrowserDraftFixture {
   drafts: Draft[] = [];
+  listRequests = 0;
+  getRequests = 0;
+  readonly updates: UpdateDraftInput[] = [];
   #nextId = 1;
 
   async handle(
@@ -112,6 +116,7 @@ class BrowserDraftFixture {
     const url = new URL(request.url());
     const root = `/api/accounts/${accountId}/drafts`;
     if (request.method() === "GET" && url.pathname === root) {
+      this.listRequests += 1;
       await json(route, this.drafts.filter((draft) => draft.accountId === accountId));
       return true;
     }
@@ -150,9 +155,17 @@ class BrowserDraftFixture {
       return true;
     }
     const match = new RegExp(`^${root}/([^/]+)$`).exec(url.pathname);
+    if (request.method() === "GET" && match) {
+      const id = decodeURIComponent(match[1]!);
+      const draft = this.drafts.find((candidate) => candidate.accountId === accountId && candidate.id === id);
+      this.getRequests += 1;
+      await json(route, draft ?? { error: "Draft not found", code: "draft_not_found" }, draft ? 200 : 404);
+      return true;
+    }
     if (request.method() === "PUT" && match) {
       const id = decodeURIComponent(match[1]!);
       const input = updateDraftInputSchema.parse(request.postDataJSON());
+      this.updates.push(structuredClone(input));
       const index = this.drafts.findIndex((candidate) => candidate.accountId === accountId && candidate.id === id);
       const current = this.drafts[index];
       if (!current || current.version !== input.version) {
@@ -550,7 +563,7 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
       bcc: "",
       subject: "Re: Legacy reply",
       body: "Authored legacy reply body.",
-      attachments: [],
+      attachments: [{ name: "legacy.txt", size: 42, type: "text/plain" }],
       updatedAt: "2026-08-29T10:00:00.000Z",
     }]));
     localStorage.removeItem("postreeve.local-drafts.migrated.v2");
@@ -559,7 +572,12 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await page.getByRole("button", { name: /Drafts/ }).click();
   await page.getByText("Re: Legacy reply", { exact: true }).click();
   await expect(page.getByText("This draft no longer has its source conversation.")).toBeVisible();
+  await expect(page.getByText("legacy.txt", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
+  await page.getByRole("button", { name: "Remove legacy.txt" }).click();
   await page.getByRole("button", { name: "Convert to a new message" }).click();
+  await page.getByRole("button", { name: "Save draft" }).click();
+  await expect.poll(() => liveDrafts[0]?.attachments).toEqual([]);
   await page.getByRole("button", { name: "Close Edit draft" }).click();
   await page.getByRole("button", { name: /Drafts/ }).click();
   await page.getByText("Re: Legacy reply", { exact: true }).click();
@@ -632,6 +650,84 @@ test("keeps trace-header recipients and does not restore a sent draft", async ({
   await page.getByRole("button", { name: "Done" }).click();
   await page.getByRole("button", { name: /Drafts/ }).click();
   await expect(page.getByText("No drafts. Start composing and Postreeve will autosave here.")).toBeVisible();
+});
+
+test("refetches backend drafts on reopen and leaves unchanged structured drafts untouched", async ({ page }) => {
+  const fixture = new BrowserDraftFixture();
+  const saved: Draft = {
+    id: "shared-saved-draft",
+    accountId: account.id,
+    mode: "new",
+    to: [{ name: "Display Name", address: "display@example.com" }],
+    cc: [{ name: "Carbon Copy", address: "cc@example.com" }],
+    bcc: [],
+    subject: "Shared structured draft",
+    body: "Original body",
+    identity: { name: "Exact Identity", address: account.email },
+    attachments: [{ name: "legacy.txt", size: 42, type: "text/plain" }],
+    delivery: { status: "editable" },
+    mirror: {
+      status: "synced",
+      mirroredVersion: 4,
+      ref: { kind: "imap", mailbox: "Drafts", uidValidity: "1", uid: 4 },
+    },
+    createdAt: "2026-09-05T10:00:00.000Z",
+    updatedAt: "2026-09-05T10:00:04.000Z",
+    version: 4,
+  };
+  fixture.drafts = [saved];
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
+    if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, []);
+    if (await fixture.handle(route, account.id)) return;
+    if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
+    return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
+  });
+
+  await page.clock.install();
+  await page.goto("/");
+  await expect.poll(() => fixture.listRequests).toBeGreaterThanOrEqual(1);
+  const initialListRequests = fixture.listRequests;
+  await page.getByRole("button", { name: /Drafts/ }).click();
+  await expect.poll(() => fixture.listRequests).toBeGreaterThan(initialListRequests);
+  await page.getByText(saved.subject, { exact: true }).click();
+  await page.clock.fastForward(800);
+  expect(fixture.updates).toEqual([]);
+  await expect(page.getByText("Attachment delivery is not supported yet.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
+  await page.getByRole("button", { name: "Close Edit draft" }).click();
+  expect(fixture.updates).toEqual([]);
+
+  fixture.drafts.unshift({ ...saved, id: "other-client-draft", subject: "Other client autosave", attachments: [] });
+  const beforeSecondOpen = fixture.listRequests;
+  await page.getByRole("button", { name: /Drafts/ }).click();
+  await expect.poll(() => fixture.listRequests).toBeGreaterThan(beforeSecondOpen);
+  await expect(page.getByText("Other client autosave", { exact: true })).toBeVisible();
+  await page.getByText(saved.subject, { exact: true }).click();
+  await page.getByLabel("Message", { exact: true }).fill("Body-only edit");
+  await page.clock.fastForward(700);
+  await expect.poll(() => fixture.updates.length).toBe(1);
+  expect(fixture.updates[0]).toMatchObject({
+    to: saved.to,
+    cc: saved.cc,
+    bcc: saved.bcc,
+    identity: saved.identity,
+    attachments: saved.attachments,
+    body: "Body-only edit",
+    version: saved.version,
+  });
+  await page.getByRole("button", { name: "Close Edit draft" }).click();
+
+  fixture.drafts = fixture.drafts.filter(({ id }) => id !== "other-client-draft");
+  const beforeThirdOpen = fixture.listRequests;
+  await page.getByRole("button", { name: /Drafts/ }).click();
+  await expect.poll(() => fixture.listRequests).toBeGreaterThan(beforeThirdOpen);
+  await expect(page.getByText("Other client autosave", { exact: true })).toHaveCount(0);
 });
 
 test("reads a message and returns to the list on a narrow screen", async ({ page }) => {
