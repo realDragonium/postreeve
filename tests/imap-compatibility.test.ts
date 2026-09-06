@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { simpleParser } from "mailparser";
 import type {
+  AppendResponseObject,
   CopyResponseObject,
   ESearchResult,
   FetchMessageObject,
@@ -23,7 +25,7 @@ import {
 import { MailProviderRegistry, toCanonicalObservation } from "../src/server/mail/provider";
 import { MailSenderRegistry } from "../src/server/mail/sender";
 import { Store } from "../src/server/db/store";
-import { canonicalConversationSchema, type MessageRef } from "../src/shared/contracts";
+import { canonicalConversationSchema, type Draft, type MessageRef } from "../src/shared/contracts";
 import { PostreeveService } from "../src/server/core/postreeve";
 import { CredentialVault } from "../src/server/security/credentials";
 import { createApi } from "../src/server/api";
@@ -48,6 +50,7 @@ interface FakeState {
   readonly fetchQueries: FetchQueryObject[];
   eSearchAll?: string;
   lists: number;
+  ambiguousAppendFailures: number;
 }
 
 const config = {
@@ -351,8 +354,46 @@ describe("Bun IMAP compatibility", () => {
       { path: "INBOX", name: "Inbox", specialUse: "inbox", unread: 2, total: 3 },
       { path: "Archive", name: "Archive", specialUse: "archive", unread: 0, total: 0 },
       { path: "Bin", name: "Bin", specialUse: "trash", unread: 0, total: 0 },
+      { path: "Drafts", name: "Drafts", specialUse: "drafts", unread: 0, total: 0 },
     ]);
     expect(provider.listFolders("account-b")).rejects.toThrow("cannot access account account-b");
+  });
+
+  test("creates, updates, lists, and safely removes marked drafts in the special-use mailbox", async () => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const first = providerDraft(1, { to: "unfinished@, Person <person@example.test>", body: "First body" });
+    state.ambiguousAppendFailures = 3;
+
+    const firstRef = await provider.createDraft(config.accountId, first);
+    expect(firstRef).toMatchObject({ kind: "imap", mailbox: "Drafts", uidValidity: "505" });
+    const updated = providerDraft(2, {
+      to: "unfinished@, Person <person@example.test>",
+      subject: "Updated",
+      body: "Second body",
+    });
+    const updatedRef = await provider.updateDraft(config.accountId, updated, firstRef);
+    await provider.updateDraft(config.accountId, updated, updatedRef);
+    const listed = await provider.listDrafts(config.accountId);
+    expect(listed).toEqual([{ postreeveId: updated.id, version: 2, ref: expect.objectContaining({ kind: "imap", mailbox: "Drafts" }) }]);
+    const draftsMailbox = state.mailboxes.get("Drafts");
+    if (!draftsMailbox) throw new Error("Expected special-use Drafts mailbox");
+    expect(draftsMailbox.messages.size).toBe(1);
+    const mirrored = [...draftsMailbox.messages.values()][0];
+    expect(mirrored?.flags).toContain("\\Draft");
+    expect(mirrored?.source?.toString()).toContain("To: unfinished@, Person <person@example.test>");
+    if (!mirrored?.source) throw new Error("Expected mirrored draft source");
+    expect((await simpleParser(mirrored.source)).text).toBe("Second body");
+
+    const unrelated = fakeMessage(900, 1n, "Unrelated deleted message", "Keep", new Set(["\\Deleted"]));
+    draftsMailbox.messages.set(900, unrelated);
+    await provider.removeDraft(config.accountId, updated.id, updatedRef);
+    await provider.removeDraft(config.accountId, updated.id, updatedRef);
+    expect(draftsMailbox.messages.has(900)).toBe(true);
+    expect(await provider.listDrafts(config.accountId)).toEqual([]);
+    await expect(provider.createDraft("account-b", first)).rejects.toThrow("cannot access account account-b");
+    await expect(provider.createDraft(config.accountId, { ...first, accountId: "account-b" }))
+      .rejects.toThrow("cannot access account account-b");
   });
 
   test("manages custom folders without changing special-use mailboxes", async () => {
@@ -680,6 +721,39 @@ class FakeImapClient implements ImapClient {
     };
   }
 
+  async messageDelete(range: number | number[], _options?: { uid?: boolean }): Promise<boolean> {
+    const mailbox = this.#requireSelected();
+    const uids = Array.isArray(range) ? range : [range];
+    let deleted = false;
+    for (const uid of uids) deleted = mailbox.messages.delete(uid) || deleted;
+    return deleted;
+  }
+
+  async append(
+    path: string | string[],
+    content: string | Buffer,
+    flags: string[] = [],
+    idate?: Date | string,
+  ): Promise<AppendResponseObject | false> {
+    const mailbox = this.#mailbox(path);
+    const uid = mailbox.nextUid++;
+    const source = Buffer.isBuffer(content) ? Buffer.from(content) : Buffer.from(content);
+    mailbox.messages.set(uid, {
+      seq: uid,
+      uid,
+      modseq: 1n,
+      flags: new Set(flags),
+      internalDate: idate ? new Date(idate) : new Date(),
+      source,
+      headers: selectedHeaders(source, ["X-Postreeve-Draft-ID", "X-Postreeve-Draft-Version"]),
+    });
+    if (this.#state.ambiguousAppendFailures > 0) {
+      this.#state.ambiguousAppendFailures -= 1;
+      throw new Error("ambiguous APPEND response");
+    }
+    return { destination: mailbox.path, uidValidity: mailbox.uidValidity, uid };
+  }
+
   #changeFlags(range: number, flags: string[], add: boolean, options?: StoreOptions): boolean {
     this.#state.storeOptions.push(options ?? {});
     const message = this.#requireSelected().messages.get(range);
@@ -738,6 +812,7 @@ function fakeState(): FakeState {
     searchOptions: [],
     fetchQueries: [],
     lists: 0,
+    ambiguousAppendFailures: 0,
     mailboxes: new Map([
       [
         "INBOX",
@@ -769,6 +844,17 @@ function fakeState(): FakeState {
           uidValidity: 303n,
           specialUse: "\\Trash",
           nextUid: 30,
+          messages: new Map(),
+        },
+      ],
+      [
+        "Drafts",
+        {
+          path: "Drafts",
+          name: "Drafts",
+          uidValidity: 505n,
+          specialUse: "\\Drafts",
+          nextUid: 1,
           messages: new Map(),
         },
       ],
@@ -952,5 +1038,25 @@ function messageRef(overrides: Partial<MessageRef> = {}): MessageRef {
     uid: 3,
     modseq: "13",
     ...overrides,
+  };
+}
+
+function providerDraft(version: number, changes: Partial<Draft> = {}): Draft {
+  return {
+    id: "imap-postreeve-draft",
+    accountId: config.accountId,
+    mode: "new",
+    to: "person@example.test",
+    cc: "",
+    bcc: "",
+    subject: "Provider draft",
+    body: "Body",
+    identity: { name: "Human", address: config.username },
+    delivery: { status: "editable" },
+    mirror: { status: "pending" },
+    createdAt: "2026-09-06T10:00:00.000Z",
+    updatedAt: `2026-09-06T10:00:0${version}.000Z`,
+    version,
+    ...changes,
   };
 }

@@ -16,10 +16,11 @@ import type {
   OperationBatch,
   Proposal,
   SendReceipt,
+  ProviderDraftRef,
 } from "../../shared/contracts";
-import { draftSchema, sendReceiptSchema } from "../../shared/contracts";
+import { draftSchema, providerDraftRefSchema, sendReceiptSchema } from "../../shared/contracts";
 import { AccountConflictError, DraftConflictError, DraftNotFoundError } from "../core/errors";
-import { accounts, batches, drafts, proposals, type StoredOperation } from "./schema";
+import { accounts, batches, proposals, type StoredOperation } from "./schema";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
 import type { ProviderMessageObservation } from "../mail/provider";
 import type { ConversationSendContext } from "../mail/sender";
@@ -131,29 +132,41 @@ export class Store {
     return remove.immediate(id);
   }
 
-  async insertDraft(tenantId: string, draft: Draft): Promise<void> {
-    await this.#db.insert(drafts).values({
-      id: draft.id,
-      tenantId,
-      accountId: draft.accountId,
-      mode: draft.mode,
-      recipientsTo: draft.to,
-      recipientsCc: draft.cc,
-      recipientsBcc: draft.bcc,
-      subject: draft.subject,
-      body: draft.body,
-      identity: draft.identity,
-      source: draft.source ?? null,
-      deliveryStatus: "editable",
-      deliveryReceipt: null,
-      deliveryError: null,
-      claimedAt: null,
-      claimOwner: null,
-      settledAt: null,
-      createdAt: draft.createdAt,
-      updatedAt: draft.updatedAt,
-      version: draft.version,
+  async insertDraft(tenantId: string, draft: Draft): Promise<Draft> {
+    const insert = this.#sqlite.transaction((): Draft => {
+      const existing = this.#sqlite.query("SELECT * FROM drafts WHERE tenant_id = ? AND id = ?")
+        .get(tenantId, draft.id) as DraftRow | null;
+      if (existing) {
+        if (existing.account_id !== draft.accountId) throw new Error("Draft idempotency identity belongs to another account");
+        return toDraft(existing);
+      }
+      this.#sqlite.query(`
+        INSERT INTO drafts (
+          id, tenant_id, account_id, mode, recipients_to, recipients_cc, recipients_bcc,
+          subject, body, identity, source, delivery_status, delivery_receipt, delivery_error,
+          claimed_at, claim_owner, settled_at, mirror_status, mirror_ref, mirrored_version,
+          mirror_error, created_at, updated_at, version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL,
+          'pending', NULL, NULL, NULL, ?, ?, ?)
+      `).run(
+        draft.id,
+        tenantId,
+        draft.accountId,
+        draft.mode,
+        JSON.stringify(draft.to),
+        JSON.stringify(draft.cc),
+        JSON.stringify(draft.bcc),
+        draft.subject,
+        draft.body,
+        JSON.stringify(draft.identity),
+        draft.source ? JSON.stringify(draft.source) : null,
+        draft.createdAt,
+        draft.updatedAt,
+        draft.version,
+      );
+      return draft;
     });
+    return insert.immediate();
   }
 
   async listDrafts(tenantId: string, accountId: string): Promise<Draft[]> {
@@ -183,6 +196,7 @@ export class Store {
         mode = ?, recipients_to = ?, recipients_cc = ?, recipients_bcc = ?, subject = ?, body = ?,
         identity = ?, source = ?, delivery_status = 'editable', delivery_receipt = NULL,
         delivery_error = NULL, claimed_at = NULL, claim_owner = NULL, settled_at = NULL,
+        mirror_status = 'pending', mirror_error = NULL,
         updated_at = ?, version = version + 1
       WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
         AND delivery_status IN ('editable', 'failed')
@@ -204,6 +218,40 @@ export class Store {
     ) as DraftRow | null;
     if (row) return toDraft(row);
     this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "updated");
+  }
+
+  async completeDraftMirror(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    expectedVersion: number,
+    ref: ProviderDraftRef,
+  ): Promise<boolean> {
+    const validatedRef = providerDraftRefSchema.parse(ref);
+    const account = this.#sqlite.query("SELECT kind FROM accounts WHERE id = ?").get(accountId) as { kind: MailProviderKind } | null;
+    if (account && account.kind !== validatedRef.kind) {
+      throw new Error("Draft mirror reference does not match the account provider");
+    }
+    const result = this.#sqlite.query(`
+      UPDATE drafts SET mirror_status = 'synced', mirror_ref = ?, mirrored_version = ?, mirror_error = NULL
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+    `).run(JSON.stringify(validatedRef), expectedVersion, tenantId, accountId, id, expectedVersion);
+    return result.changes === 1;
+  }
+
+  async failDraftMirror(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    expectedVersion: number,
+    error: string,
+  ): Promise<boolean> {
+    const message = normalizeDeliveryError(error, "Provider draft mirroring failed");
+    const result = this.#sqlite.query(`
+      UPDATE drafts SET mirror_status = 'failed', mirror_error = ?
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+    `).run(message, tenantId, accountId, id, expectedVersion);
+    return result.changes === 1;
   }
 
   async deleteDraft(tenantId: string, accountId: string, id: string, expectedVersion: number): Promise<void> {
@@ -347,7 +395,7 @@ export class Store {
   ): Promise<Draft> {
     const copy = this.#sqlite.transaction((): Draft => {
       const source = this.#sqlite.query(`
-        UPDATE drafts SET updated_at = ?, version = version + 1
+        UPDATE drafts SET updated_at = ?, version = version + 1, mirror_status = 'pending', mirror_error = NULL
         WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
           AND delivery_status = 'uncertain'
         RETURNING *
@@ -359,8 +407,10 @@ export class Store {
         INSERT INTO drafts (
           id, tenant_id, account_id, mode, recipients_to, recipients_cc, recipients_bcc,
           subject, body, identity, source, delivery_status, delivery_receipt, delivery_error,
-          claimed_at, claim_owner, settled_at, created_at, updated_at, version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL, ?, ?, 1)
+          claimed_at, claim_owner, settled_at, mirror_status, mirror_ref, mirrored_version,
+          mirror_error, created_at, updated_at, version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL,
+          'pending', NULL, NULL, NULL, ?, ?, 1)
       `).run(
         copyId,
         source.tenant_id,
@@ -1061,6 +1111,7 @@ export class Store {
     this.#migrateReferenceSequences();
     this.#migrateSemanticMessageIds();
     this.#migrateDrafts();
+    this.#migrateDraftMirrors();
     const accountsTable = this.#sqlite.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
       .get() as { sql: string } | null;
     if (accountsTable && !accountsTable.sql.includes("'gmail'")) {
@@ -1149,6 +1200,21 @@ export class Store {
       `);
       const violations = this.#sqlite.query("PRAGMA foreign_key_check('drafts')").all();
       if (violations.length > 0) throw new Error("Draft migration left invalid foreign keys");
+    });
+    migrate();
+  }
+
+  #migrateDraftMirrors(): void {
+    if (this.#sqlite.query("SELECT 1 FROM schema_migrations WHERE version = 480").get()) return;
+    const migrate = this.#sqlite.transaction(() => {
+      this.#sqlite.exec(`
+        ALTER TABLE drafts ADD COLUMN mirror_status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (mirror_status IN ('pending', 'synced', 'failed'));
+        ALTER TABLE drafts ADD COLUMN mirror_ref TEXT;
+        ALTER TABLE drafts ADD COLUMN mirrored_version INTEGER CHECK (mirrored_version IS NULL OR mirrored_version > 0);
+        ALTER TABLE drafts ADD COLUMN mirror_error TEXT;
+        INSERT INTO schema_migrations (version, applied_at) VALUES (480, CURRENT_TIMESTAMP);
+      `);
     });
     migrate();
   }
@@ -1550,6 +1616,10 @@ interface DraftRow {
   claimed_at: string | null;
   claim_owner: string | null;
   settled_at: string | null;
+  mirror_status: Draft["mirror"]["status"];
+  mirror_ref: string | null;
+  mirrored_version: number | null;
+  mirror_error: string | null;
   created_at: string;
   updated_at: string;
   version: number;
@@ -1591,6 +1661,25 @@ function toDraft(row: DraftRow): Draft {
         return { status: "sent", settledAt: row.settled_at, receipt };
     }
   })();
+  const ref = row.mirror_ref === null ? undefined : providerDraftRefSchema.parse(parseJson(row.mirror_ref));
+  const mirroredVersion = row.mirrored_version ?? undefined;
+  const mirror: Draft["mirror"] = (() => {
+    switch (row.mirror_status) {
+      case "pending":
+        return { status: "pending", ...(mirroredVersion ? { mirroredVersion } : {}), ...(ref ? { ref } : {}) };
+      case "synced":
+        if (!mirroredVersion || !ref) throw new Error("Synced draft mirror is missing its provider state");
+        return { status: "synced", mirroredVersion, ref };
+      case "failed":
+        if (!row.mirror_error?.trim()) throw new Error("Failed draft mirror is missing its error");
+        return {
+          status: "failed",
+          error: row.mirror_error.trim(),
+          ...(mirroredVersion ? { mirroredVersion } : {}),
+          ...(ref ? { ref } : {}),
+        };
+    }
+  })();
   return draftSchema.parse({
     id: row.id,
     accountId: row.account_id,
@@ -1603,6 +1692,7 @@ function toDraft(row: DraftRow): Draft {
     identity: parseJson(row.identity),
     ...(row.source ? { source: parseJson(row.source) } : {}),
     delivery,
+    mirror,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     version: row.version,

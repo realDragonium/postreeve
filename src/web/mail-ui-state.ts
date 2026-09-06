@@ -32,15 +32,15 @@ export interface LocalIdentity {
   readonly email: string;
 }
 
-const draftsKey = "postreeve.local-drafts.v1";
+export const localDraftsKey = "postreeve.local-drafts.v1";
 const identitiesKey = "postreeve.local-identities.v1";
 
 export function loadLocalDrafts(): LocalDraft[] {
-  return loadArray(draftsKey, isLocalDraft);
+  return loadArray(localDraftsKey, isLocalDraft);
 }
 
 export function storeLocalDrafts(drafts: readonly LocalDraft[]): void {
-  localStorage.setItem(draftsKey, JSON.stringify(drafts));
+  localStorage.setItem(localDraftsKey, JSON.stringify(drafts));
 }
 
 export function loadLocalIdentities(): LocalIdentity[] {
@@ -75,7 +75,7 @@ function isComposeMode(value: unknown): value is ComposeMode {
   return value === "new" || value === "reply" || value === "reply_all" || value === "forward" || value === "draft";
 }
 
-function isLocalDraft(value: unknown): value is LocalDraft {
+export function isLocalDraft(value: unknown): value is LocalDraft {
   return isRecord(value)
     && typeof value.id === "string"
     && typeof value.accountId === "string"

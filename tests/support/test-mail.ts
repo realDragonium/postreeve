@@ -2,6 +2,7 @@ import {
   sendMessageInputSchema,
   sendReceiptSchema,
   type CreateAccountInput,
+  type Draft,
   type Folder,
   type MessageDetail,
   type MessageRef,
@@ -9,6 +10,7 @@ import {
   type SendMessageInput,
   type SendReceipt,
   type TriageAction,
+  type ProviderDraftRef,
 } from "../../src/shared/contracts";
 import { PostreeveService } from "../../src/server/core/postreeve";
 import { Store } from "../../src/server/db/store";
@@ -19,6 +21,7 @@ import {
   type MailProvider,
   type ProviderMessageDetail,
   type ProviderLocationMove,
+  type ProviderDraft,
 } from "../../src/server/mail/provider";
 import {
   MailSenderRegistry,
@@ -71,6 +74,8 @@ interface TestHarnessOptions {
     references: string[];
   };
   readOverrides?: Partial<ProviderMessageDetail>;
+  onDraftMirror?: (draft: Draft) => void | Promise<void>;
+  draftRemoveFailure?: () => Error | undefined;
 }
 
 export async function createTestHarness(options: TestHarnessOptions = {}) {
@@ -87,6 +92,7 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
   const sendAttempts: SendMessageInput[] = [];
   const sendContexts: Array<ConversationSendContext | undefined> = [];
   const connections: ImapAccountCredentials[] = [];
+  const draftMirrorAttempts: Draft[] = [];
   const providers = new Map<string, TestMailProvider>();
   const service = new PostreeveService(
     store,
@@ -103,6 +109,11 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
         options.missingMessageId ?? false,
         options.sourceThreading,
         options.readOverrides ?? {},
+        async (draft) => {
+          draftMirrorAttempts.push(structuredClone(draft));
+          await options.onDraftMirror?.(draft);
+        },
+        options.draftRemoveFailure,
       );
       providers.set(accountId, provider);
       return provider;
@@ -126,7 +137,21 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
     },
   );
   await service.initialize();
-  return { store, service, sent, sendAttempts, sendContexts, connections };
+  return {
+    store,
+    service,
+    sent,
+    sendAttempts,
+    sendContexts,
+    connections,
+    draftMirrorAttempts,
+    providerDrafts: async (accountId: string) => providers.get(accountId)?.listDrafts(accountId) ?? [],
+    replaceProviderDraftVersion: (accountId: string, id: string, version: number) => {
+      const provider = providers.get(accountId);
+      if (!provider) throw new Error("Test provider is missing");
+      provider.replaceDraftVersion(id, version);
+    },
+  };
 }
 
 class TestMailProvider implements MailProvider {
@@ -137,10 +162,15 @@ class TestMailProvider implements MailProvider {
     ["Archive", { name: "Archive", specialUse: "archive" }],
     ["Sent", { name: "Sent", specialUse: "sent" }],
     ["Trash", { name: "Trash", specialUse: "trash" }],
+    ["Drafts", { name: "Drafts", specialUse: "drafts" }],
   ]);
+  readonly #drafts = new Map<string, ProviderDraft>();
+  #nextDraftUid = 1;
   readonly #verificationFailure: Error | undefined;
   readonly #moveChangesUid: boolean;
   readonly #readOverrides: Partial<ProviderMessageDetail>;
+  readonly #onDraftMirror: (draft: Draft) => void | Promise<void>;
+  readonly #draftRemoveFailure: (() => Error | undefined) | undefined;
 
   constructor(
     accountId: string,
@@ -150,11 +180,15 @@ class TestMailProvider implements MailProvider {
     missingMessageId: boolean,
     sourceThreading: TestHarnessOptions["sourceThreading"],
     readOverrides: Partial<ProviderMessageDetail>,
+    onDraftMirror: (draft: Draft) => void | Promise<void>,
+    draftRemoveFailure: (() => Error | undefined) | undefined,
   ) {
     this.#accountId = accountId;
     this.#messages = testMessages(accountId, duplicateDelivery, archiveDelivery);
     this.#moveChangesUid = missingMessageId;
     this.#readOverrides = structuredClone(readOverrides);
+    this.#onDraftMirror = onDraftMirror;
+    this.#draftRemoveFailure = draftRemoveFailure;
     if (missingMessageId) {
       this.#messages[0]!.messageId = "missing-message-id";
       this.#messages[0]!.inReplyTo = "<parent@example.test>";
@@ -206,6 +240,30 @@ class TestMailProvider implements MailProvider {
       throw new Error("Move every message out of this IMAP folder before deleting it");
     }
     this.#folders.delete(path);
+  }
+
+  async createDraft(accountId: string, draft: Draft): Promise<ProviderDraftRef> {
+    this.#assertAccount(accountId);
+    return this.#storeDraft(draft);
+  }
+
+  async updateDraft(accountId: string, draft: Draft, ref: ProviderDraftRef): Promise<ProviderDraftRef> {
+    this.#assertAccount(accountId);
+    if (ref.kind !== "imap") throw new Error("Test IMAP provider received another provider's reference");
+    return this.#storeDraft(draft, ref.uid);
+  }
+
+  async listDrafts(accountId: string): Promise<ProviderDraft[]> {
+    this.#assertAccount(accountId);
+    return [...this.#drafts.values()].map((draft) => structuredClone(draft));
+  }
+
+  async removeDraft(accountId: string, postreeveId: string, ref?: ProviderDraftRef): Promise<void> {
+    this.#assertAccount(accountId);
+    if (ref?.kind === "gmail") throw new Error("Test IMAP provider received another provider's reference");
+    const failure = this.#draftRemoveFailure?.();
+    if (failure) throw failure;
+    this.#drafts.delete(postreeveId);
   }
 
   async listMessages(accountId: string, mailbox: string, limit: number): Promise<MessageSummary[]> {
@@ -308,6 +366,12 @@ class TestMailProvider implements MailProvider {
     });
   }
 
+  replaceDraftVersion(id: string, version: number): void {
+    const draft = this.#drafts.get(id);
+    if (!draft) throw new Error("Test provider draft is missing");
+    this.#drafts.set(id, { ...draft, version });
+  }
+
   #folder(path: string, name: string, specialUse: Folder["specialUse"]): Folder {
     const messages = this.#messages.filter((message) => message.mailbox === path);
     return { path, name, specialUse, total: messages.length, unread: messages.filter((message) => !message.read).length };
@@ -322,6 +386,13 @@ class TestMailProvider implements MailProvider {
 
   #assertAccount(accountId: string): void {
     if (accountId !== this.#accountId) throw new Error("Account isolation violation");
+  }
+
+  async #storeDraft(draft: Draft, uid = this.#nextDraftUid++): Promise<ProviderDraftRef> {
+    await this.#onDraftMirror(draft);
+    const ref: ProviderDraftRef = { kind: "imap", mailbox: "Drafts", uidValidity, uid };
+    this.#drafts.set(draft.id, { postreeveId: draft.id, version: draft.version, ref });
+    return ref;
   }
 }
 

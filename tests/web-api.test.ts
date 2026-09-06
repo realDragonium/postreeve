@@ -45,6 +45,7 @@ test("web API sends typed draft lifecycle requests", async () => {
     accountId: "account/one",
     ...content,
     delivery: { status: "editable" as const },
+    mirror: { status: "synced" as const, mirroredVersion: 1, ref: { kind: "gmail" as const, draftId: "provider-draft" } },
     createdAt: now,
     updatedAt: now,
     version: 1,

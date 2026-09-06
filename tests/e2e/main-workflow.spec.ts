@@ -2,17 +2,20 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 import {
   createFolderInputSchema,
   createAccountInputSchema,
+  createDraftInputSchema,
   canonicalMessageSummarySchema,
   deleteFolderInputSchema,
   directActionInputSchema,
   messageRefSchema,
   renameFolderInputSchema,
   sendMessageInputSchema,
+  updateDraftInputSchema,
   type Account,
   type Folder,
   type CanonicalMessageDetail,
   type OperationBatch,
   type SendMessageInput,
+  type Draft,
 } from "../../src/shared/contracts";
 
 const account: Account = {
@@ -72,6 +75,112 @@ async function json(route: Route, value: unknown, status = 200): Promise<void> {
   await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
 }
 
+function draftSendInput(draft: Draft): SendMessageInput {
+  const recipients = (value: Draft["to"]) => typeof value === "string"
+    ? value.split(",").map((address) => ({ name: "", address: address.trim() })).filter(({ address }) => address)
+    : value;
+  return sendMessageInputSchema.parse({
+    accountId: draft.accountId,
+    to: recipients(draft.to),
+    cc: recipients(draft.cc),
+    bcc: recipients(draft.bcc),
+    subject: draft.subject,
+    text: draft.body,
+    intent: draft.mode === "new" ? { type: "new" } : { type: draft.mode, source: draft.source },
+  });
+}
+
+class BrowserDraftFixture {
+  drafts: Draft[] = [];
+  #nextId = 1;
+
+  async handle(
+    route: Route,
+    accountId: string,
+    send: (input: SendMessageInput) => { value: unknown; status?: number } = (input) => ({
+      value: {
+        id: "sent-browser-draft",
+        accountId,
+        messageId: "sent-browser-draft@example.com",
+        accepted: [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address),
+        rejected: [],
+        submittedAt: "2026-09-05T10:00:00.000Z",
+      },
+    }),
+  ): Promise<boolean> {
+    const request = route.request();
+    const url = new URL(request.url());
+    const root = `/api/accounts/${accountId}/drafts`;
+    if (request.method() === "GET" && url.pathname === root) {
+      await json(route, this.drafts.filter((draft) => draft.accountId === accountId));
+      return true;
+    }
+    if (request.method() === "POST" && url.pathname === root) {
+      const input = createDraftInputSchema.parse({ accountId, ...request.postDataJSON() });
+      const existing = input.clientId ? this.drafts.find(({ id }) => id === input.clientId) : undefined;
+      if (existing) {
+        await json(route, existing, 201);
+        return true;
+      }
+      const { clientId, ...content } = input;
+      const draft: Draft = {
+        ...content,
+        id: clientId ?? `browser-draft-${this.#nextId++}`,
+        delivery: { status: "editable" },
+        mirror: { status: "synced", mirroredVersion: 1, ref: { kind: "imap", mailbox: "Drafts", uidValidity: "1", uid: this.#nextId } },
+        createdAt: "2026-09-05T10:00:00.000Z",
+        updatedAt: "2026-09-05T10:00:00.000Z",
+        version: 1,
+      };
+      this.drafts.unshift(draft);
+      await json(route, draft, 201);
+      return true;
+    }
+    const sendMatch = new RegExp(`^${root}/([^/]+)/send$`).exec(url.pathname);
+    if (request.method() === "POST" && sendMatch) {
+      const id = decodeURIComponent(sendMatch[1]!);
+      const draft = this.drafts.find((candidate) => candidate.accountId === accountId && candidate.id === id);
+      if (!draft) {
+        await json(route, { error: "Draft not found", code: "draft_not_found" }, 404);
+        return true;
+      }
+      const result = send(draftSendInput(draft));
+      if ((result.status ?? 200) < 400) this.drafts = this.drafts.filter((candidate) => candidate.id !== id);
+      await json(route, result.value, result.status);
+      return true;
+    }
+    const match = new RegExp(`^${root}/([^/]+)$`).exec(url.pathname);
+    if (request.method() === "PUT" && match) {
+      const id = decodeURIComponent(match[1]!);
+      const input = updateDraftInputSchema.parse(request.postDataJSON());
+      const index = this.drafts.findIndex((candidate) => candidate.accountId === accountId && candidate.id === id);
+      const current = this.drafts[index];
+      if (!current || current.version !== input.version) {
+        await json(route, { error: "Draft version conflict", code: "draft_conflict" }, 409);
+        return true;
+      }
+      const { version, ...content } = input;
+      const updated: Draft = {
+        ...current,
+        ...content,
+        version: version + 1,
+        updatedAt: "2026-09-05T10:00:01.000Z",
+        mirror: { status: "synced", mirroredVersion: version + 1, ref: current.mirror.ref! },
+      };
+      this.drafts[index] = updated;
+      await json(route, updated);
+      return true;
+    }
+    if (request.method() === "DELETE" && match) {
+      const id = decodeURIComponent(match[1]!);
+      this.drafts = this.drafts.filter((candidate) => candidate.id !== id);
+      await json(route, { ok: true });
+      return true;
+    }
+    return false;
+  }
+}
+
 async function installWebMcpHarness(page: Page): Promise<void> {
   await page.addInitScript(() => {
     interface BrowserTool {
@@ -107,6 +216,8 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   let lastMessageQuery = "";
   let liveFolders = structuredClone(folders);
   let remoteImageRequests = 0;
+  let liveDrafts: Draft[] = [];
+  let nextDraftId = 1;
 
   await installWebMcpHarness(page);
 
@@ -153,9 +264,54 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
       return json(route, url.searchParams.get("mailbox") === "INBOX" ? [message] : []);
     }
     if (method === "POST" && url.pathname === "/api/messages/read") return json(route, [message]);
-    if (method === "POST" && url.pathname === "/api/messages/send") {
-      const sentMessage = sendMessageInputSchema.parse(request.postDataJSON());
+    if (method === "GET" && url.pathname === `/api/accounts/${account.id}/drafts`) return json(route, liveDrafts);
+    if (method === "POST" && url.pathname === `/api/accounts/${account.id}/drafts`) {
+      const input = createDraftInputSchema.parse({ accountId: account.id, ...request.postDataJSON() });
+      const existing = input.clientId ? liveDrafts.find(({ id }) => id === input.clientId) : undefined;
+      if (existing) return json(route, existing, 201);
+      const now = "2026-08-29T09:00:00.000Z";
+      const { clientId, ...content } = input;
+      const created: Draft = {
+        ...content,
+        id: clientId ?? `web-draft-${nextDraftId++}`,
+        delivery: { status: "editable" },
+        mirror: { status: "synced", mirroredVersion: 1, ref: { kind: "imap", mailbox: "Drafts", uidValidity: "1", uid: nextDraftId } },
+        createdAt: now,
+        updatedAt: now,
+        version: 1,
+      };
+      liveDrafts = [created, ...liveDrafts];
+      return json(route, created, 201);
+    }
+    const draftRoute = new RegExp(`^/api/accounts/${account.id}/drafts/([^/]+)$`).exec(url.pathname);
+    if (draftRoute && method === "PUT") {
+      const id = decodeURIComponent(draftRoute[1]!);
+      const input = updateDraftInputSchema.parse(request.postDataJSON());
+      const current = liveDrafts.find((draft) => draft.id === id);
+      if (!current || current.version !== input.version) return json(route, { error: "Draft version conflict", code: "draft_conflict" }, 409);
+      const { version, ...content } = input;
+      const updated: Draft = {
+        ...current,
+        ...content,
+        version: version + 1,
+        updatedAt: "2026-08-29T09:00:01.000Z",
+        mirror: { status: "synced", mirroredVersion: version + 1, ref: current.mirror.ref! },
+      };
+      liveDrafts = liveDrafts.map((draft) => draft.id === id ? updated : draft);
+      return json(route, updated);
+    }
+    if (draftRoute && method === "DELETE") {
+      liveDrafts = liveDrafts.filter(({ id }) => id !== decodeURIComponent(draftRoute[1]!));
+      return json(route, { ok: true });
+    }
+    const sendDraftRoute = new RegExp(`^/api/accounts/${account.id}/drafts/([^/]+)/send$`).exec(url.pathname);
+    if (sendDraftRoute && method === "POST") {
+      const id = decodeURIComponent(sendDraftRoute[1]!);
+      const draft = liveDrafts.find((candidate) => candidate.id === id);
+      if (!draft) return json(route, { error: "Draft not found", code: "draft_not_found" }, 404);
+      const sentMessage = draftSendInput(draft);
       sentMessages.push(sentMessage);
+      liveDrafts = liveDrafts.filter((candidate) => candidate.id !== id);
       return json(route, {
         id: "sent-1",
         accountId: account.id,
@@ -270,13 +426,21 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await page.getByLabel("Message", { exact: true }).fill("Keep this as a draft for now.");
   await page.getByRole("button", { name: "Save draft" }).click();
   await page.getByRole("button", { name: "Close New message" }).click();
-  await page.getByRole("button", { name: /Local drafts/ }).click();
+  await expect.poll(() => liveDrafts.some(({ subject }) => subject === "Locally saved idea")).toBe(true);
+  await page.reload();
+  await page.getByRole("button", { name: /Drafts/ }).click();
   await expect(page.getByText("Locally saved idea", { exact: true })).toBeVisible();
   await page.getByText("Locally saved idea", { exact: true }).click();
   await expect(page.getByLabel("Message", { exact: true })).toHaveValue("Keep this as a draft for now.");
   await page.getByRole("button", { name: "Close Edit draft" }).click();
+  await page.getByRole("button", { name: /Drafts/ }).click();
+  await page.getByRole("button", { name: "Delete draft Locally saved idea" }).click();
+  await expect(page.getByText("Locally saved idea", { exact: true })).toHaveCount(0);
+  await page.reload();
+  await page.getByRole("button", { name: /Drafts/ }).click();
+  await expect(page.getByText("Locally saved idea", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Close Drafts" }).click();
 
-  await page.getByLabel("Clear search").click();
   await page.setViewportSize({ width: 1024, height: 768 });
   await page.getByText("Quarterly planning notes", { exact: true }).click();
   await expect(page.getByRole("heading", { name: "Quarterly planning notes" })).toBeVisible();
@@ -322,7 +486,7 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await page.getByLabel("Message", { exact: true }).fill(`Thanks, Sam.${await page.getByLabel("Message", { exact: true }).inputValue()}`);
   await page.getByRole("button", { name: "Save draft" }).click();
   await page.getByRole("button", { name: "Close Reply" }).click();
-  await page.getByRole("button", { name: /Local drafts/ }).click();
+  await page.getByRole("button", { name: /Drafts/ }).click();
   await page.getByText("Re: Quarterly planning notes", { exact: true }).click();
   await expect(page.getByLabel("To", { exact: true })).toHaveValue("planning-replies@example.com");
   await expect(page.getByLabel("Message", { exact: true })).toContainText("> Here are the decisions and follow-ups.");
@@ -389,18 +553,17 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
       attachments: [],
       updatedAt: "2026-08-29T10:00:00.000Z",
     }]));
+    localStorage.removeItem("postreeve.local-drafts.migrated.v2");
   }, { accountId: account.id });
   await page.reload();
-  await page.getByRole("button", { name: /Local drafts/ }).click();
+  await page.getByRole("button", { name: /Drafts/ }).click();
   await page.getByText("Re: Legacy reply", { exact: true }).click();
-  await expect(page.getByText("This local draft no longer has its source conversation.")).toBeVisible();
+  await expect(page.getByText("This draft no longer has its source conversation.")).toBeVisible();
   await page.getByRole("button", { name: "Convert to a new message" }).click();
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("postreeve.local-drafts.v1")))
-    .toContain('"mode":"new"');
   await page.getByRole("button", { name: "Close Edit draft" }).click();
-  await page.getByRole("button", { name: /Local drafts/ }).click();
+  await page.getByRole("button", { name: /Drafts/ }).click();
   await page.getByText("Re: Legacy reply", { exact: true }).click();
-  await expect(page.getByText("This local draft no longer has its source conversation.")).toHaveCount(0);
+  await expect(page.getByText("This draft no longer has its source conversation.")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Send message" })).toBeEnabled();
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByRole("heading", { name: "Message sent" })).toBeVisible();
@@ -418,6 +581,7 @@ test("keeps trace-header recipients and does not restore a sent draft", async ({
     deliveredTo: ["planning-replies@example.com", "taylor@example.com"],
   };
   const sentMessages: SendMessageInput[] = [];
+  const draftFixture = new BrowserDraftFixture();
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -427,19 +591,18 @@ test("keeps trace-header recipients and does not restore a sent draft", async ({
     if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
     if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, [tracedMessage]);
     if (request.method() === "POST" && url.pathname === "/api/messages/read") return json(route, [tracedMessage]);
-    if (request.method() === "POST" && url.pathname === "/api/messages/send") {
-      const input = sendMessageInputSchema.parse(request.postDataJSON());
+    if (await draftFixture.handle(route, account.id, (input) => {
       sentMessages.push(input);
-      if (sentMessages.length === 1) return json(route, { error: "Temporary delivery failure." }, 503);
-      return json(route, {
+      if (sentMessages.length === 1) return { value: { error: "Temporary delivery failure." }, status: 503 };
+      return { value: {
         id: "sent-traced-reply",
         accountId: account.id,
         messageId: "sent-traced-reply@example.com",
         accepted: [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address),
         rejected: [],
         submittedAt: "2026-08-29T09:01:00.000Z",
-      });
-    }
+      } };
+    })) return;
     if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
     if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
     return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
@@ -455,13 +618,11 @@ test("keeps trace-header recipients and does not restore a sent draft", async ({
   await page.getByLabel("Message", { exact: true }).fill("Preserve this reply if delivery fails.");
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByText("Temporary delivery failure.")).toBeVisible();
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("postreeve.local-drafts.v1")))
-    .toContain("Preserve this reply if delivery fails.");
+  await expect.poll(() => draftFixture.drafts[0]?.body).toBe("Preserve this reply if delivery fails.");
 
   await page.getByLabel("Message", { exact: true }).fill("Normal autosave still works after failure.");
   await page.clock.fastForward(700);
-  await expect.poll(() => page.evaluate(() => localStorage.getItem("postreeve.local-drafts.v1")))
-    .toContain("Normal autosave still works after failure.");
+  await expect.poll(() => draftFixture.drafts[0]?.body).toBe("Normal autosave still works after failure.");
 
   await page.getByLabel("Message", { exact: true }).fill("Fast reply before autosave runs.");
   await page.getByRole("button", { name: "Send message" }).click();
@@ -469,8 +630,8 @@ test("keeps trace-header recipients and does not restore a sent draft", async ({
   expect(sentMessages).toHaveLength(2);
   await page.clock.fastForward(1_000);
   await page.getByRole("button", { name: "Done" }).click();
-  await page.getByRole("button", { name: /Local drafts/ }).click();
-  await expect(page.getByText("No local drafts. Start composing and Postreeve autosaves your work here.")).toBeVisible();
+  await page.getByRole("button", { name: /Drafts/ }).click();
+  await expect(page.getByText("No drafts. Start composing and Postreeve will autosave here.")).toBeVisible();
 });
 
 test("reads a message and returns to the list on a narrow screen", async ({ page }) => {
@@ -660,6 +821,7 @@ test("keeps a selected fallback identity attached to its surviving canonical sum
   };
   const actionAccounts: string[] = [];
   let useSurvivor = false;
+  const draftFixture = new BrowserDraftFixture();
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -673,13 +835,14 @@ test("keeps a selected fallback identity attached to its surviving canonical sum
       const isSecond = url.pathname.includes(secondAccount.id);
       return json(route, useSurvivor === isSecond ? [isSecond ? survivor : fallback] : []);
     }
-    if (request.method() === "POST" && url.pathname === "/api/messages/send") {
+    if (await draftFixture.handle(route, account.id, () => {
       useSurvivor = true;
-      return json(route, {
+      return { value: {
         id: "sent-refresh", accountId: account.id, messageId: "sent-refresh@example.com",
         accepted: ["refresh@example.com"], rejected: [], submittedAt: "2026-09-05T10:00:00.000Z",
-      });
-    }
+      } };
+    })) return;
+    if (await draftFixture.handle(route, secondAccount.id)) return;
     if (request.method() === "POST" && url.pathname === "/api/messages/actions") {
       const input = directActionInputSchema.parse(request.postDataJSON());
       actionAccounts.push(input.accountId);

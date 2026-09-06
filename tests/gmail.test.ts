@@ -141,7 +141,8 @@ describe("Gmail compatibility", () => {
 
     expect(error).toBeInstanceOf(MailSendPreDispatchError);
     expect(error).toHaveProperty("message", "invalid_grant");
-    expect(requests).toEqual(["https://oauth2.googleapis.com/token"]);
+    expect(requests.length).toBeGreaterThanOrEqual(3);
+    expect(requests.every((url) => url === "https://oauth2.googleapis.com/token")).toBe(true);
     const failed = await service.getDraft(account.id, failedDraft.id);
     expect(failed.delivery).toMatchObject({ status: "failed", error: "invalid_grant" });
     expect((await service.listDrafts(account.id)).map(({ id }) => id).sort())

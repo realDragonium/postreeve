@@ -9,6 +9,7 @@ import type {
   ProposalItem,
   ProposalStatus,
   SendReceipt,
+  ProviderDraftRef,
 } from "../../shared/contracts";
 import type { AppliedMailAction } from "../mail/provider";
 
@@ -41,6 +42,10 @@ export const drafts = sqliteTable("drafts", {
   claimedAt: text("claimed_at"),
   claimOwner: text("claim_owner"),
   settledAt: text("settled_at"),
+  mirrorStatus: text("mirror_status", { enum: ["pending", "synced", "failed"] }).notNull(),
+  mirrorRef: text("mirror_ref", { mode: "json" }).$type<ProviderDraftRef>(),
+  mirroredVersion: integer("mirrored_version"),
+  mirrorError: text("mirror_error"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
   version: integer("version").notNull(),

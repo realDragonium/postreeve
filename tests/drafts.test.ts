@@ -99,6 +99,31 @@ describe("server-authoritative drafts", () => {
     reopened.store.close();
   });
 
+  test("accepts a stable migration identity once without overwriting the accepted content on replay", async () => {
+    const harness = await createEmptyTestHarness();
+    const account = await harness.service.createAccount(testAccountInput());
+    const input = {
+      ...draftInput(account),
+      clientId: "local-stable-migration-id",
+      to: " unfinished@, person@example.test ",
+      subject: "  preserved subject  ",
+      body: " preserved body\n",
+    };
+    const first = await harness.service.createDraft(input);
+    const replay = await harness.service.createDraft({ ...input, subject: "must not overwrite", body: "must not overwrite" });
+
+    expect(replay).toEqual(first);
+    expect(replay).toMatchObject({
+      id: input.clientId,
+      to: input.to,
+      subject: input.subject,
+      body: input.body,
+      version: 1,
+    });
+    expect(await harness.providerDrafts(account.id)).toHaveLength(1);
+    harness.store.close();
+  });
+
   test("atomically rejects stale edits and deletes without losing the winning content", async () => {
     const { store, service } = await createEmptyTestHarness();
     const account = await service.createAccount(testAccountInput());
@@ -666,6 +691,188 @@ describe("server-authoritative drafts", () => {
     expect(await service.sendDraft(account.id, draft.id, { version: draft.version })).toEqual(receipt);
     expect(sendAttempts).toHaveLength(1);
     store.close();
+  });
+
+  test("repairs a stale mirror completion to the winning edited version", async () => {
+    let releaseFirst: (() => void) | undefined;
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let blockFirst = true;
+    const harness = await createEmptyTestHarness({
+      onDraftMirror: async (draft) => {
+        if (draft.version !== 1 || !blockFirst) return;
+        blockFirst = false;
+        markStarted?.();
+        await firstGate;
+      },
+    });
+    const account = await harness.service.createAccount(testAccountInput());
+    const creating = harness.service.createDraft({ ...draftInput(account), clientId: "stable-edit-id" });
+    await started;
+    const stored = await harness.store.getDraft("test-tenant", account.id, "stable-edit-id");
+    if (!stored) throw new Error("Expected authoritative draft before provider completion");
+    const updated = await harness.service.updateDraft(account.id, stored.id, updateInput(stored, { body: "Winning body" }));
+    releaseFirst?.();
+    const completed = await creating;
+
+    expect(completed).toMatchObject({ version: updated.version, body: "Winning body", mirror: { status: "synced", mirroredVersion: 2 } });
+    expect(await harness.providerDrafts(account.id)).toEqual([
+      { postreeveId: stored.id, version: 2, ref: expect.objectContaining({ kind: "imap" }) },
+    ]);
+    harness.store.close();
+  });
+
+  test("removes a late provider completion after an authoritative concurrent delete", async () => {
+    let releaseMirror: (() => void) | undefined;
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseMirror = resolve; });
+    const harness = await createEmptyTestHarness({
+      onDraftMirror: async () => {
+        markStarted?.();
+        await gate;
+      },
+    });
+    const account = await harness.service.createAccount(testAccountInput());
+    const creating = harness.service.createDraft({ ...draftInput(account), clientId: "stable-delete-id" });
+    await started;
+    await harness.service.removeDraft(account.id, "stable-delete-id", { version: 1 });
+    releaseMirror?.();
+    await creating;
+
+    expect(await harness.store.getDraft("test-tenant", account.id, "stable-delete-id")).toBeNull();
+    expect(await harness.providerDrafts(account.id)).toEqual([]);
+    harness.store.close();
+  });
+
+  test("settles one send while the same authoritative edit is completing its provider mirror", async () => {
+    let releaseMirror: (() => void) | undefined;
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseMirror = resolve; });
+    let blockVersionTwo = false;
+    const harness = await createEmptyTestHarness({
+      onDraftMirror: async (draft) => {
+        if (!blockVersionTwo || draft.version !== 2) return;
+        markStarted?.();
+        await gate;
+      },
+    });
+    const account = await harness.service.createAccount(testAccountInput());
+    const created = await harness.service.createDraft(deliverableDraftInput(account));
+    blockVersionTwo = true;
+    const updating = harness.service.updateDraft(account.id, created.id, updateInput(created, { body: "Edited before send" }));
+    await started;
+    const sending = harness.service.sendDraft(account.id, created.id, { version: 2 });
+    await Promise.resolve();
+    releaseMirror?.();
+    const [updated, receipt] = await Promise.all([updating, sending]);
+
+    expect(updated).toMatchObject({ version: 2, body: "Edited before send" });
+    expect(receipt.accepted).toEqual(["recipient@example.test"]);
+    expect(harness.sendAttempts).toHaveLength(1);
+    expect(await harness.providerDrafts(account.id)).toEqual([]);
+    expect(await harness.store.getDraft("test-tenant", account.id, created.id)).toMatchObject({ delivery: { status: "sent" } });
+    harness.store.close();
+  });
+
+  test("reports provider success followed by mirror persistence failure and repairs it on read", async () => {
+    const harness = await createEmptyTestHarness();
+    const account = await harness.service.createAccount(testAccountInput());
+    const complete = harness.store.completeDraftMirror.bind(harness.store);
+    harness.store.completeDraftMirror = async () => {
+      throw new Error("fixture mirror persistence failure");
+    };
+    const created = await harness.service.createDraft({ ...draftInput(account), clientId: "persistence-repair-id" });
+    expect(created.mirror).toMatchObject({ status: "failed", error: expect.stringContaining("could not be persisted") });
+    expect(await harness.providerDrafts(account.id)).toHaveLength(1);
+
+    harness.store.completeDraftMirror = complete;
+    expect(await harness.service.getDraft(account.id, created.id)).toMatchObject({
+      id: created.id,
+      version: 1,
+      mirror: { status: "synced", mirroredVersion: 1 },
+    });
+    harness.store.close();
+  });
+
+  test("overwrites an externally changed Postreeve marker without rolling back backend content or version", async () => {
+    const harness = await createEmptyTestHarness();
+    const account = await harness.service.createAccount(testAccountInput());
+    const created = await harness.service.createDraft({ ...draftInput(account), body: "Authoritative body" });
+    harness.replaceProviderDraftVersion(account.id, created.id, 999);
+
+    const repaired = await harness.service.getDraft(account.id, created.id);
+    expect(repaired).toMatchObject({ body: "Authoritative body", version: 1, mirror: { status: "synced", mirroredVersion: 1 } });
+    expect(await harness.providerDrafts(account.id)).toEqual([
+      { postreeveId: created.id, version: 1, ref: expect.objectContaining({ kind: "imap" }) },
+    ]);
+    harness.store.close();
+  });
+
+  test("restores the provider copy when provider deletion succeeds but local deletion loses a race", async () => {
+    const harness = await createEmptyTestHarness();
+    const account = await harness.service.createAccount(testAccountInput());
+    const created = await harness.service.createDraft({ ...draftInput(account), body: "Keep authoritative content" });
+    const remove = harness.store.deleteDraft.bind(harness.store);
+    harness.store.deleteDraft = async () => {
+      throw new Error("fixture local deletion failure");
+    };
+
+    await expect(harness.service.removeDraft(account.id, created.id, { version: created.version }))
+      .rejects.toThrow("fixture local deletion failure");
+    expect(await harness.providerDrafts(account.id)).toEqual([
+      { postreeveId: created.id, version: created.version, ref: expect.objectContaining({ kind: "imap" }) },
+    ]);
+    expect(await harness.store.getDraft("test-tenant", account.id, created.id)).toMatchObject({ body: "Keep authoritative content" });
+    harness.store.deleteDraft = remove;
+    harness.store.close();
+  });
+
+  test("preserves authoritative content when explicit provider deletion is unresolved", async () => {
+    let failRemoval = false;
+    const harness = await createEmptyTestHarness({
+      draftRemoveFailure: () => failRemoval ? new Error("ambiguous provider deletion") : undefined,
+    });
+    const account = await harness.service.createAccount(testAccountInput());
+    const created = await harness.service.createDraft({ ...draftInput(account), body: "Do not lose this" });
+    failRemoval = true;
+
+    await expect(harness.service.removeDraft(account.id, created.id, { version: created.version }))
+      .rejects.toThrow("ambiguous provider deletion");
+    expect(await harness.store.getDraft("test-tenant", account.id, created.id)).toMatchObject({
+      body: "Do not lose this",
+      version: created.version,
+      mirror: { status: "failed" },
+    });
+    failRemoval = false;
+    await harness.service.removeDraft(account.id, created.id, { version: created.version });
+    expect(await harness.store.getDraft("test-tenant", account.id, created.id)).toBeNull();
+    harness.store.close();
+  });
+
+  test("keeps accepted delivery successful when provider draft cleanup needs repair", async () => {
+    let failRemoval = false;
+    const harness = await createEmptyTestHarness({
+      draftRemoveFailure: () => failRemoval ? new Error("provider cleanup unavailable") : undefined,
+    });
+    const account = await harness.service.createAccount(testAccountInput());
+    const created = await harness.service.createDraft(deliverableDraftInput(account));
+    failRemoval = true;
+    const receipt = await harness.service.sendDraft(account.id, created.id, { version: created.version });
+
+    expect(receipt.accepted).toEqual(["recipient@example.test"]);
+    expect(receipt.warning).toContain("provider draft could not be removed");
+    expect(await harness.store.getDraft("test-tenant", account.id, created.id)).toMatchObject({
+      delivery: { status: "sent" },
+      mirror: { status: "failed" },
+    });
+    failRemoval = false;
+    const replay = await harness.service.sendDraft(account.id, created.id, { version: created.version });
+    expect(replay.warning).toBeUndefined();
+    expect(await harness.providerDrafts(account.id)).toEqual([]);
+    harness.store.close();
   });
 });
 

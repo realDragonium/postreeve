@@ -4,6 +4,8 @@ import type {
   Account,
   CanonicalMessageDetail,
   CreateAccountInput,
+  Draft,
+  DraftContent,
   Folder,
   OutboundAddress,
   SendReceipt,
@@ -17,11 +19,12 @@ import {
   quotedMessage,
   replySubject,
 } from "./format";
-import type { ComposeMode, LocalAttachment, LocalDraft, LocalIdentity } from "./mail-ui-state";
+import type { ComposeMode, LocalAttachment, LocalIdentity } from "./mail-ui-state";
+import { DraftSaveQueue } from "./draft-state";
 
 export interface ComposeIntent {
   readonly mode: ComposeMode;
-  readonly draft?: LocalDraft;
+  readonly draft?: Draft;
   readonly message?: CanonicalMessageDetail;
 }
 
@@ -55,26 +58,40 @@ function parseRecipientList(value: string): OutboundAddress[] | null {
   return addresses.map((address) => ({ name: "", address }));
 }
 
+function draftRecipientsText(value: Draft["to"]): string {
+  return typeof value === "string" ? value : addressList(value);
+}
+
 export function DraftsSheet({ drafts, onClose, onCreate, onOpen, onRemove }: {
-  drafts: readonly LocalDraft[];
+  drafts: readonly Draft[];
   onClose: () => void;
   onCreate: () => void;
-  onOpen: (draft: LocalDraft) => void;
-  onRemove: (id: string) => void;
+  onOpen: (draft: Draft) => void;
+  onRemove: (draft: Draft) => Promise<void>;
 }) {
+  const [removing, setRemoving] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   return <Sheet
-    title="Local drafts"
-    meta="autosaved in this browser"
+    title="Drafts"
+    meta="saved to your mail provider"
     onClose={onClose}
-    footer={<><span className="t-dim">IMAP Drafts synchronisation will replace this local store.</span><button className="btn push" onClick={onCreate}>New message</button></>}
+    footer={<><span className="t-dim">Available from every Postreeve client and your provider’s Drafts folder.</span><button className="btn push" onClick={onCreate}>New message</button></>}
   >
-    {drafts.length === 0 ? <p className="t-dim" style={{ margin: 0 }}>No local drafts. Start composing and Postreeve autosaves your work here.</p> : null}
+    {error ? <div className="alert error">{error}</div> : null}
+    {drafts.length === 0 ? <p className="t-dim" style={{ margin: 0 }}>No drafts. Start composing and Postreeve will autosave here.</p> : null}
     {drafts.map((draft) => <div key={draft.id} style={{ display: "flex", alignItems: "center", gap: 12, borderTop: "1px solid var(--div)", padding: "10px 0" }}>
       <button style={{ flex: 1, minWidth: 0 }} onClick={() => onOpen(draft)}>
         <div className="t-ink truncate">{draft.subject || "(No subject)"}</div>
-        <div className="t-dim truncate">{draft.to || "No recipient"} · {formatDate(draft.updatedAt, true)}</div>
+        <div className="t-dim truncate">{draftRecipientsText(draft.to) || "No recipient"} · {formatDate(draft.updatedAt, true)}</div>
+        {draft.mirror.status === "failed" ? <div className="t-dim truncate">Saved in Postreeve · provider mirror needs repair</div> : null}
       </button>
-      <button className="btn-danger" aria-label={`Delete draft ${draft.subject || "without subject"}`} onClick={() => onRemove(draft.id)}>Delete</button>
+      <button className="btn-danger" disabled={removing === draft.id} aria-label={`Delete draft ${draft.subject || "without subject"}`} onClick={() => {
+        setRemoving(draft.id);
+        setError(null);
+        void onRemove(draft).catch((cause: unknown) => {
+          setError(cause instanceof Error ? cause.message : "Draft deletion failed");
+        }).finally(() => setRemoving(null));
+      }}>{removing === draft.id ? "Deleting…" : "Delete"}</button>
     </div>)}
   </Sheet>;
 }
@@ -221,7 +238,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   identities: readonly LocalIdentity[];
   intent: ComposeIntent;
   onClose: () => void;
-  onSaveDraft: (draft: LocalDraft) => void;
+  onSaveDraft: (draft: Draft) => void;
   onSent: (draftId: string | null) => void;
 }) {
   const queryClient = useQueryClient();
@@ -256,39 +273,65 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       ? `\n\n---------- Forwarded message ----------\nFrom: ${addressList(source.from)}\nDate: ${formatDate(source.receivedAt, true)}\nSubject: ${source.subject}\nTo: ${addressList(source.to)}\n\n${source.text}`
       : quotedMessage(source)
     : "";
-  const [draftId] = useState(() => saved?.id ?? crypto.randomUUID());
-  const [from, setFrom] = useState(saved?.from ?? account.email);
-  const [to, setTo] = useState(saved?.to ?? (source && effectiveMode !== "forward" ? addressList(replyRecipients) : ""));
-  const [cc, setCc] = useState(saved?.cc ?? (effectiveMode === "reply_all" ? replyAllCc : ""));
-  const [bcc, setBcc] = useState(saved?.bcc ?? "");
+  const [from, setFrom] = useState(saved?.identity.address ?? account.email);
+  const [to, setTo] = useState(saved ? draftRecipientsText(saved.to) : source && effectiveMode !== "forward" ? addressList(replyRecipients) : "");
+  const [cc, setCc] = useState(saved ? draftRecipientsText(saved.cc) : effectiveMode === "reply_all" ? replyAllCc : "");
+  const [bcc, setBcc] = useState(saved ? draftRecipientsText(saved.bcc) : "");
   const [subject, setSubject] = useState(saved?.subject ?? (source ? effectiveMode === "forward" ? forwardSubject(source.subject) : replySubject(source.subject) : ""));
   const [body, setBody] = useState(saved?.body ?? initialBody);
-  const [attachments, setAttachments] = useState<LocalAttachment[]>(saved ? [...saved.attachments] : []);
+  const [attachments, setAttachments] = useState<LocalAttachment[]>([]);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<SendReceipt | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(saved?.updatedAt ?? null);
+  const [mirrorError, setMirrorError] = useState<string | null>(saved?.mirror.status === "failed" ? saved.mirror.error : null);
+  const [saving, setSaving] = useState(false);
   const autosaveTimeout = useRef<number | null>(null);
   const autosaveSuppressed = useRef(false);
+  const active = useRef(true);
+  const saveSequence = useRef(0);
+  const saver = useRef<DraftSaveQueue | null>(null);
+  if (!saver.current) saver.current = new DraftSaveQueue(account.id, saved, api.createDraft, api.updateDraft);
   const backendPending = from !== account.email || attachments.length > 0 || (conversationMode && !conversationSource);
 
-  function currentDraft(): LocalDraft {
+  function currentDraft(): DraftContent {
     return {
-      id: draftId,
-      accountId: account.id,
       mode: effectiveMode === "draft" ? "new" : effectiveMode,
       ...(conversationSource ? { source: conversationSource } : {}),
-      from, to, cc, bcc, subject, body, attachments,
-      updatedAt: new Date().toISOString(),
+      identity: { name: account.name, address: from },
+      to, cc, bcc, subject, body,
     };
   }
+
+  async function saveCurrent(): Promise<Draft> {
+    const sequence = ++saveSequence.current;
+    if (active.current) {
+      setSaving(true);
+      setMirrorError(null);
+    }
+    try {
+      const draft = await saver.current!.save(currentDraft());
+      onSaveDraft(draft);
+      if (active.current) {
+        setSavedAt(draft.updatedAt);
+        setMirrorError(draft.mirror.status === "failed" ? draft.mirror.error : null);
+      }
+      return draft;
+    } finally {
+      if (active.current && saveSequence.current === sequence) setSaving(false);
+    }
+  }
+
+  useEffect(() => () => {
+    active.current = false;
+  }, []);
 
   useEffect(() => {
     if (autosaveSuppressed.current) return;
     if (![to, cc, bcc, subject, body].some((value) => value.trim()) && attachments.length === 0) return;
     const timeout = window.setTimeout(() => {
-      const draft = currentDraft();
-      onSaveDraft(draft);
-      setSavedAt(draft.updatedAt);
+      void saveCurrent().catch((cause: unknown) => {
+        if (active.current) setMirrorError(cause instanceof Error ? cause.message : "Draft save failed");
+      });
     }, 700);
     autosaveTimeout.current = timeout;
     return () => {
@@ -298,8 +341,12 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   }, [attachments, bcc, body, cc, effectiveMode, from, subject, to]);
 
   const mutation = useMutation({
-    mutationFn: (input: Parameters<typeof api.sendMessage>[0]) => api.sendMessage(input),
-    onSuccess: async (nextReceipt) => {
+    mutationFn: async (content: DraftContent) => {
+      const draft = await saver.current!.save(content);
+      onSaveDraft(draft);
+      return { receipt: await api.sendDraft(account.id, draft.id, { version: draft.version }), draftId: draft.id };
+    },
+    onSuccess: async ({ receipt: nextReceipt, draftId }) => {
       setReceipt(nextReceipt);
       onSent(draftId);
       await Promise.all([
@@ -313,9 +360,6 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     },
     onError: () => {
       autosaveSuppressed.current = false;
-      const draft = currentDraft();
-      onSaveDraft(draft);
-      setSavedAt(draft.updatedAt);
     },
   });
 
@@ -339,17 +383,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       window.clearTimeout(autosaveTimeout.current);
       autosaveTimeout.current = null;
     }
-    mutation.mutate({
-      accountId: account.id,
-      to: toAddresses,
-      cc: ccAddresses,
-      bcc: bccAddresses,
-      subject,
-      text: body,
-      intent: conversationMode && conversationSource
-        ? { type: effectiveMode, source: conversationSource }
-        : { type: "new" },
-    });
+    mutation.mutate(currentDraft());
   }
 
   const modeLabel = effectiveMode === "reply_all" ? "Reply all"
@@ -368,11 +402,14 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   return <Sheet
     title={modeLabel}
     meta={account.email}
-    onClose={onClose}
+    onClose={() => {
+      if ([to, cc, bcc, subject, body].some((value) => value.trim())) void saveCurrent().catch(() => undefined);
+      onClose();
+    }}
     onSubmit={submit}
     footer={<>
-      <span className="t-dim">{savedAt ? `Draft saved locally ${formatDate(savedAt, true)}` : "Drafts autosave locally"}</span>
-      <button type="button" className="chip push" onClick={() => { const draft = currentDraft(); onSaveDraft(draft); setSavedAt(draft.updatedAt); }}>Save draft</button>
+      <span className="t-dim">{saving ? "Saving draft…" : savedAt ? `Draft saved ${formatDate(savedAt, true)}` : "Drafts autosave to the backend"}</span>
+      <button type="button" className="chip push" disabled={saving} onClick={() => void saveCurrent().catch((cause: unknown) => setMirrorError(cause instanceof Error ? cause.message : "Draft save failed"))}>Save draft</button>
       <button className="btn" disabled={mutation.isPending || !body.trim() || backendPending} title={backendPending ? "Backend support is required before this message can be sent" : undefined}>
         {mutation.isPending ? "Sending…" : "Send message"}
       </button>
@@ -400,9 +437,10 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       <button type="button" className="btn-danger" style={{ marginLeft: "auto" }} aria-label={`Remove ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, candidate) => candidate !== index))}>Remove</button>
     </div>)}
     {backendPending ? <div className="alert"><strong>Sending is unavailable.</strong>{conversationMode && !conversationSource
-      ? <> This local draft no longer has its source conversation. <button type="button" className="btn-underline" onClick={() => setEffectiveMode("new")}>Convert to a new message</button></>
+      ? <> This draft no longer has its source conversation. <button type="button" className="btn-underline" onClick={() => setEffectiveMode("new")}>Convert to a new message</button></>
       : null}{from !== account.email ? " Alternate From identities are not supported yet." : ""}{attachments.length > 0 ? " Attachment delivery is not supported yet." : ""}</div> : null}
     {validationError ? <div className="alert error">{validationError}</div> : null}
+    {mirrorError ? <div className="alert">Saved in Postreeve. Provider mirror needs repair: {mirrorError}</div> : null}
     {mutation.isError ? <div className="alert error">{mutation.error.message}</div> : null}
   </Sheet>;
 }

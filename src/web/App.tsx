@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { Account, Folder, MessageSummary, TriageAction } from "../shared/contracts";
+import type { Account, Draft, Folder, MessageSummary, TriageAction } from "../shared/contracts";
 import { api } from "./api";
 import { registerPostreeveWebMcp } from "../server/webmcp/register";
 import { subscribeToWebMcpFolderLists, subscribeToWebMcpMailboxViews, webMcpServices } from "./webmcp";
@@ -31,15 +31,13 @@ import {
   type Actor,
 } from "./provenance";
 import {
-  loadLocalDrafts,
   loadLocalIdentities,
-  storeLocalDrafts,
   storeLocalIdentities,
-  type LocalDraft,
   type LocalIdentity,
   type MessageFilter,
   type MessageSort,
 } from "./mail-ui-state";
+import { migrateLocalDraftsOnce } from "./draft-state";
 import { useTheme } from "./theme";
 
 const folderPollIntervalMs = 15_000;
@@ -92,10 +90,8 @@ function App() {
   const [actorFilter, setActorFilter] = useState<Actor | "all">("all");
   const [hiddenTools, setHiddenTools] = useState<ReadonlySet<string>>(loadHiddenTools);
   const [overlay, setOverlay] = useState<Overlay>(null);
-  const [drafts, setDrafts] = useState<LocalDraft[]>(loadLocalDrafts);
   const [identities, setIdentities] = useState<LocalIdentity[]>(loadLocalIdentities);
 
-  useEffect(() => storeLocalDrafts(drafts), [drafts]);
   useEffect(() => storeLocalIdentities(identities), [identities]);
   useEffect(() => storeHiddenTools(hiddenTools), [hiddenTools]);
 
@@ -121,6 +117,18 @@ function App() {
   const foldersByAccount = new Map<string, readonly Folder[]>(
     accounts.map((account, index) => [account.id, folderResults[index]?.data ?? []]),
   );
+  const draftResults = useQueries({
+    queries: accounts.map((account) => ({ queryKey: ["drafts", account.id], queryFn: () => api.drafts(account.id) })),
+  });
+  const drafts: readonly Draft[] = draftResults.flatMap((result) => result.data ?? []);
+  const migrationStarted = useRef(false);
+  useEffect(() => {
+    if (!accountsQuery.isSuccess || migrationStarted.current) return;
+    migrationStarted.current = true;
+    void migrateLocalDraftsOnce(localStorage, accounts, api.createDraft).then(async ({ migrated }) => {
+      if (migrated > 0) await queryClient.invalidateQueries({ queryKey: ["drafts"] });
+    }).catch((error: unknown) => flash(error instanceof Error ? error.message : "Local draft migration failed"));
+  }, [accountsQuery.isSuccess, accounts.map(({ id }) => id).join(), queryClient]);
 
   const batchResults = useQueries({
     queries: accounts.map((account) => ({ queryKey: ["batches", account.id], queryFn: () => api.batches(account.id) })),
@@ -643,7 +651,10 @@ function App() {
       onClose={() => setOverlay(null)}
       onCreate={() => setOverlay({ kind: "compose", accountId: composeAccountId, intent: { mode: "new" } })}
       onOpen={(draft) => setOverlay({ kind: "compose", accountId: draft.accountId, intent: { mode: "draft", draft } })}
-      onRemove={(id) => setDrafts((current) => current.filter((draft) => draft.id !== id))}
+      onRemove={async (draft) => {
+        await api.removeDraft(draft.accountId, draft.id, { version: draft.version });
+        queryClient.setQueryData<Draft[]>(["drafts", draft.accountId], (current = []) => current.filter(({ id }) => id !== draft.id));
+      }}
     /> : null}
 
     {overlay?.kind === "compose" && accounts.find(({ id }) => id === overlay.accountId) ? <ComposeModal
@@ -651,10 +662,13 @@ function App() {
       identities={identities.filter((identity) => identity.accountId === overlay.accountId)}
       intent={overlay.intent}
       onClose={() => setOverlay(null)}
-      onSaveDraft={(draft) => setDrafts((current) => current.some(({ id }) => id === draft.id)
+      onSaveDraft={(draft) => queryClient.setQueryData<Draft[]>(["drafts", draft.accountId], (current = []) => current.some(({ id }) => id === draft.id)
         ? current.map((candidate) => candidate.id === draft.id ? draft : candidate)
         : [draft, ...current])}
-      onSent={(draftId) => { if (draftId) setDrafts((current) => current.filter(({ id }) => id !== draftId)); }}
+      onSent={(draftId) => {
+        if (!draftId) return;
+        queryClient.setQueryData<Draft[]>(["drafts", overlay.accountId], (current = []) => current.filter(({ id }) => id !== draftId));
+      }}
     /> : null}
   </div>;
 }

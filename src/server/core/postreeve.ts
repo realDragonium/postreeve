@@ -20,6 +20,7 @@ import type {
   OperationResult,
   OutboundAddress,
   Proposal,
+  ProviderDraftRef,
   RenameFolderInput,
   SendMessageInput,
   SendReceipt,
@@ -51,6 +52,7 @@ import {
   type ProviderMessageDetail,
   type ProviderLocationMove,
   type ProviderMessageSummary,
+  type ProviderDraft,
 } from "../mail/provider";
 import {
   MailSendPreDispatchError,
@@ -58,7 +60,7 @@ import {
   type ConversationSendContext,
   type MailSender,
 } from "../mail/sender";
-import { DraftConflictError, DraftNotFoundError } from "./errors";
+import { AccountConflictError, DraftConflictError, DraftNotFoundError } from "./errors";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
 import {
   CredentialVault,
@@ -87,6 +89,7 @@ interface PreparedMessageSend {
 }
 
 const draftClaimOwner = crypto.randomUUID();
+const draftReconciliationLimit = 100;
 
 export class PostreeveService {
   readonly #store: Store;
@@ -229,6 +232,11 @@ export class PostreeveService {
   }
 
   async removeAccount(id: string): Promise<void> {
+    const accountDrafts = await this.#store.listDrafts(this.#context.tenantId, id);
+    if (accountDrafts.some(({ delivery }) => delivery.status === "sending")) throw new AccountConflictError();
+    for (const draft of accountDrafts) {
+      await this.#providers.forAccount(id).removeDraft(id, draft.id, draft.mirror.ref);
+    }
     if (!await this.#store.deleteAccount(id)) throw new Error("Account not found");
     this.#providers.remove(id);
     this.#senders.remove(id);
@@ -369,26 +377,31 @@ export class PostreeveService {
   async createDraft(rawInput: CreateDraftInput): Promise<Draft> {
     const input = createDraftInputSchema.parse(rawInput);
     await this.#requireAccount(input.accountId);
+    const { clientId, ...content } = input;
     const now = new Date().toISOString();
     const draft = draftSchema.parse({
-      ...input,
-      id: crypto.randomUUID(),
+      ...content,
+      id: clientId ?? crypto.randomUUID(),
       delivery: { status: "editable" },
+      mirror: { status: "pending" },
       createdAt: now,
       updatedAt: now,
       version: 1,
     });
-    await this.#store.insertDraft(this.#context.tenantId, draft);
-    return draft;
+    const stored = await this.#store.insertDraft(this.#context.tenantId, draft);
+    if (stored.delivery.status === "sent" || stored.delivery.status === "sending") return stored;
+    return this.#mirrorDraft(stored, true);
   }
 
   async listDrafts(accountId: string): Promise<Draft[]> {
     await this.#requireAccount(accountId);
+    await this.#reconcileDrafts(accountId);
     return this.#store.listDrafts(this.#context.tenantId, accountId);
   }
 
   async getDraft(accountId: string, id: string): Promise<Draft> {
     await this.#requireAccount(accountId);
+    await this.#reconcileDrafts(accountId);
     const draft = await this.#store.getDraft(this.#context.tenantId, accountId, id);
     if (!draft) throw new DraftNotFoundError();
     return draft;
@@ -398,7 +411,7 @@ export class PostreeveService {
     await this.#requireAccount(accountId);
     const input = updateDraftInputSchema.parse(rawInput);
     const { version, ...content } = input;
-    return this.#store.updateDraft(
+    const draft = await this.#store.updateDraft(
       this.#context.tenantId,
       accountId,
       id,
@@ -406,18 +419,35 @@ export class PostreeveService {
       content,
       new Date().toISOString(),
     );
+    return this.#mirrorDraft(draft, true);
   }
 
   async removeDraft(accountId: string, id: string, rawInput: DraftVersionInput): Promise<void> {
     await this.#requireAccount(accountId);
     const { version } = draftVersionInputSchema.parse(rawInput);
-    await this.#store.deleteDraft(this.#context.tenantId, accountId, id, version);
+    const draft = await this.#store.getDraft(this.#context.tenantId, accountId, id);
+    if (!draft) throw new DraftNotFoundError();
+    if (draft.version !== version) throw new DraftConflictError();
+    if (draft.delivery.status === "sending") throw new DraftConflictError("Draft cannot be removed while delivery is sending");
+    try {
+      await this.#providers.forAccount(accountId).removeDraft(accountId, id, draft.mirror.ref);
+    } catch (error) {
+      await this.#store.failDraftMirror(this.#context.tenantId, accountId, id, version, errorMessage(error));
+      throw error;
+    }
+    try {
+      await this.#store.deleteDraft(this.#context.tenantId, accountId, id, version);
+    } catch (error) {
+      const current = await this.#store.getDraft(this.#context.tenantId, accountId, id);
+      if (current && current.delivery.status !== "sent") await this.#mirrorDraft(current, false);
+      throw error;
+    }
   }
 
   async copyDraftForRecovery(accountId: string, id: string, rawInput: DraftVersionInput): Promise<Draft> {
     await this.#requireAccount(accountId);
     const { version } = draftVersionInputSchema.parse(rawInput);
-    return this.#store.copyUncertainDraft(
+    const copy = await this.#store.copyUncertainDraft(
       this.#context.tenantId,
       accountId,
       id,
@@ -425,12 +455,18 @@ export class PostreeveService {
       crypto.randomUUID(),
       new Date().toISOString(),
     );
+    const original = await this.#store.getDraft(this.#context.tenantId, accountId, id);
+    if (original) await this.#mirrorDraft(original, false);
+    return this.#mirrorDraft(copy, true);
   }
 
   async sendDraft(accountId: string, id: string, rawInput: DraftVersionInput): Promise<SendReceipt> {
     const { version } = draftVersionInputSchema.parse(rawInput);
     const draft = await this.getDraft(accountId, id);
-    if (draft.delivery.status === "sent") return draft.delivery.receipt;
+    if (draft.delivery.status === "sent") {
+      const warning = await this.#cleanupProviderDraft(draft);
+      return warning ? withReceiptWarning(draft.delivery.receipt, warning) : draft.delivery.receipt;
+    }
     if (draft.version !== version) throw new DraftConflictError();
     if (draft.delivery.status === "sending") {
       throw new DraftConflictError("Draft delivery is already in progress");
@@ -504,7 +540,7 @@ export class PostreeveService {
     }
 
     try {
-      await this.#store.settleDraftSend(
+      const settled = await this.#store.settleDraftSend(
         this.#context.tenantId,
         accountId,
         id,
@@ -512,7 +548,8 @@ export class PostreeveService {
         receipt,
         draftClaimOwner,
       );
-      return receipt;
+      const warning = await this.#cleanupProviderDraft(settled);
+      return warning ? withReceiptWarning(receipt, warning) : receipt;
     } catch (settlementError) {
       const recoveredAt = new Date().toISOString();
       let recoveryError: unknown;
@@ -541,6 +578,10 @@ export class PostreeveService {
       } catch (error) {
         recoveryError = error;
       }
+      const recovered = await this.#store.getDraft(this.#context.tenantId, accountId, id);
+      const cleanupWarning = receipt.accepted.length > 0 && recovered
+        ? await this.#cleanupProviderDraft(recovered)
+        : undefined;
       return sendReceiptSchema.parse({
         ...receipt,
         warning: [
@@ -549,8 +590,122 @@ export class PostreeveService {
           recoveryError
             ? `Its recoverable delivery state also could not be stored: ${errorMessage(recoveryError)}. Automatic retry remains blocked.`
             : "The draft remains recoverable without automatic retry.",
+          cleanupWarning,
         ].filter((message): message is string => message !== undefined).join(" "),
       });
+    }
+  }
+
+  async #mirrorDraft(draft: Draft, repairStale: boolean): Promise<Draft> {
+    const provider = this.#providers.forAccount(draft.accountId);
+    let ref: ProviderDraftRef;
+    try {
+      ref = draft.mirror.ref
+        ? await provider.updateDraft(draft.accountId, draft, draft.mirror.ref)
+        : await provider.createDraft(draft.accountId, draft);
+    } catch (error) {
+      const message = errorMessage(error);
+      try {
+        const recorded = await this.#store.failDraftMirror(
+          this.#context.tenantId,
+          draft.accountId,
+          draft.id,
+          draft.version,
+          message,
+        );
+        if (!recorded && repairStale) return this.#repairStaleMirror(draft, undefined);
+        return await this.#store.getDraft(this.#context.tenantId, draft.accountId, draft.id) ?? {
+          ...draft,
+          mirror: mirrorFailure(draft, message),
+        };
+      } catch (persistenceError) {
+        return {
+          ...draft,
+          mirror: mirrorFailure(draft, `Provider mirror failed: ${message}; its failure could not be stored: ${errorMessage(persistenceError)}`),
+        };
+      }
+    }
+    try {
+      const recorded = await this.#store.completeDraftMirror(
+        this.#context.tenantId,
+        draft.accountId,
+        draft.id,
+        draft.version,
+        ref,
+      );
+      if (!recorded && repairStale) return this.#repairStaleMirror(draft, ref);
+      return await this.#store.getDraft(this.#context.tenantId, draft.accountId, draft.id) ?? draft;
+    } catch (persistenceError) {
+      return {
+        ...draft,
+        mirror: mirrorFailure(
+          draft,
+          `Provider draft version ${draft.version} was stored, but its mirror state could not be persisted: ${errorMessage(persistenceError)}`,
+          ref,
+        ),
+      };
+    }
+  }
+
+  async #repairStaleMirror(completed: Draft, ref: ProviderDraftRef | undefined): Promise<Draft> {
+    const current = await this.#store.getDraft(this.#context.tenantId, completed.accountId, completed.id);
+    if (!current) {
+      await this.#providers.forAccount(completed.accountId).removeDraft(completed.accountId, completed.id, ref);
+      return completed;
+    }
+    if (current.delivery.status === "sent") {
+      await this.#cleanupProviderDraft(current);
+      return current;
+    }
+    return this.#mirrorDraft(current, false);
+  }
+
+  async #reconcileDrafts(accountId: string): Promise<void> {
+    const allLocal = await this.#store.listDrafts(this.#context.tenantId, accountId);
+    let providerDrafts: ProviderDraft[];
+    try {
+      providerDrafts = await this.#providers.forAccount(accountId).listDrafts(accountId);
+    } catch {
+      return;
+    }
+    const localById = new Map(allLocal.map((draft) => [draft.id, draft]));
+    let remainingRepairs = draftReconciliationLimit;
+    for (const draft of allLocal) {
+      if (draft.delivery.status === "sending") continue;
+      const matches = providerDrafts.filter(({ postreeveId }) => postreeveId === draft.id);
+      const healthy = matches.length === 1
+        && matches[0]!.version === draft.version
+        && draft.mirror.status === "synced"
+        && draft.mirror.mirroredVersion === draft.version
+        && sameProviderRef(matches[0]!.ref, draft.mirror.ref);
+      if (!healthy && remainingRepairs > 0) {
+        await this.#mirrorDraft(draft, false);
+        remainingRepairs -= 1;
+      }
+    }
+    const orphans = new Set(providerDrafts.map(({ postreeveId }) => postreeveId)
+      .filter((id) => !localById.has(id)));
+    for (const id of [...orphans].slice(0, remainingRepairs)) {
+      try {
+        await this.#providers.forAccount(accountId).removeDraft(accountId, id);
+      } catch {
+        // The backend list stays available; the next bounded pass retries cleanup.
+      }
+    }
+  }
+
+  async #cleanupProviderDraft(draft: Draft): Promise<string | undefined> {
+    try {
+      await this.#providers.forAccount(draft.accountId).removeDraft(draft.accountId, draft.id, draft.mirror.ref);
+      return undefined;
+    } catch (error) {
+      const message = `Message delivery succeeded, but the provider draft could not be removed: ${errorMessage(error)}`;
+      try {
+        await this.#store.failDraftMirror(this.#context.tenantId, draft.accountId, draft.id, draft.version, message);
+      } catch {
+        return `${message}. The cleanup failure could not be persisted.`;
+      }
+      return message;
     }
   }
 
@@ -1038,6 +1193,33 @@ function toPublicBatch(batch: StoredBatch): OperationBatch {
 function errorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message.trim() : "";
   return message || "Unknown mail provider failure";
+}
+
+function sameProviderRef(left: ProviderDraftRef, right: ProviderDraftRef | undefined): boolean {
+  if (!right || left.kind !== right.kind) return false;
+  if (left.kind === "gmail") return right.kind === "gmail" && left.draftId === right.draftId;
+  return right.kind === "imap"
+    && left.mailbox === right.mailbox
+    && left.uidValidity === right.uidValidity
+    && left.uid === right.uid;
+}
+
+function mirrorFailure(draft: Draft, error: string, ref?: ProviderDraftRef): Draft["mirror"] {
+  const previousRef = ref ?? draft.mirror.ref;
+  const mirroredVersion = draft.mirror.mirroredVersion;
+  return {
+    status: "failed",
+    error,
+    ...(mirroredVersion ? { mirroredVersion } : {}),
+    ...(previousRef ? { ref: previousRef } : {}),
+  };
+}
+
+function withReceiptWarning(receipt: SendReceipt, warning: string): SendReceipt {
+  return sendReceiptSchema.parse({
+    ...receipt,
+    warning: [receipt.warning, warning].filter((message): message is string => message !== undefined).join(" "),
+  });
 }
 
 function draftRecipientsForSend(recipients: DraftRecipientField): OutboundAddress[] {
