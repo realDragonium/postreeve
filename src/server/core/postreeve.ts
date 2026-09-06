@@ -40,6 +40,7 @@ import {
   deleteFolderInputSchema,
   directActionInputSchema,
   draftSchema,
+  draftFileUploadSchema,
   draftVersionInputSchema,
   renameFolderInputSchema,
   sendMessageInputSchema,
@@ -530,7 +531,11 @@ export class PostreeveService {
     if (file.content.byteLength > this.outgoingMailLimits.maxUploadBytes) {
       throw new Error(`File exceeds the ${this.outgoingMailLimits.maxUploadBytes}-byte upload limit`);
     }
-    const attachment = { ...file, name: safeAttachmentFilename(file.name), type: safeAttachmentMediaType(file.type) };
+    const metadata = draftFileUploadSchema.parse({ ...file, version });
+    const attachment = {
+      ...file, name: metadata.name.replace(/[\u0000-\u001f\u007f]/g, "") || "attachment",
+      type: safeAttachmentMediaType(metadata.type),
+    };
     return this.#withDraftLifecycle(accountId, draftId, async () => {
       await this.#requireAccount(accountId);
       const current = await this.#store.getDraft(this.#context.tenantId, accountId, draftId);

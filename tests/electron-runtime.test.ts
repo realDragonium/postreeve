@@ -13,11 +13,15 @@ describe("Electron runtime", () => {
       "POSTREEVE_MASTER_KEY='encoded=key'",
       "POSTREEVE_DB_PATH=./data/postreeve.sqlite",
       "POSTREEVE_MAX_ATTACHMENT_BYTES=1048576",
+      "POSTREEVE_MAX_UPLOAD_BYTES=2000000",
+      "POSTREEVE_MAX_MESSAGE_BYTES=3000000",
       "UNRELATED=value",
     ].join("\n"))).toEqual({
       POSTREEVE_MASTER_KEY: "encoded=key",
       POSTREEVE_DB_PATH: "./data/postreeve.sqlite",
       POSTREEVE_MAX_ATTACHMENT_BYTES: "1048576",
+      POSTREEVE_MAX_UPLOAD_BYTES: "2000000",
+      POSTREEVE_MAX_MESSAGE_BYTES: "3000000",
     });
   });
 

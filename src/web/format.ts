@@ -90,3 +90,9 @@ export function quotedMessage(message: MessageDetail): string {
   const quoted = message.text.split("\n").map((line) => `> ${line}`).join("\n");
   return `\n\nOn ${formatDate(message.receivedAt, true)}, ${author} wrote:\n${quoted}`;
 }
+
+export function formatByteLimit(bytes: number): string {
+  if (bytes % (1024 * 1024) === 0) return `${bytes / (1024 * 1024)} MiB`;
+  if (bytes % 1024 === 0) return `${bytes / 1024} KiB`;
+  return `${bytes.toLocaleString()} bytes`;
+}

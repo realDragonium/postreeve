@@ -1291,17 +1291,19 @@ test("uploads binary files, retries failures, and reopens them in another client
       if (path === "/api/proposals" || path === "/api/batches") return json(route, []);
       const upload = /\/drafts\/([^/]+)\/files$/.exec(path);
       if (upload && request.method() === "POST") {
-        if (failUpload) return json(route, { error: "Upload temporarily unavailable" }, 503);
         const metadata = draftFileUploadSchema.parse(JSON.parse(decodeURIComponent(request.headers()["x-postreeve-file"] ?? "")));
         const draft = fixture.drafts.find(({ id }) => id === upload[1]);
         if (!draft) return json(route, { error: "Draft not found" }, 404);
-        expect(metadata.version).toBe(draft.version);
         const body = request.postDataBuffer();
         expect(body).toEqual(bytes);
         if (!body) throw new Error("Upload had no bytes");
-        uploaded.set(metadata.id, body);
-        draft.attachments.push({ id: metadata.id, name: metadata.name, type: metadata.type, size: body.length });
-        draft.version += 1;
+        if (!uploaded.has(metadata.id)) {
+          expect(metadata.version).toBe(draft.version);
+          uploaded.set(metadata.id, body);
+          draft.attachments.push({ id: metadata.id, name: metadata.name, type: metadata.type, size: body.length });
+          draft.version += 1;
+        }
+        if (failUpload) return json(route, { error: "Upload temporarily unavailable" }, 503);
         return json(route, draft);
       }
       if (await fixture.handle(route, account.id, () => {
@@ -1326,12 +1328,14 @@ test("uploads binary files, retries failures, and reopens them in another client
   await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
   await page.getByRole("button", { name: "Close New message" }).click();
   await expect(page.getByRole("heading", { name: "New message" })).toBeVisible();
+  await page.getByLabel("Message", { exact: true }).fill("Edited after the upload response was lost.");
   failUpload = false;
   await page.getByRole("button", { name: "Retry upload" }).click();
   await expect(page.getByText("résumé.bin", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Retry upload" })).toHaveCount(0);
   await page.getByRole("button", { name: "Close New message" }).click();
   expect(fixture.drafts[0]?.attachments).toHaveLength(1);
+  expect(fixture.drafts[0]?.body).toBe("Edited after the upload response was lost.");
   const second = await browser.newPage();
   try {
     await wire(second);

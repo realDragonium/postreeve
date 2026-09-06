@@ -114,12 +114,44 @@ describe("durable uploaded draft files", () => {
         return stored;
       };
       await expect(queue.uploadFile(draft, attachment.id, selected, upload)).rejects.toThrow("Response lost");
-      const stored = await queue.uploadFile(draft, attachment.id, selected, upload);
-      expect(stored.version).toBe(2);
+      const stored = await queue.uploadFile({ ...draft, body: "Edited after upload response was lost" }, attachment.id, selected, upload);
+      expect(stored.version).toBe(3);
+      expect(stored.body).toBe("Edited after upload response was lost");
       expect(stored.attachments).toHaveLength(1);
       expect(queue.isDirty({ ...stored, attachments: [{ ...stored.attachments[0]!, id: crypto.randomUUID() }] })).toBe(true);
     } finally { harness.store.close(); }
   });
+  test("cancels an ambiguously committed upload without stranding later edits", async () => {
+    const harness = await createEmptyTestHarness();
+    try {
+      const draft = await createDraft(harness);
+      const queue = new DraftSaveQueue(draft.accountId, draft, (input) => harness.service.createDraft(input), (accountId, id, input) => harness.service.updateDraft(accountId, id, input));
+      const attachment = file();
+      const selected = new File([binary], attachment.name, { type: attachment.type });
+      await expect(queue.uploadFile(draft, attachment.id, selected, async (accountId, id, version) => {
+        await harness.service.uploadDraftFile(accountId, id, version, attachment);
+        throw new Error("Response lost");
+      })).rejects.toThrow("Response lost");
+      const saved = await queue.cancelUpload({ ...draft, body: "Keep this later edit" }, attachment.id, (accountId, id) => harness.service.getDraft(accountId, id));
+      expect(saved.body).toBe("Keep this later edit");
+      expect(saved.attachments).toEqual([]);
+      await expect(harness.service.downloadDraftFile(draft.accountId, draft.id, attachment.id)).rejects.toThrow();
+    } finally { harness.store.close(); }
+  });
+
+  test("preserves long valid outgoing names through storage and MIME", async () => {
+    const harness = await createEmptyTestHarness();
+    try {
+      const draft = await createDraft(harness);
+      const attachment = { ...file(), name: `${"a".repeat(241)}.txt`, type: "text/plain" };
+      const uploaded = await harness.service.uploadDraftFile(draft.accountId, draft.id, draft.version, attachment);
+      expect(uploaded.attachments[0]?.name).toBe(attachment.name);
+      const files = await harness.store.draftFiles("test-tenant", draft.accountId, uploaded);
+      const parsed = await simpleParser(await buildProviderDraftMessage({ tenantId: "test-tenant", accountId: draft.accountId }, { ...uploaded, files }));
+      expect(parsed.attachments[0]?.filename).toBe(attachment.name);
+    } finally { harness.store.close(); }
+  });
+
 });
 
 const input: SendMessageInput = { accountId: "a", to: [{ name: "", address: "to@example.test" }], cc: [], bcc: [{ name: "", address: "hidden@example.test" }], subject: "File delivery", text: "Exact body\n" };

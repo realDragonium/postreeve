@@ -16,6 +16,7 @@ import { api } from "./api";
 import {
   addressList,
   formatDate,
+  formatByteLimit,
   forwardSubject,
   quotedMessage,
   replySubject,
@@ -248,17 +249,21 @@ export function FolderSheet({ account, folders, onChange, onClose }: {
   </Sheet>;
 }
 
-export function ComposeModal({ account, identities, intent, onClose, onSaveDraft, onSent }: {
+export function ComposeModal({ account, identities, intent, onClose, onSaveDraft, onSent, onCopied }: {
   account: Account;
   identities: readonly LocalIdentity[];
   intent: ComposeIntent;
   onClose: () => void;
   onSaveDraft: (draft: Draft) => void;
   onSent: (draftId: string | null) => void;
+  onCopied: (draft: Draft) => void;
 }) {
   const queryClient = useQueryClient();
   const source = intent.message;
   const saved = intent.draft;
+  const [delivery, setDelivery] = useState<Draft["delivery"]>(saved?.delivery ?? { status: "editable" });
+  const [copying, setCopying] = useState(false);
+  const deliveryLocked = delivery.status === "uncertain" || delivery.status === "sending" || delivery.status === "sent";
   const [effectiveMode, setEffectiveMode] = useState<ComposeMode>(saved?.mode ?? intent.mode);
   const conversationMode = effectiveMode === "reply" || effectiveMode === "reply_all" || effectiveMode === "forward";
   const conversationSource = saved?.source ?? (source ? {
@@ -327,7 +332,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   const edited = useRef({ from: false, to: false, cc: false, bcc: false });
   const saver = useRef<DraftSaveQueue | null>(null);
   if (!saver.current) saver.current = new DraftSaveQueue(account.id, saved, api.createDraft, api.updateDraft);
-  const backendPending = from !== account.email || attachments.some((attachment) => !attachment.id) || pendingFiles.length > 0 || uploading || (conversationMode && !conversationSource);
+  const backendPending = deliveryLocked || copying || from !== account.email || attachments.some((attachment) => !attachment.id) || pendingFiles.length > 0 || uploading || (conversationMode && !conversationSource);
 
   function currentDraft(): DraftContent {
     const selectedIdentity = identityOptions.find((identity) => identity.email === from);
@@ -359,6 +364,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       const draft = await saver.current!.save(content);
       onSaveDraft(draft);
       if (active.current) {
+        setDelivery(draft.delivery);
         setSavedAt(draft.updatedAt);
         setMirrorError(draft.mirror.status === "failed" ? draft.mirror.error : null);
         setSaveError(null);
@@ -413,6 +419,21 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       return { receipt: await api.sendDraft(account.id, draft.id, { version: draft.version }), draftId: draft.id };
     },
     onSuccess: async ({ receipt: nextReceipt, draftId }) => {
+      if (nextReceipt.accepted.length === 0) {
+        autosaveSuppressed.current = false;
+        setValidationError(`No recipients accepted the message. Rejected: ${nextReceipt.rejected.join(", ") || "all recipients"}. Your draft and files are retained for retry.`);
+        try {
+          const refreshed = await saver.current!.refreshAfterSend(api.draft);
+          if (refreshed) {
+            setDelivery(refreshed.delivery);
+            setSavedAt(refreshed.updatedAt);
+            onSaveDraft(refreshed);
+          }
+        } catch (cause) {
+          setRecoveryError(cause instanceof Error ? cause.message : "Could not recover the latest send status");
+        }
+        return;
+      }
       setSaveError(null);
       setRecoveryError(null);
       setReceipt(nextReceipt);
@@ -433,6 +454,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
         const refreshed = await saver.current!.refreshAfterSend(api.draft);
         if (!refreshed) return;
         onSaveDraft(refreshed);
+        setDelivery(refreshed.delivery);
         if (active.current) setRecoveryError(null);
         if (refreshed.delivery.status === "sent") {
           setReceipt(refreshed.delivery.receipt);
@@ -460,8 +482,50 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     },
   });
 
+  const formBusy = mutation.isPending || uploading || copying || deliveryLocked;
+
+  async function copyForReview(): Promise<void> {
+    const current = saver.current!.current;
+    if (!current || current.delivery.status !== "uncertain" || copying) return;
+    setCopying(true);
+    setRecoveryError(null);
+    try {
+      const copy = await api.copyDraft(account.id, current.id, { version: current.version });
+      onSaveDraft(copy);
+      await queryClient.invalidateQueries({ queryKey: ["drafts", account.id] });
+      onCopied(copy);
+    } catch (cause) {
+      setRecoveryError(cause instanceof Error ? cause.message : "Could not create a recovery copy");
+    } finally {
+      if (active.current) setCopying(false);
+    }
+  }
+
+  async function removePendingFile(id: string): Promise<void> {
+    if (uploadingNow.current || formBusy) return;
+    uploadingNow.current = true;
+    setUploading(true);
+    setUploadError(null);
+    autosaveSuppressed.current = true;
+    try {
+      const draft = await saver.current!.cancelUpload(currentDraft(), id, api.draft);
+      setAttachments(draft.attachments);
+      setPendingFiles((files) => files.filter((file) => file.id !== id));
+      setDelivery(draft.delivery);
+      setSavedAt(draft.updatedAt);
+      setSaveError(null);
+      onSaveDraft(draft);
+    } catch (cause) {
+      setUploadError(cause instanceof Error ? cause.message : "Could not remove the pending file");
+    } finally {
+      uploadingNow.current = false;
+      setUploading(false);
+      autosaveSuppressed.current = false;
+    }
+  }
+
   async function uploadFiles(selected: { id: string; file: File }[]): Promise<void> {
-    if (uploadingNow.current || mutation.isPending) return;
+    if (uploadingNow.current || formBusy) return;
     uploadingNow.current = true;
     setUploading(true);
     setUploadError(null);
@@ -481,6 +545,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
         setAttachments(draft.attachments);
         setPendingFiles((files) => files.filter(({ id }) => id !== selectedFile.id));
         onSaveDraft(draft);
+        setDelivery(draft.delivery);
         setSavedAt(draft.updatedAt);
         setSaveError(null);
         setMirrorError(draft.mirror.status === "failed" ? draft.mirror.error : null);
@@ -495,7 +560,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   }
 
   async function closeCurrent(): Promise<void> {
-    if (mutation.isPending || uploadingNow.current || closing.current) return;
+    if (mutation.isPending || uploadingNow.current || copying || closing.current) return;
     if (pendingFiles.length > 0) {
       setUploadError("Retry or remove the files that have not uploaded before closing this draft");
       return;
@@ -559,7 +624,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     title={modeLabel}
     meta={account.email}
     onClose={() => void closeCurrent()}
-    closeDisabled={mutation.isPending || uploading}
+    closeDisabled={mutation.isPending || uploading || copying}
     onSubmit={submit}
     footer={<>
       <span className="t-dim">{saving
@@ -569,51 +634,54 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
           : savedAt
             ? `Draft saved ${formatDate(savedAt, true)}`
             : "Drafts autosave to the backend"}</span>
-      <button type="button" className="chip push" disabled={saving || mutation.isPending || uploading} onClick={() => void saveCurrent(true).catch(() => undefined)}>Save draft</button>
-      <button className="btn" disabled={mutation.isPending || !body.trim() || backendPending} title={backendPending ? "Backend support is required before this message can be sent" : undefined}>
+      <button type="button" className="chip push" disabled={saving || formBusy} onClick={() => void saveCurrent(true).catch(() => undefined)}>Save draft</button>
+      <button className="btn" disabled={mutation.isPending || !body.trim() || backendPending} title={backendPending ? "Resolve draft status and pending file uploads before sending" : undefined}>
         {mutation.isPending ? "Sending…" : "Send message"}
       </button>
     </>}
   >
     <label className="field"><span className="field-label">From</span>
-      <select className="input" aria-label="From identity" value={from} disabled={mutation.isPending || uploading} onChange={(event) => { edited.current.from = true; setFrom(event.target.value); }}>
+      <select className="input" aria-label="From identity" value={from} disabled={formBusy} onChange={(event) => { edited.current.from = true; setFrom(event.target.value); }}>
         <option value={account.email}>{account.email}</option>
         {identityOptions.map((identity) => <option value={identity.email} key={identity.id}>{identity.name} · {identity.email}</option>)}
       </select>
     </label>
-    <label className="field"><span className="field-label">To</span><input className="input" autoFocus required aria-label="To" placeholder="person@example.com, team@example.com" value={to} disabled={mutation.isPending || uploading} onChange={(event) => { edited.current.to = true; setTo(event.target.value); }} /></label>
+    <label className="field"><span className="field-label">To</span><input className="input" autoFocus required aria-label="To" placeholder="person@example.com, team@example.com" value={to} disabled={formBusy} onChange={(event) => { edited.current.to = true; setTo(event.target.value); }} /></label>
     <div className="field-grid">
-      <label className="field"><span className="field-label">Cc</span><input className="input" aria-label="Cc" value={cc} disabled={mutation.isPending || uploading} onChange={(event) => { edited.current.cc = true; setCc(event.target.value); }} /></label>
-      <label className="field"><span className="field-label">Bcc</span><input className="input" aria-label="Bcc" value={bcc} disabled={mutation.isPending || uploading} onChange={(event) => { edited.current.bcc = true; setBcc(event.target.value); }} /></label>
+      <label className="field"><span className="field-label">Cc</span><input className="input" aria-label="Cc" value={cc} disabled={formBusy} onChange={(event) => { edited.current.cc = true; setCc(event.target.value); }} /></label>
+      <label className="field"><span className="field-label">Bcc</span><input className="input" aria-label="Bcc" value={bcc} disabled={formBusy} onChange={(event) => { edited.current.bcc = true; setBcc(event.target.value); }} /></label>
     </div>
-    <label className="field"><span className="field-label">Subject</span><input className="input" maxLength={998} aria-label="Subject" value={subject} disabled={mutation.isPending || uploading} onChange={(event) => setSubject(event.target.value)} /></label>
-    <label className="field"><span className="field-label">Message</span><textarea className="input" required rows={12} maxLength={2_000_000} aria-label="Message" value={body} disabled={mutation.isPending || uploading} onChange={(event) => setBody(event.target.value)} /></label>
+    <label className="field"><span className="field-label">Subject</span><input className="input" maxLength={998} aria-label="Subject" value={subject} disabled={formBusy} onChange={(event) => setSubject(event.target.value)} /></label>
+    <label className="field"><span className="field-label">Message</span><textarea className="input" required rows={12} maxLength={2_000_000} aria-label="Message" value={body} disabled={formBusy} onChange={(event) => setBody(event.target.value)} /></label>
     <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-      <label className="chip" aria-disabled={mutation.isPending || uploading}>Add attachments<input type="file" multiple disabled={mutation.isPending || uploading} style={{ display: "none" }} onChange={(event) => {
+      <label className="chip" aria-disabled={formBusy || pendingFiles.length > 0}>Add attachments<input type="file" multiple disabled={formBusy || pendingFiles.length > 0} style={{ display: "none" }} onChange={(event) => {
         const selected = [...(event.target.files ?? [])].map((file) => ({ id: crypto.randomUUID(), file }));
         event.target.value = "";
         setPendingFiles((files) => [...files, ...selected]);
         void uploadFiles(selected);
       }} /></label>
       <span className="t-dim">{uploading ? "Uploading files…" : limits.data
-        ? `Up to ${Math.round(limits.data.maxUploadBytes / 1024 / 1024)} MiB per file; ${Math.round(limits.data.maxMessageBytes / 1024 / 1024)} MiB per encoded message.`
+        ? `Up to ${formatByteLimit(limits.data.maxUploadBytes)} per file; ${formatByteLimit(limits.data.maxMessageBytes)} per encoded message.`
         : "Files are saved with this draft."}</span>
     </div>
     {attachments.map((attachment, index) => <div key={attachment.id ?? `${attachment.name}:${index}`} style={{ display: "flex", alignItems: "center", gap: 12 }}>
       <span className="t-body">{attachment.name}</span>{!attachment.id ? <span className="t-dim">Content missing; attach again</span> : null}<span className="t-dim">{Math.max(1, Math.round(attachment.size / 1024))} KB</span>
-      <button type="button" className="btn-danger" style={{ marginLeft: "auto" }} aria-label={`Remove ${attachment.name}`} disabled={mutation.isPending || uploading} onClick={() => setAttachments((current) => current.filter((_, candidate) => candidate !== index))}>Remove</button>
+      <button type="button" className="btn-danger" style={{ marginLeft: "auto" }} aria-label={`Remove ${attachment.name}`} disabled={formBusy} onClick={() => setAttachments((current) => current.filter((_, candidate) => candidate !== index))}>Remove</button>
     </div>)}
     {pendingFiles.map(({ id, file }) => <div key={id} className="alert">
       {file.name} · {uploading ? "Uploading" : "Not uploaded"}
-      <button type="button" className="chip" disabled={uploading || mutation.isPending} onClick={() => void uploadFiles([{ id, file }])}>Retry upload</button>
-      <button type="button" className="btn-danger" disabled={uploading || mutation.isPending} onClick={() => {
-        setPendingFiles((files) => files.filter((candidate) => candidate.id !== id));
-        setUploadError(null);
-      }}>Remove pending file</button>
+      <button type="button" className="chip" disabled={formBusy || pendingFiles[0]?.id !== id} onClick={() => void uploadFiles([{ id, file }])}>Retry upload</button>
+      <button type="button" className="btn-danger" disabled={formBusy || pendingFiles[0]?.id !== id} onClick={() => void removePendingFile(id)}>Remove pending file</button>
     </div>)}
     {uploadError ? <div className="alert error">{uploadError}. Your selected files remain available here.</div> : null}
+    {delivery.status === "uncertain" ? <div className="alert">
+      Delivery is uncertain. This message may already have been sent. Check your sent mail before sending a copy.
+      <button type="button" className="chip" disabled={copying} onClick={() => void copyForReview()}>{copying ? "Creating copy…" : "Create a copy to review"}</button>
+    </div> : null}
+    {delivery.status === "sending" ? <div className="alert">Delivery is in progress. Close and reopen this draft to check its status.</div> : null}
+    {delivery.status === "failed" ? <div className="alert error">Delivery failed: {delivery.error}. Your draft and files are retained for retry.</div> : null}
     {backendPending ? <div className="alert"><strong>Sending is unavailable.</strong>{conversationMode && !conversationSource
-      ? <> This draft no longer has its source conversation. <button type="button" className="btn-underline" disabled={mutation.isPending || uploading} onClick={() => setEffectiveMode("new")}>Convert to a new message</button></>
+      ? <> This draft no longer has its source conversation. <button type="button" className="btn-underline" disabled={formBusy} onClick={() => setEffectiveMode("new")}>Convert to a new message</button></>
       : null}{from !== account.email ? " Alternate From identities are not supported yet." : ""}{attachments.some((attachment) => !attachment.id) ? " Some files need to be attached again." : ""}</div> : null}
     {validationError ? <div className="alert error">{validationError}</div> : null}
     {saveError ? <div className="alert error">Draft not saved: {saveError}. Your form content was kept.</div> : null}
