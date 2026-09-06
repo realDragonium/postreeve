@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { simpleParser } from "mailparser";
+import { z } from "zod";
 import { GmailMailClient, type HttpFetch } from "../src/server/mail/gmail";
 import {
   MailProviderRegistry,
@@ -80,6 +81,26 @@ function rawSource(subject: string): string {
     "To: Person <person@example.test>",
     `Subject: ${subject}`,
     "Message-ID: <gmail-conversation-source@example.test>",
+    "Date: Sat, 29 Aug 2026 10:00:00 +0200",
+    "Content-Type: text/plain; charset=UTF-8",
+    "",
+    "Source body.",
+  ].join("\r\n"), "utf8").toString("base64url");
+}
+
+function rawThreadingSource(input: {
+  subject: string;
+  messageId?: string;
+  inReplyTo?: string;
+  references?: readonly string[];
+}): string {
+  return Buffer.from([
+    "From: Sender <sender@example.test>",
+    "To: Person <person@example.test>",
+    `Subject: ${input.subject}`,
+    ...(input.messageId ? [`Message-ID: ${input.messageId}`] : []),
+    ...(input.inReplyTo ? [`In-Reply-To: ${input.inReplyTo}`] : []),
+    ...(input.references?.length ? [`References: ${input.references.join(" ")}`] : []),
     "Date: Sat, 29 Aug 2026 10:00:00 +0200",
     "Content-Type: text/plain; charset=UTF-8",
     "",
@@ -546,6 +567,264 @@ describe("Gmail compatibility", () => {
       const sent = JSON.parse(requestBody) as { raw: string; threadId?: string };
       expect(sourceReads).toEqual(["source-a", "source-b"]);
       expect(sent.threadId).toBe("thread-b");
+    } finally {
+      store.close();
+    }
+  });
+
+  test("uses explicit selected-copy References while retaining canonical ancestry when fields are omitted", async () => {
+    const canonicalReferences = ["<a@example.test>", "<b@example.test>"];
+    const sourceMessageId = "<selected-ancestry@example.test>";
+    const scenarios = [
+      {
+        name: "explicit References",
+        selectedMessageId: sourceMessageId,
+        selectedReferences: ["<b@example.test>", "<a@example.test>"],
+        expectedReferences: ["<b@example.test>", "<a@example.test>", sourceMessageId],
+      },
+      {
+        name: "omitted References",
+        selectedMessageId: sourceMessageId,
+        selectedReferences: [],
+        expectedReferences: [...canonicalReferences, sourceMessageId],
+      },
+      {
+        name: "omitted Message-ID and References",
+        selectedMessageId: undefined,
+        selectedReferences: [],
+        expectedReferences: [...canonicalReferences, sourceMessageId],
+      },
+    ] as const;
+
+    for (const scenario of scenarios) {
+      let requestBody = "";
+      const request: HttpFetch = async (input, init) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url === "https://oauth2.googleapis.com/token") {
+          return json({ access_token: "short-lived-access-token", expires_in: 3600 });
+        }
+        const sourceId = /\/messages\/(copy-[ab])\?format=raw/.exec(url)?.[1];
+        if (sourceId) {
+          const selected = sourceId === "copy-b";
+          const references = selected ? scenario.selectedReferences : canonicalReferences;
+          return json({
+            id: sourceId,
+            threadId: selected ? "thread-b" : "thread-a",
+            labelIds: [selected ? "INBOX" : "ARCHIVE"],
+            raw: rawThreadingSource({
+              subject: "Selected ancestry",
+              ...(selected
+                ? scenario.selectedMessageId ? { messageId: scenario.selectedMessageId } : {}
+                : { messageId: sourceMessageId }),
+              ...(references.length > 0
+                ? { references, inReplyTo: references[references.length - 1] }
+                : {}),
+            }),
+          });
+        }
+        if (url.endsWith("/messages/send")) {
+          requestBody = typeof init?.body === "string" ? init.body : "";
+          return json({ id: `sent-${scenario.name}`, threadId: "thread-b" });
+        }
+        return new Response(null, { status: 404 });
+      };
+      const { store, service } = await createConversationService(request);
+      try {
+        const observation = (
+          providerId: string,
+          providerConversationId: string,
+          mailbox: string,
+          references: readonly string[],
+        ): ProviderMessageObservation => ({
+          ...gmailObservation(providerId, providerConversationId, mailbox),
+          messageId: sourceMessageId,
+          inReplyTo: references[references.length - 1] ?? null,
+          references: [...references],
+        });
+        await store.reconcileMailbox({
+          tenantId: "tenant-a",
+          accountId: account.id,
+          provider: "gmail",
+          mailbox: "Archive",
+          observations: [observation("copy-a", "thread-a", "Archive", canonicalReferences)],
+          authoritative: true,
+        });
+        const [source] = await store.reconcileMailbox({
+          tenantId: "tenant-a",
+          accountId: account.id,
+          provider: "gmail",
+          mailbox: "INBOX",
+          observations: [observation("copy-b", "thread-b", "INBOX", scenario.selectedReferences)],
+          authoritative: true,
+        });
+        if (!source) throw new Error(`Expected a source for ${scenario.name}`);
+
+        await service.sendMessage({
+          accountId: account.id,
+          to: [{ name: "Sender", address: "sender@example.test" }],
+          cc: [],
+          bcc: [],
+          subject: "Re: Selected ancestry",
+          text: `Reply with ${scenario.name}.`,
+          intent: {
+            type: "reply",
+            source: {
+              canonicalMessageId: source.id,
+              conversationId: source.conversationId,
+              providerConversationId: "thread-b",
+            },
+          },
+        });
+
+        const sent = z.object({ raw: z.string(), threadId: z.string().optional() }).parse(JSON.parse(requestBody));
+        const parsed = await simpleParser(Buffer.from(sent.raw, "base64url"));
+        expect(sent.threadId).toBe("thread-b");
+        expect(parsed.inReplyTo).toBe(sourceMessageId);
+        expect(parsed.references).toEqual([...scenario.expectedReferences]);
+        expect((await store.getMessage("tenant-a", source.id))?.references).toEqual(canonicalReferences);
+      } finally {
+        store.close();
+      }
+    }
+  });
+
+  test("does not force a selected Gmail thread or adopt its ancestry when its Message-ID conflicts", async () => {
+    let requestBody = "";
+    const canonicalReferences = ["<root-a@example.test>", "<root-b@example.test>"];
+    const request: HttpFetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return json({ access_token: "short-lived-access-token", expires_in: 3600 });
+      }
+      if (url.includes("/messages/conflicting-copy?format=raw")) {
+        return json({
+          id: "conflicting-copy",
+          threadId: "selected-thread",
+          labelIds: ["INBOX"],
+          raw: rawThreadingSource({
+            subject: "Canonical source",
+            messageId: "<different@example.test>",
+            inReplyTo: "<different-root@example.test>",
+            references: ["<different-root@example.test>"],
+          }),
+        });
+      }
+      if (url.endsWith("/messages/send")) {
+        requestBody = typeof init?.body === "string" ? init.body : "";
+        return json({ id: "sent-conflict", threadId: "returned-thread" });
+      }
+      return new Response(null, { status: 404 });
+    };
+    const { store, service } = await createConversationService(request);
+    try {
+      const [source] = await store.reconcileMailbox({
+        tenantId: "tenant-a",
+        accountId: account.id,
+        provider: "gmail",
+        mailbox: "INBOX",
+        observations: [{
+          ...gmailObservation("conflicting-copy", "selected-thread"),
+          messageId: "<canonical-source@example.test>",
+          inReplyTo: canonicalReferences[canonicalReferences.length - 1] ?? null,
+          references: canonicalReferences,
+        }],
+        authoritative: true,
+      });
+      if (!source) throw new Error("Expected a canonical conflict source");
+
+      await service.sendMessage({
+        accountId: account.id,
+        to: [{ name: "Sender", address: "sender@example.test" }],
+        cc: [],
+        bcc: [],
+        subject: "Re: Canonical source",
+        text: "Reply without forcing the conflicting provider thread.",
+        intent: {
+          type: "reply",
+          source: {
+            canonicalMessageId: source.id,
+            conversationId: source.conversationId,
+            providerConversationId: "selected-thread",
+          },
+        },
+      });
+
+      const sent = z.object({ raw: z.string(), threadId: z.string().optional() }).parse(JSON.parse(requestBody));
+      const parsed = await simpleParser(Buffer.from(sent.raw, "base64url"));
+      expect(sent).not.toHaveProperty("threadId");
+      expect(parsed.inReplyTo).toBe("<canonical-source@example.test>");
+      expect(parsed.references).toEqual([...canonicalReferences, "<canonical-source@example.test>"]);
+      expect((await store.getMessage("tenant-a", source.id))?.references).toEqual(canonicalReferences);
+    } finally {
+      store.close();
+    }
+  });
+
+  test("uses a valid selected-copy Message-ID when canonical identity has none", async () => {
+    let requestBody = "";
+    const request: HttpFetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return json({ access_token: "short-lived-access-token", expires_in: 3600 });
+      }
+      if (url.includes("/messages/fallback-copy?format=raw")) {
+        return json({
+          id: "fallback-copy",
+          threadId: "selected-thread",
+          labelIds: ["INBOX"],
+          raw: rawThreadingSource({
+            subject: "Fallback source",
+            messageId: "<read-source@example.test>",
+            inReplyTo: "<read-root@example.test>",
+          }),
+        });
+      }
+      if (url.endsWith("/messages/send")) {
+        requestBody = typeof init?.body === "string" ? init.body : "";
+        return json({ id: "sent-fallback-copy", threadId: "selected-thread" });
+      }
+      return new Response(null, { status: 404 });
+    };
+    const { store, service } = await createConversationService(request);
+    try {
+      const [source] = await store.reconcileMailbox({
+        tenantId: "tenant-a",
+        accountId: account.id,
+        provider: "gmail",
+        mailbox: "INBOX",
+        observations: [{
+          ...gmailObservation("fallback-copy", "selected-thread"),
+          messageId: null,
+          inReplyTo: null,
+          references: [],
+        }],
+        authoritative: true,
+      });
+      if (!source) throw new Error("Expected a fallback source");
+
+      await service.sendMessage({
+        accountId: account.id,
+        to: [{ name: "Sender", address: "sender@example.test" }],
+        cc: [],
+        bcc: [],
+        subject: "Re: Fallback source",
+        text: "Reply using the selected source identity.",
+        intent: {
+          type: "reply",
+          source: {
+            canonicalMessageId: source.id,
+            conversationId: source.conversationId,
+            providerConversationId: "selected-thread",
+          },
+        },
+      });
+
+      const sent = z.object({ raw: z.string(), threadId: z.string().optional() }).parse(JSON.parse(requestBody));
+      const parsed = await simpleParser(Buffer.from(sent.raw, "base64url"));
+      expect(sent.threadId).toBe("selected-thread");
+      expect(parsed.inReplyTo).toBe("<read-source@example.test>");
+      expect(parsed.references).toEqual(["<read-root@example.test>", "<read-source@example.test>"]);
+      expect((await store.getMessage("tenant-a", source.id))?.messageId).toBeNull();
     } finally {
       store.close();
     }

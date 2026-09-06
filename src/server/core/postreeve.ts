@@ -359,14 +359,10 @@ export class PostreeveService {
       return this.#recordConversationSend(input.accountId, account.kind, receipt, context);
     }
 
-    const inReplyTo = normalizeMessageId(source.messageId);
-    const parentReferences = normalizeMessageIdLists(source.references);
-    const parentInReplyTo = normalizeMessageIdList(source.inReplyTo);
-    const references = normalizeMessageIdLists([
-      ...(parentReferences.length > 0 ? parentReferences : parentInReplyTo.length === 1 ? parentInReplyTo : []),
-      inReplyTo,
-    ]);
-    const sourceProviderConversationId = account.kind === "gmail" && inReplyTo
+    const canonicalMessageId = normalizeMessageId(source.messageId);
+    const canonicalReferences = normalizeMessageIdLists(source.references);
+    const canonicalInReplyTo = normalizeMessageIdList(source.inReplyTo);
+    const sourceProviderConversationId = account.kind === "gmail"
       ? await this.#store.getProviderConversationId(
         this.#context.tenantId,
         source.id,
@@ -389,8 +385,34 @@ export class PostreeveService {
         sourceProviderConversationId,
       )
       : null;
+    const selectedMessageId = normalizeMessageId(sourceDetail?.messageId);
+    const selectedIdentityConflicts = canonicalMessageId !== null
+      && selectedMessageId !== null
+      && selectedMessageId !== canonicalMessageId;
+    const selectedSourceIsConsistent = sourceDetail !== null
+      && !selectedIdentityConflicts
+      && (canonicalMessageId !== null || selectedMessageId !== null);
+    const inReplyTo = canonicalMessageId ?? (selectedSourceIsConsistent ? selectedMessageId : null);
+    const selectedReferences = selectedSourceIsConsistent
+      ? normalizeMessageIdLists(sourceDetail.references ?? [])
+      : [];
+    const selectedInReplyTo = selectedSourceIsConsistent
+      ? normalizeMessageIdList(sourceDetail.inReplyTo)
+      : [];
+    const parentReferences = selectedReferences.length > 0
+      ? selectedReferences
+      : canonicalReferences.length > 0
+        ? canonicalReferences
+        : selectedInReplyTo.length === 1
+          ? selectedInReplyTo
+          : canonicalInReplyTo.length === 1
+            ? canonicalInReplyTo
+            : [];
+    const references = normalizeMessageIdLists([...parentReferences, inReplyTo]);
     const providerConversationId = sourceProviderConversationId
       && sourceDetail
+      && !selectedIdentityConflicts
+      && inReplyTo
       && input.subject === replySubject(sourceDetail.subject)
       ? sourceProviderConversationId
       : null;
