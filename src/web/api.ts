@@ -8,6 +8,7 @@ import {
   canonicalMessageDetailSchema,
   canonicalMessageSummarySchema,
   canonicalConversationSchema,
+  draftSchema,
   operationBatchSchema,
   proposalSchema,
   sendReceiptSchema,
@@ -22,12 +23,16 @@ import {
   type CanonicalMessageDetail,
   type CanonicalMessageSummary,
   type CanonicalConversation,
+  type CreateDraftInput,
+  type Draft,
+  type DraftVersionInput,
   type MessageRef,
   type OperationBatch,
   type Proposal,
   type RenameFolderInput,
   type SendMessageInput,
   type SendReceipt,
+  type UpdateDraftInput,
   type UpdateProposalInput,
   type UpdateAccountInput,
 } from "../shared/contracts";
@@ -122,6 +127,52 @@ export const api = {
       ...jsonBody({ path: input.path }),
       ...withSignal(signal),
     }),
+  drafts: (accountId: string, signal?: AbortSignal): Promise<Draft[]> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/drafts`, draftSchema.array(), withSignal(signal)),
+  draft: (accountId: string, draftId: string, signal?: AbortSignal): Promise<Draft> =>
+    request(
+      `/accounts/${encodeURIComponent(accountId)}/drafts/${encodeURIComponent(draftId)}`,
+      draftSchema,
+      withSignal(signal),
+    ),
+  createDraft: (input: CreateDraftInput, signal?: AbortSignal): Promise<Draft> => {
+    const { accountId, ...content } = input;
+    return request(`/accounts/${encodeURIComponent(accountId)}/drafts`, draftSchema, {
+      method: "POST",
+      ...jsonBody(content),
+      ...withSignal(signal),
+    });
+  },
+  updateDraft: (
+    accountId: string,
+    draftId: string,
+    input: UpdateDraftInput,
+    signal?: AbortSignal,
+  ): Promise<Draft> => request(
+    `/accounts/${encodeURIComponent(accountId)}/drafts/${encodeURIComponent(draftId)}`,
+    draftSchema,
+    { method: "PUT", ...jsonBody(input), ...withSignal(signal) },
+  ),
+  removeDraft: (
+    accountId: string,
+    draftId: string,
+    input: DraftVersionInput,
+    signal?: AbortSignal,
+  ) => request(
+    `/accounts/${encodeURIComponent(accountId)}/drafts/${encodeURIComponent(draftId)}`,
+    connectionTestResultSchema,
+    { method: "DELETE", ...jsonBody(input), ...withSignal(signal) },
+  ),
+  sendDraft: (
+    accountId: string,
+    draftId: string,
+    input: DraftVersionInput,
+    signal?: AbortSignal,
+  ): Promise<SendReceipt> => request(
+    `/accounts/${encodeURIComponent(accountId)}/drafts/${encodeURIComponent(draftId)}/send`,
+    sendReceiptSchema,
+    { method: "POST", ...jsonBody(input), ...withSignal(signal) },
+  ),
   messages: (accountId: string, mailbox: string, query: string, limit = 50, signal?: AbortSignal): Promise<CanonicalMessageSummary[]> => {
     const params = new URLSearchParams({ mailbox });
     if (query.trim()) params.set("query", query.trim());

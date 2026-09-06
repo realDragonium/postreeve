@@ -54,8 +54,13 @@ export function testAccountInput(name = "Work", email = "person@example.test"): 
 }
 
 interface TestHarnessOptions {
+  storePath?: string;
   imapFailure?: Error;
   smtpFailure?: Error;
+  sendFailure?: Error;
+  sendWait?: Promise<void>;
+  onSendAttempt?: () => void;
+  rejectRecipients?: readonly string[];
   duplicateDelivery?: boolean;
   archiveDelivery?: boolean;
   missingMessageId?: boolean;
@@ -76,8 +81,9 @@ export async function createTestHarness(options: TestHarnessOptions = {}) {
 }
 
 export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
-  const store = new Store(":memory:");
+  const store = new Store(options.storePath ?? ":memory:");
   const sent: SendMessageInput[] = [];
+  const sendAttempts: SendMessageInput[] = [];
   const sendContexts: Array<ConversationSendContext | undefined> = [];
   const connections: ImapAccountCredentials[] = [];
   const providers = new Map<string, TestMailProvider>();
@@ -106,11 +112,19 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
         sent.push(structuredClone(input));
         sendContexts.push(context ? structuredClone(context) : undefined);
         providers.get(account.id)?.appendSent(input, receipt.messageId, receipt.submittedAt, context);
-      }, options.smtpFailure);
+      }, options.smtpFailure, {
+        onAttempt: (input) => {
+          sendAttempts.push(structuredClone(input));
+          options.onSendAttempt?.();
+        },
+        wait: options.sendWait,
+        failure: options.sendFailure,
+        rejectRecipients: options.rejectRecipients ?? [],
+      });
     },
   );
   await service.initialize();
-  return { store, service, sent, sendContexts, connections };
+  return { store, service, sent, sendAttempts, sendContexts, connections };
 }
 
 class TestMailProvider implements MailProvider {
@@ -317,15 +331,28 @@ class TestMailSender implements MailSender {
     context?: ConversationSendContext,
   ) => void | Promise<void>;
   readonly #verificationFailure: Error | undefined;
+  readonly #behavior: {
+    readonly onAttempt: (input: SendMessageInput) => void;
+    readonly wait: Promise<void> | undefined;
+    readonly failure: Error | undefined;
+    readonly rejectRecipients: readonly string[];
+  };
 
   constructor(
     accountId: string,
     onSent: (input: SendMessageInput, receipt: SendReceipt, context?: ConversationSendContext) => void | Promise<void>,
     verificationFailure?: Error,
+    behavior: {
+      readonly onAttempt: (input: SendMessageInput) => void;
+      readonly wait: Promise<void> | undefined;
+      readonly failure: Error | undefined;
+      readonly rejectRecipients: readonly string[];
+    } = { onAttempt: () => {}, wait: undefined, failure: undefined, rejectRecipients: [] },
   ) {
     this.#accountId = accountId;
     this.#onSent = onSent;
     this.#verificationFailure = verificationFailure;
+    this.#behavior = behavior;
   }
 
   async verifyConnection(): Promise<void> {
@@ -335,16 +362,21 @@ class TestMailSender implements MailSender {
   async send(rawInput: SendMessageInput, context?: ConversationSendContext): Promise<SendReceipt> {
     const input = sendMessageInputSchema.parse(rawInput);
     if (input.accountId !== this.#accountId) throw new Error("Account isolation violation");
+    this.#behavior.onAttempt(input);
+    await this.#behavior.wait;
+    if (this.#behavior.failure) throw this.#behavior.failure;
     const id = crypto.randomUUID();
+    const recipients = [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address);
+    const rejected = new Set(this.#behavior.rejectRecipients.map((address) => address.toLocaleLowerCase()));
     const receipt = sendReceiptSchema.parse({
       id,
       accountId: this.#accountId,
       messageId: `<${id}@example.test>`,
-      accepted: [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address),
-      rejected: [],
+      accepted: recipients.filter((address) => !rejected.has(address.toLocaleLowerCase())),
+      rejected: recipients.filter((address) => rejected.has(address.toLocaleLowerCase())),
       submittedAt: new Date().toISOString(),
     });
-    await this.#onSent(input, receipt, context);
+    if (receipt.accepted.length > 0) await this.#onSent(input, receipt, context);
     return receipt;
   }
 }

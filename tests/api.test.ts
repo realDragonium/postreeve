@@ -6,9 +6,11 @@ import {
   canonicalMessageDetailSchema,
   canonicalMessageSummarySchema,
   canonicalConversationSchema,
+  draftSchema,
   folderSchema,
   messageSummarySchema,
   proposalSchema,
+  sendReceiptSchema,
 } from "../src/shared/contracts";
 import { createApi, oauthResultUrl, type AppType } from "../src/server/api";
 import { createEmptyTestHarness, createTestHarness, testAccountInput } from "./support/test-mail";
@@ -305,6 +307,63 @@ describe("Hono RPC API", () => {
       json: { path: "Clients" },
     });
     expect(folderSchema.array().parse(await deletedResponse.json()).some(({ path }) => path === "Clients")).toBe(false);
+    store.close();
+  });
+
+  test("exposes account-scoped draft lifecycle and send routes through the typed client", async () => {
+    const { store, service, sent } = await createEmptyTestHarness();
+    const account = await service.createAccount(testAccountInput());
+    const other = await service.createAccount(testAccountInput("Other", "other@example.test"));
+    const client = hc<AppType>("http://postreeve.local", { fetch: createApi(service).request });
+    const content = {
+      mode: "new" as const,
+      to: [{ name: "Recipient", address: "recipient@example.test" }],
+      cc: [],
+      bcc: [],
+      subject: "Typed server draft",
+      body: "Draft body",
+      identity: { name: account.name, address: account.email },
+    };
+
+    const createdResponse = await client.api.accounts[":accountId"].drafts.$post({
+      param: { accountId: account.id },
+      json: content,
+    });
+    expect(createdResponse.status).toBe(201);
+    const created = draftSchema.parse(await createdResponse.json());
+    const listResponse = await client.api.accounts[":accountId"].drafts.$get({
+      param: { accountId: account.id },
+    });
+    expect(draftSchema.array().parse(await listResponse.json())).toEqual([created]);
+    const hiddenResponse = await client.api.accounts[":accountId"].drafts[":draftId"].$get({
+      param: { accountId: other.id, draftId: created.id },
+    });
+    expect(hiddenResponse.status).toBe(404);
+
+    const updatedResponse = await client.api.accounts[":accountId"].drafts[":draftId"].$put({
+      param: { accountId: account.id, draftId: created.id },
+      json: { ...content, subject: "Updated", version: created.version },
+    });
+    const updated = draftSchema.parse(await updatedResponse.json());
+    const staleResponse = await client.api.accounts[":accountId"].drafts[":draftId"].$put({
+      param: { accountId: account.id, draftId: created.id },
+      json: { ...content, subject: "Stale", version: created.version },
+    });
+    expect(staleResponse.status).toBe(409);
+    expect(await staleResponse.json()).toMatchObject({ code: "draft_conflict" });
+
+    const sentResponse = await client.api.accounts[":accountId"].drafts[":draftId"].send.$post({
+      param: { accountId: account.id, draftId: created.id },
+      json: { version: updated.version },
+    });
+    expect(sentResponse.status).toBe(200);
+    expect(sent).toHaveLength(1);
+    const replayResponse = await client.api.accounts[":accountId"].drafts[":draftId"].send.$post({
+      param: { accountId: account.id, draftId: created.id },
+      json: { version: updated.version },
+    });
+    expect(sendReceiptSchema.parse(await replayResponse.json()))
+      .toEqual(sendReceiptSchema.parse(await sentResponse.clone().json()));
     store.close();
   });
 

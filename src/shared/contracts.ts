@@ -3,6 +3,7 @@ import { z } from "zod";
 export const accountIdSchema = z.string().min(1);
 export const proposalIdSchema = z.string().min(1);
 export const batchIdSchema = z.string().min(1);
+export const draftIdSchema = z.string().min(1);
 
 const accountBaseSchema = z.object({
   id: accountIdSchema,
@@ -268,6 +269,55 @@ export const sendReceiptSchema = z.object({
   warning: z.string().min(1).optional(),
 });
 
+export const draftComposeModeSchema = z.enum(["new", "reply", "reply_all", "forward"]);
+
+export const draftContentSchema = z.object({
+  mode: draftComposeModeSchema,
+  to: z.array(outboundAddressSchema).max(100),
+  cc: z.array(outboundAddressSchema).max(100),
+  bcc: z.array(outboundAddressSchema).max(100),
+  subject: z.string().max(998),
+  body: z.string().max(2_000_000),
+  identity: outboundAddressSchema,
+  source: conversationSendSourceSchema.optional(),
+});
+
+export const draftDeliverySchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("editable") }),
+  z.object({ status: z.literal("sending"), claimedAt: z.iso.datetime() }),
+  z.object({
+    status: z.literal("failed"),
+    failedAt: z.iso.datetime(),
+    error: z.string().min(1),
+    receipt: sendReceiptSchema,
+  }),
+  z.object({
+    status: z.literal("uncertain"),
+    failedAt: z.iso.datetime(),
+    error: z.string().min(1),
+  }),
+  z.object({
+    status: z.literal("sent"),
+    settledAt: z.iso.datetime(),
+    receipt: sendReceiptSchema,
+  }),
+]);
+
+export const draftSchema = draftContentSchema.extend({
+  id: draftIdSchema,
+  accountId: accountIdSchema,
+  delivery: draftDeliverySchema,
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+  version: z.number().int().positive(),
+});
+
+export const createDraftInputSchema = draftContentSchema.extend({ accountId: accountIdSchema });
+export const updateDraftInputSchema = draftContentSchema.extend({
+  version: z.number().int().positive(),
+});
+export const draftVersionInputSchema = z.object({ version: z.number().int().positive() });
+
 export const directActionInputSchema = z.object({
   accountId: accountIdSchema,
   items: z.array(z.object({
@@ -325,6 +375,13 @@ export type ConversationSendSource = z.infer<typeof conversationSendSourceSchema
 export type SendMessageIntent = z.infer<typeof sendMessageIntentSchema>;
 export type SendMessageInput = z.infer<typeof sendMessageInputSchema>;
 export type SendReceipt = z.infer<typeof sendReceiptSchema>;
+export type DraftComposeMode = z.infer<typeof draftComposeModeSchema>;
+export type DraftContent = z.infer<typeof draftContentSchema>;
+export type DraftDelivery = z.infer<typeof draftDeliverySchema>;
+export type Draft = z.infer<typeof draftSchema>;
+export type CreateDraftInput = z.infer<typeof createDraftInputSchema>;
+export type UpdateDraftInput = z.infer<typeof updateDraftInputSchema>;
+export type DraftVersionInput = z.infer<typeof draftVersionInputSchema>;
 export type DirectActionInput = z.infer<typeof directActionInputSchema>;
 export type ListMessagesInput = z.infer<typeof listMessagesInputSchema>;
 export type CreateProposalInput = z.infer<typeof createProposalInputSchema>;

@@ -5,22 +5,28 @@ import {
   accountIdSchema,
   batchIdSchema,
   createAccountInputSchema,
+  createDraftInputSchema,
   createFolderInputSchema,
   createProposalInputSchema,
   deleteFolderInputSchema,
   directActionInputSchema,
+  draftIdSchema,
+  draftVersionInputSchema,
   listMessagesInputSchema,
   messageRefSchema,
   proposalIdSchema,
   renameFolderInputSchema,
   sendMessageInputSchema,
+  updateDraftInputSchema,
   updateProposalInputSchema,
   updateAccountInputSchema,
 } from "../shared/contracts";
 import type { PostreeveService } from "./core/postreeve";
+import { DraftConflictError, DraftNotFoundError } from "./core/errors";
 import type { GoogleOAuth } from "./google/oauth";
 
 const accountParamsSchema = z.object({ accountId: accountIdSchema });
+const draftParamsSchema = z.object({ accountId: accountIdSchema, draftId: draftIdSchema });
 const proposalParamsSchema = z.object({ proposalId: proposalIdSchema });
 const batchParamsSchema = z.object({ batchId: batchIdSchema });
 const conversationParamsSchema = z.object({ conversationId: z.string().min(1) });
@@ -119,6 +125,53 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         ...context.req.valid("json"),
       })),
     )
+    .get("/accounts/:accountId/drafts", zValidator("param", accountParamsSchema), async (context) =>
+      context.json(await service.listDrafts(context.req.valid("param").accountId)))
+    .post(
+      "/accounts/:accountId/drafts",
+      zValidator("param", accountParamsSchema),
+      zValidator("json", createDraftInputSchema.omit({ accountId: true })),
+      async (context) => context.json(await service.createDraft({
+        accountId: context.req.valid("param").accountId,
+        ...context.req.valid("json"),
+      }), 201),
+    )
+    .get(
+      "/accounts/:accountId/drafts/:draftId",
+      zValidator("param", draftParamsSchema),
+      async (context) => {
+        const { accountId, draftId } = context.req.valid("param");
+        return context.json(await service.getDraft(accountId, draftId));
+      },
+    )
+    .put(
+      "/accounts/:accountId/drafts/:draftId",
+      zValidator("param", draftParamsSchema),
+      zValidator("json", updateDraftInputSchema),
+      async (context) => {
+        const { accountId, draftId } = context.req.valid("param");
+        return context.json(await service.updateDraft(accountId, draftId, context.req.valid("json")));
+      },
+    )
+    .delete(
+      "/accounts/:accountId/drafts/:draftId",
+      zValidator("param", draftParamsSchema),
+      zValidator("json", draftVersionInputSchema),
+      async (context) => {
+        const { accountId, draftId } = context.req.valid("param");
+        await service.removeDraft(accountId, draftId, context.req.valid("json"));
+        return context.json({ ok: true as const });
+      },
+    )
+    .post(
+      "/accounts/:accountId/drafts/:draftId/send",
+      zValidator("param", draftParamsSchema),
+      zValidator("json", draftVersionInputSchema),
+      async (context) => {
+        const { accountId, draftId } = context.req.valid("param");
+        return context.json(await service.sendDraft(accountId, draftId, context.req.valid("json")));
+      },
+    )
     .get(
       "/accounts/:accountId/messages",
       zValidator("param", accountParamsSchema),
@@ -159,6 +212,12 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
     .post("/batches/:batchId/undo", zValidator("param", batchParamsSchema), async (context) =>
       context.json(await service.undoBatch(context.req.valid("param").batchId)))
     .onError((error, context) => {
+      if (error instanceof DraftNotFoundError) {
+        return context.json({ error: error.message, code: "draft_not_found" as const }, 404);
+      }
+      if (error instanceof DraftConflictError) {
+        return context.json({ error: error.message, code: "draft_conflict" as const }, 409);
+      }
       return context.json({ error: error.message }, 400);
     });
 }

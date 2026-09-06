@@ -1,9 +1,13 @@
 import { sql } from "drizzle-orm";
 import { check, foreignKey, index, integer, primaryKey, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 import type {
+  ConversationSendSource,
+  DraftComposeMode,
   OperationResult,
+  OutboundAddress,
   ProposalItem,
   ProposalStatus,
+  SendReceipt,
 } from "../../shared/contracts";
 import type { AppliedMailAction } from "../mail/provider";
 
@@ -15,6 +19,46 @@ export const accounts = sqliteTable("accounts", {
   encryptedCredentials: text("encrypted_credentials"),
   createdAt: text("created_at").notNull(),
 });
+
+export const drafts = sqliteTable("drafts", {
+  id: text("id").notNull(),
+  tenantId: text("tenant_id").notNull(),
+  accountId: text("account_id").notNull().references(() => accounts.id),
+  mode: text("mode").$type<DraftComposeMode>().notNull(),
+  recipientsTo: text("recipients_to", { mode: "json" }).$type<OutboundAddress[]>().notNull(),
+  recipientsCc: text("recipients_cc", { mode: "json" }).$type<OutboundAddress[]>().notNull(),
+  recipientsBcc: text("recipients_bcc", { mode: "json" }).$type<OutboundAddress[]>().notNull(),
+  subject: text("subject").notNull(),
+  body: text("body").notNull(),
+  identity: text("identity", { mode: "json" }).$type<OutboundAddress>().notNull(),
+  source: text("source", { mode: "json" }).$type<ConversationSendSource>(),
+  deliveryStatus: text("delivery_status", {
+    enum: ["editable", "sending", "failed", "uncertain", "sent"],
+  }).notNull(),
+  deliveryReceipt: text("delivery_receipt", { mode: "json" }).$type<SendReceipt>(),
+  deliveryError: text("delivery_error"),
+  claimedAt: text("claimed_at"),
+  settledAt: text("settled_at"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  version: integer("version").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.tenantId, table.id] }),
+  index("drafts_tenant_account_updated_idx").on(table.tenantId, table.accountId, table.updatedAt),
+  check("drafts_version_check", sql`${table.version} > 0`),
+  check("drafts_delivery_state_check", sql`
+    (${table.deliveryStatus} = 'editable' AND ${table.deliveryReceipt} IS NULL
+      AND ${table.deliveryError} IS NULL AND ${table.claimedAt} IS NULL AND ${table.settledAt} IS NULL)
+    OR (${table.deliveryStatus} = 'sending' AND ${table.deliveryReceipt} IS NULL
+      AND ${table.deliveryError} IS NULL AND ${table.claimedAt} IS NOT NULL AND ${table.settledAt} IS NULL)
+    OR (${table.deliveryStatus} = 'failed' AND ${table.deliveryReceipt} IS NOT NULL
+      AND ${table.deliveryError} IS NOT NULL AND ${table.claimedAt} IS NOT NULL AND ${table.settledAt} IS NOT NULL)
+    OR (${table.deliveryStatus} = 'uncertain' AND ${table.deliveryReceipt} IS NULL
+      AND ${table.deliveryError} IS NOT NULL AND ${table.claimedAt} IS NOT NULL AND ${table.settledAt} IS NOT NULL)
+    OR (${table.deliveryStatus} = 'sent' AND ${table.deliveryReceipt} IS NOT NULL
+      AND ${table.deliveryError} IS NULL AND ${table.claimedAt} IS NOT NULL AND ${table.settledAt} IS NOT NULL)
+  `),
+]);
 
 export const proposals = sqliteTable("proposals", {
   id: text("id").primaryKey(),

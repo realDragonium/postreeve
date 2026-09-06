@@ -4,11 +4,14 @@ import type {
   CanonicalConversation,
   CanonicalMessageDetail,
   CanonicalMessageSummary,
+  CreateDraftInput,
   CreateAccountInput,
   CreateFolderInput,
   CreateProposalInput,
   DeleteFolderInput,
   DirectActionInput,
+  Draft,
+  DraftVersionInput,
   Folder,
   ListMessagesInput,
   MessageRef,
@@ -18,17 +21,22 @@ import type {
   RenameFolderInput,
   SendMessageInput,
   SendReceipt,
+  UpdateDraftInput,
   UpdateProposalInput,
   UpdateAccountInput,
 } from "../../shared/contracts";
 import {
   createFolderInputSchema,
+  createDraftInputSchema,
   createProposalInputSchema,
   deleteFolderInputSchema,
   directActionInputSchema,
+  draftSchema,
+  draftVersionInputSchema,
   renameFolderInputSchema,
   sendMessageInputSchema,
   sendReceiptSchema,
+  updateDraftInputSchema,
   updateProposalInputSchema,
 } from "../../shared/contracts";
 import { uniqueCanonicalMessages } from "../../shared/canonical-messages";
@@ -43,6 +51,7 @@ import {
   type ProviderMessageSummary,
 } from "../mail/provider";
 import { MailSenderRegistry, type ConversationSendContext, type MailSender } from "../mail/sender";
+import { DraftConflictError, DraftNotFoundError } from "./errors";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
 import {
   CredentialVault,
@@ -61,6 +70,13 @@ export type GmailClientFactory = (
 
 export interface PostreeveContext {
   tenantId: string;
+}
+
+interface PreparedMessageSend {
+  readonly account: StoredAccount;
+  readonly input: SendMessageInput;
+  readonly sender: MailSender;
+  readonly context?: ConversationSendContext;
 }
 
 export class PostreeveService {
@@ -330,9 +346,147 @@ export class PostreeveService {
 
   async sendMessage(rawInput: SendMessageInput): Promise<SendReceipt> {
     const input = sendMessageInputSchema.parse(rawInput);
+    return this.#dispatchMessageSend(await this.#prepareMessageSend(input));
+  }
+
+  async createDraft(rawInput: CreateDraftInput): Promise<Draft> {
+    const input = createDraftInputSchema.parse(rawInput);
+    await this.#requireAccount(input.accountId);
+    const now = new Date().toISOString();
+    const draft = draftSchema.parse({
+      ...input,
+      id: crypto.randomUUID(),
+      delivery: { status: "editable" },
+      createdAt: now,
+      updatedAt: now,
+      version: 1,
+    });
+    await this.#store.insertDraft(this.#context.tenantId, draft);
+    return draft;
+  }
+
+  async listDrafts(accountId: string): Promise<Draft[]> {
+    await this.#requireAccount(accountId);
+    return this.#store.listDrafts(this.#context.tenantId, accountId);
+  }
+
+  async getDraft(accountId: string, id: string): Promise<Draft> {
+    await this.#requireAccount(accountId);
+    const draft = await this.#store.getDraft(this.#context.tenantId, accountId, id);
+    if (!draft) throw new DraftNotFoundError();
+    return draft;
+  }
+
+  async updateDraft(accountId: string, id: string, rawInput: UpdateDraftInput): Promise<Draft> {
+    await this.#requireAccount(accountId);
+    const input = updateDraftInputSchema.parse(rawInput);
+    const { version, ...content } = input;
+    return this.#store.updateDraft(
+      this.#context.tenantId,
+      accountId,
+      id,
+      version,
+      content,
+      new Date().toISOString(),
+    );
+  }
+
+  async removeDraft(accountId: string, id: string, rawInput: DraftVersionInput): Promise<void> {
+    await this.#requireAccount(accountId);
+    const { version } = draftVersionInputSchema.parse(rawInput);
+    await this.#store.deleteDraft(this.#context.tenantId, accountId, id, version);
+  }
+
+  async sendDraft(accountId: string, id: string, rawInput: DraftVersionInput): Promise<SendReceipt> {
+    const { version } = draftVersionInputSchema.parse(rawInput);
+    const draft = await this.getDraft(accountId, id);
+    if (draft.delivery.status === "sent") return draft.delivery.receipt;
+    if (draft.version !== version) throw new DraftConflictError();
+    if (draft.delivery.status === "sending") {
+      throw new DraftConflictError("Draft delivery is already in progress");
+    }
+    if (draft.delivery.status === "uncertain") {
+      throw new DraftConflictError("Draft delivery is uncertain and cannot be retried automatically");
+    }
+    const account = await this.#requireAccount(accountId);
+    if (draft.identity.address.toLocaleLowerCase() !== account.email.toLocaleLowerCase()) {
+      throw new Error("Draft identity does not belong to the selected account");
+    }
+    const intent = draft.mode === "new"
+      ? { type: "new" as const }
+      : draft.source
+        ? { type: draft.mode, source: draft.source }
+        : null;
+    if (!intent) throw new Error("Conversation draft source was not found");
+    const input = sendMessageInputSchema.parse({
+      accountId,
+      to: draft.to,
+      cc: draft.cc,
+      bcc: draft.bcc,
+      subject: draft.subject,
+      text: draft.body,
+      intent,
+    });
+    const prepared = await this.#prepareMessageSend(input);
+    const claim = await this.#store.claimDraftSend(
+      this.#context.tenantId,
+      accountId,
+      id,
+      version,
+      new Date().toISOString(),
+    );
+    if (claim.kind === "sent") return claim.receipt;
+
+    let receipt: SendReceipt;
+    try {
+      receipt = await this.#dispatchMessageSend(prepared);
+      if (receipt.accountId !== accountId) {
+        throw new Error("Mail sender returned a receipt for another account");
+      }
+    } catch (error) {
+      const failedAt = new Date().toISOString();
+      try {
+        await this.#store.markDraftSendUncertain(
+          this.#context.tenantId,
+          accountId,
+          id,
+          claim.draft.version,
+          errorMessage(error),
+          failedAt,
+        );
+      } catch (persistenceError) {
+        throw new Error(
+          `${errorMessage(error)}; the draft remains claimed because its uncertain delivery state could not be persisted: ${errorMessage(persistenceError)}`,
+        );
+      }
+      throw error;
+    }
+
+    try {
+      await this.#store.settleDraftSend(
+        this.#context.tenantId,
+        accountId,
+        id,
+        claim.draft.version,
+        receipt,
+      );
+      return receipt;
+    } catch (error) {
+      return sendReceiptSchema.parse({
+        ...receipt,
+        warning: [
+          receipt.warning,
+          `Delivery completed, but the local draft could not be settled: ${errorMessage(error)}. Automatic retry is blocked.`,
+        ].filter((message): message is string => message !== undefined).join(" "),
+      });
+    }
+  }
+
+  async #prepareMessageSend(input: SendMessageInput): Promise<PreparedMessageSend> {
     const account = await this.#requireAccount(input.accountId);
+    const sender = this.#senders.forAccount(input.accountId);
     const intent = input.intent ?? { type: "new" as const };
-    if (intent.type === "new") return this.#senders.forAccount(input.accountId).send(input);
+    if (intent.type === "new") return { account, input, sender };
 
     const source = await this.#store.getMessage(this.#context.tenantId, intent.source.canonicalMessageId);
     const conversation = await this.#store.getConversation(this.#context.tenantId, intent.source.conversationId);
@@ -355,8 +509,7 @@ export class PostreeveService {
         sourceMessageId: source.id,
         conversationId: source.conversationId,
       };
-      const receipt = await this.#senders.forAccount(input.accountId).send(input, context);
-      return this.#recordConversationSend(input.accountId, account.kind, receipt, context);
+      return { account, input, sender, context };
     }
 
     const canonicalMessageId = normalizeMessageId(source.messageId);
@@ -425,8 +578,14 @@ export class PostreeveService {
       references,
       ...(providerConversationId ? { providerConversationId } : {}),
     };
-    const receipt = await this.#senders.forAccount(input.accountId).send(input, context);
-    return this.#recordConversationSend(input.accountId, account.kind, receipt, context);
+    return { account, input, sender, context };
+  }
+
+  async #dispatchMessageSend(prepared: PreparedMessageSend): Promise<SendReceipt> {
+    const receipt = await prepared.sender.send(prepared.input, prepared.context);
+    return prepared.context && receipt.accepted.length > 0
+      ? this.#recordConversationSend(prepared.input.accountId, prepared.account.kind, receipt, prepared.context)
+      : receipt;
   }
 
   async applyDirectActions(rawInput: DirectActionInput): Promise<OperationBatch> {
