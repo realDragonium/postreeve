@@ -11,12 +11,14 @@ import type {
   DeleteFolderInput,
   DirectActionInput,
   Draft,
+  DraftRecipientField,
   DraftVersionInput,
   Folder,
   ListMessagesInput,
   MessageRef,
   OperationBatch,
   OperationResult,
+  OutboundAddress,
   Proposal,
   RenameFolderInput,
   SendMessageInput,
@@ -448,9 +450,9 @@ export class PostreeveService {
     if (!intent) throw new Error("Conversation draft source was not found");
     const input = sendMessageInputSchema.parse({
       accountId,
-      to: draft.to,
-      cc: draft.cc,
-      bcc: draft.bcc,
+      to: draftRecipientsForSend(draft.to),
+      cc: draftRecipientsForSend(draft.cc),
+      bcc: draftRecipientsForSend(draft.bcc),
       subject: draft.subject,
       text: draft.body,
       intent,
@@ -1036,4 +1038,13 @@ function toPublicBatch(batch: StoredBatch): OperationBatch {
 function errorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message.trim() : "";
   return message || "Unknown mail provider failure";
+}
+
+function draftRecipientsForSend(recipients: DraftRecipientField): OutboundAddress[] {
+  if (Array.isArray(recipients)) return recipients;
+  return recipients
+    .split(",")
+    .map((address) => address.trim())
+    .filter(Boolean)
+    .map((address) => ({ name: "", address }));
 }

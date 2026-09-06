@@ -270,12 +270,16 @@ export const sendReceiptSchema = z.object({
 });
 
 export const draftComposeModeSchema = z.enum(["new", "reply", "reply_all", "forward"]);
+export const draftRecipientFieldSchema = z.union([
+  z.string(),
+  z.array(outboundAddressSchema).max(100),
+]);
 
 export const draftContentSchema = z.object({
   mode: draftComposeModeSchema,
-  to: z.array(outboundAddressSchema).max(100),
-  cc: z.array(outboundAddressSchema).max(100),
-  bcc: z.array(outboundAddressSchema).max(100),
+  to: draftRecipientFieldSchema,
+  cc: draftRecipientFieldSchema,
+  bcc: draftRecipientFieldSchema,
   subject: z.string().max(998),
   body: z.string().max(2_000_000),
   identity: outboundAddressSchema,
@@ -376,6 +380,7 @@ export type SendMessageIntent = z.infer<typeof sendMessageIntentSchema>;
 export type SendMessageInput = z.infer<typeof sendMessageInputSchema>;
 export type SendReceipt = z.infer<typeof sendReceiptSchema>;
 export type DraftComposeMode = z.infer<typeof draftComposeModeSchema>;
+export type DraftRecipientField = z.infer<typeof draftRecipientFieldSchema>;
 export type DraftContent = z.infer<typeof draftContentSchema>;
 export type DraftDelivery = z.infer<typeof draftDeliverySchema>;
 export type Draft = z.infer<typeof draftSchema>;

@@ -49,6 +49,56 @@ describe("server-authoritative drafts", () => {
     inspected.close();
   });
 
+  test("persists raw recipient text and recovery copies it losslessly", async () => {
+    const path = temporaryStore();
+    const first = await createEmptyTestHarness({ storePath: path });
+    const account = await first.service.createAccount(testAccountInput());
+    const healthy = await first.service.createDraft(draftInput(account));
+    const rawRecipients = {
+      to: "  alice@ ; Bob <bob@example.test>  ",
+      cc: "carol@example.test,   dave@",
+      bcc: "  undisclosed; pending@  ",
+    };
+    const created = await first.service.createDraft({
+      ...draftInput(account),
+      ...rawRecipients,
+      subject: "Incomplete recipients",
+      body: "Keep every recipient character.",
+    });
+    const claim = await first.store.claimDraftSend(
+      "test-tenant",
+      account.id,
+      created.id,
+      created.version,
+      new Date().toISOString(),
+      "recovery-fixture",
+    );
+    if (claim.kind !== "claimed") throw new Error("Expected a fresh draft claim");
+    const uncertain = await first.store.markDraftSendUncertain(
+      "test-tenant",
+      account.id,
+      created.id,
+      claim.draft.version,
+      "Provider outcome is unknown",
+      new Date().toISOString(),
+      "recovery-fixture",
+    );
+    first.store.close();
+
+    const reopened = await createEmptyTestHarness({ storePath: path });
+    expect(await reopened.service.getDraft(account.id, created.id)).toMatchObject(rawRecipients);
+    expect((await reopened.service.listDrafts(account.id)).map(({ id }) => id).sort())
+      .toEqual([healthy.id, created.id].sort());
+    const copy = await reopened.service.copyDraftForRecovery(account.id, created.id, { version: uncertain.version });
+    expect(copy).toMatchObject({
+      ...rawRecipients,
+      subject: created.subject,
+      body: created.body,
+      delivery: { status: "editable" },
+    });
+    reopened.store.close();
+  });
+
   test("atomically rejects stale edits and deletes without losing the winning content", async () => {
     const { store, service } = await createEmptyTestHarness();
     const account = await service.createAccount(testAccountInput());
@@ -104,6 +154,44 @@ describe("server-authoritative drafts", () => {
       .rejects.toThrow("Draft version conflict");
     expect(updated.version).toBe(2);
     expect(sendAttempts).toHaveLength(0);
+    store.close();
+  });
+
+  test("validates raw recipients only for sending without rewriting the durable draft", async () => {
+    const { store, service, sendAttempts } = await createEmptyTestHarness();
+    const account = await service.createAccount(testAccountInput());
+    const draft = await service.createDraft({
+      ...deliverableDraftInput(account),
+      to: "  alice@  ",
+      cc: " valid@example.test, pending@ ",
+      bcc: "",
+    });
+
+    await expect(service.sendDraft(account.id, draft.id, { version: draft.version })).rejects.toThrow();
+    expect(await service.getDraft(account.id, draft.id)).toEqual(draft);
+    expect(sendAttempts).toHaveLength(0);
+
+    const correctedRecipients = {
+      to: " alice@example.test, bob@example.test ",
+      cc: " carol@example.test ",
+      bcc: "",
+    };
+    const corrected = await service.updateDraft(account.id, draft.id, updateInput(draft, correctedRecipients));
+    const receipt = await service.sendDraft(account.id, draft.id, { version: corrected.version });
+    expect(receipt.accepted).toEqual([
+      "alice@example.test",
+      "bob@example.test",
+      "carol@example.test",
+    ]);
+    expect(sendAttempts).toEqual([expect.objectContaining({
+      to: [
+        { name: "", address: "alice@example.test" },
+        { name: "", address: "bob@example.test" },
+      ],
+      cc: [{ name: "", address: "carol@example.test" }],
+      bcc: [],
+    })]);
+    expect(await service.getDraft(account.id, draft.id)).toMatchObject(correctedRecipients);
     store.close();
   });
 

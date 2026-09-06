@@ -367,6 +367,66 @@ describe("Hono RPC API", () => {
     store.close();
   });
 
+  test("creates, reads, and updates arbitrary raw recipient text through typed routes", async () => {
+    const { store, service } = await createEmptyTestHarness();
+    const account = await service.createAccount(testAccountInput());
+    const healthy = await service.createDraft({
+      accountId: account.id,
+      mode: "new",
+      to: [{ name: "Complete", address: "complete@example.test" }],
+      cc: [],
+      bcc: [],
+      subject: "Healthy sibling",
+      body: "Structured recipients remain supported.",
+      identity: { name: account.name, address: account.email },
+    });
+    const client = hc<AppType>("http://postreeve.local", { fetch: createApi(service).request });
+    const raw = {
+      mode: "new" as const,
+      to: "  alice@ ; Bob <bob@example.test>  ",
+      cc: "carol@example.test,   dave@",
+      bcc: "  undisclosed; pending@  ",
+      subject: "Raw recipients",
+      body: "Preserve unfinished input.",
+      identity: { name: account.name, address: account.email },
+    };
+
+    const createdResponse = await client.api.accounts[":accountId"].drafts.$post({
+      param: { accountId: account.id },
+      json: raw,
+    });
+    expect(createdResponse.status).toBe(201);
+    const created = draftSchema.parse(await createdResponse.json());
+    expect(created).toMatchObject(raw);
+    const readResponse = await client.api.accounts[":accountId"].drafts[":draftId"].$get({
+      param: { accountId: account.id, draftId: created.id },
+    });
+    expect(draftSchema.parse(await readResponse.json())).toEqual(created);
+
+    const updatedRaw = {
+      ...raw,
+      to: "alice@example.test, bob@",
+      cc: "\tcarol@\n",
+      bcc: "one@example.test; two@",
+      body: "Keep this body edit too.",
+      version: created.version,
+    };
+    const updateResponse = await client.api.accounts[":accountId"].drafts[":draftId"].$put({
+      param: { accountId: account.id, draftId: created.id },
+      json: updatedRaw,
+    });
+    const updated = draftSchema.parse(await updateResponse.json());
+    const { version: _version, ...updatedContent } = updatedRaw;
+    expect(updated).toMatchObject(updatedContent);
+    expect(updated.version).toBe(created.version + 1);
+    const listResponse = await client.api.accounts[":accountId"].drafts.$get({
+      param: { accountId: account.id },
+    });
+    expect(draftSchema.array().parse(await listResponse.json()).map(({ id }) => id).sort())
+      .toEqual([healthy.id, updated.id].sort());
+    store.close();
+  });
+
   test("returns a typed conflict when account removal meets an active draft send", async () => {
     let releaseSend: () => void = () => {};
     let markAttempted: () => void = () => {};
