@@ -1157,27 +1157,53 @@ function decodeTransferEncoding(content: Buffer, encoding: string): Buffer {
     return decoded;
   }
   if (encoding !== "quoted-printable") return content;
+  const normalized = stripQuotedPrintableTransportPadding(content);
   const bytes: number[] = [];
-  for (let index = 0; index < content.length; index += 1) {
-    if (content[index] !== 0x3d) {
-      bytes.push(content[index]!);
+  for (let index = 0; index < normalized.length; index += 1) {
+    if (normalized[index] !== 0x3d) {
+      bytes.push(normalized[index]!);
       continue;
     }
-    if (content[index + 1] === 0x0d && content[index + 2] === 0x0a) {
+    if (normalized[index + 1] === 0x0d && normalized[index + 2] === 0x0a) {
       index += 2;
       continue;
     }
-    if (content[index + 1] === 0x0a) {
+    if (normalized[index + 1] === 0x0a) {
       index += 1;
       continue;
     }
-    const hex = content.subarray(index + 1, index + 3).toString("ascii");
+    const hex = normalized.subarray(index + 1, index + 3).toString("ascii");
     if (/^[0-9a-f]{2}$/i.test(hex)) {
       bytes.push(Number.parseInt(hex, 16));
       index += 2;
     } else {
       bytes.push(0x3d);
     }
+  }
+  return Buffer.from(bytes);
+}
+
+function stripQuotedPrintableTransportPadding(content: Buffer): Buffer {
+  const bytes: number[] = [];
+  for (let index = 0; index < content.length;) {
+    if (content[index] !== 0x20 && content[index] !== 0x09) {
+      bytes.push(content[index]!);
+      index += 1;
+      continue;
+    }
+    let next = index;
+    while (content[next] === 0x20 || content[next] === 0x09) next += 1;
+    const atLineEnd = next === content.length
+      || content[next] === 0x0a
+      || (content[next] === 0x0d && content[next + 1] === 0x0a);
+    if (!atLineEnd) {
+      while (index < next) {
+        bytes.push(content[index]!);
+        index += 1;
+      }
+      continue;
+    }
+    index = next;
   }
   return Buffer.from(bytes);
 }

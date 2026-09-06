@@ -162,6 +162,9 @@ describe("Bun IMAP compatibility", () => {
       .toEqual(exact);
     await expect(provider.downloadAttachment(config.accountId, inlineFile.locator, exact.byteLength - 1))
       .rejects.toThrow("download limit");
+    message.bodyParts.set("4", Buffer.from("a \r\nb\t\r\nencoded=20space=09tab\r\nsoft= \r\nbreak"));
+    expect(Buffer.from((await provider.downloadAttachment(config.accountId, inlineFile.locator, 100)).content))
+      .toEqual(Buffer.from("a\r\nb\r\nencoded space\ttab\r\nsoftbreak"));
 
     const pdfFile = detail?.attachments.find(({ filename }) => filename === "report.pdf");
     if (!pdfFile) throw new Error("Expected base64 file");
