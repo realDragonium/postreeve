@@ -367,6 +367,42 @@ describe("Hono RPC API", () => {
     store.close();
   });
 
+  test("copies an uncertain draft through the typed recovery route without dispatching", async () => {
+    const { store, service, sendAttempts } = await createEmptyTestHarness({
+      sendFailure: new Error("provider outcome unknown"),
+    });
+    const account = await service.createAccount(testAccountInput());
+    const draft = await service.createDraft({
+      accountId: account.id,
+      mode: "new",
+      to: [{ name: "Recipient", address: "recipient@example.test" }],
+      cc: [],
+      bcc: [],
+      subject: "Recover me",
+      body: "Preserve this content",
+      identity: { name: account.name, address: account.email },
+    });
+    await expect(service.sendDraft(account.id, draft.id, { version: draft.version }))
+      .rejects.toThrow("provider outcome unknown");
+    const uncertain = await service.getDraft(account.id, draft.id);
+    const client = hc<AppType>("http://postreeve.local", { fetch: createApi(service).request });
+
+    const response = await client.api.accounts[":accountId"].drafts[":draftId"].copy.$post({
+      param: { accountId: account.id, draftId: draft.id },
+      json: { version: uncertain.version },
+    });
+    expect(response.status).toBe(201);
+    expect(draftSchema.parse(await response.json())).toMatchObject({
+      accountId: account.id,
+      subject: draft.subject,
+      body: draft.body,
+      delivery: { status: "editable" },
+      version: 1,
+    });
+    expect(sendAttempts).toHaveLength(1);
+    store.close();
+  });
+
   test("keeps approval on its explicit human-facing endpoint", async () => {
     const { store, service } = await createTestHarness();
     const app = createApi(service);

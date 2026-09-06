@@ -16,6 +16,66 @@ afterEach(() => {
 });
 
 describe("Store migrations", () => {
+  test("adds drafts to a pre-479 store without changing accounts or canonical messages", async () => {
+    const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
+    paths.push(path);
+    const baseline = new Store(path);
+    await baseline.insertAccount({
+      id: "imap-account",
+      name: "IMAP",
+      email: "person@example.test",
+      kind: "imap",
+      encryptedCredentials: "retained-credentials",
+    });
+    const [message] = await baseline.reconcileMailbox({
+      tenantId: "tenant-a",
+      accountId: "imap-account",
+      provider: "imap",
+      mailbox: "INBOX",
+      authoritative: true,
+      observations: [{
+        tenantId: "tenant-a",
+        messageId: "<retained@example.test>",
+        inReplyTo: null,
+        references: [],
+        location: {
+          accountId: "imap-account",
+          provider: "imap",
+          mailbox: "INBOX",
+          uidValidity: "1",
+          uid: 1,
+          modseq: "1",
+          providerId: null,
+          read: false,
+          flagged: false,
+        },
+      }],
+    });
+    baseline.close();
+
+    const pre479 = new Database(path);
+    pre479.exec("DROP TABLE drafts; DELETE FROM schema_migrations WHERE version = 479;");
+    pre479.close();
+
+    const migrated = new Store(path);
+    expect(await migrated.getAccount("imap-account")).toEqual({
+      id: "imap-account",
+      name: "IMAP",
+      email: "person@example.test",
+      kind: "imap",
+      encryptedCredentials: "retained-credentials",
+    });
+    expect(await migrated.getMessage("tenant-a", message!.id)).toEqual(message!);
+    migrated.close();
+
+    const inspected = new Database(path);
+    expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 479").get()).toEqual({ version: 479 });
+    expect(inspected.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'drafts'").get())
+      .toEqual({ name: "drafts" });
+    expect(inspected.query("PRAGMA foreign_key_check").all()).toEqual([]);
+    inspected.close();
+  });
+
   test("atomically backfills a genuine pre-477 store and preserves it across reopen", async () => {
     const path = join(tmpdir(), `postreeve-${crypto.randomUUID()}.sqlite`);
     paths.push(path);

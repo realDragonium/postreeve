@@ -61,6 +61,7 @@ interface TestHarnessOptions {
   sendWait?: Promise<void>;
   onSendAttempt?: () => void;
   rejectRecipients?: readonly string[];
+  receiptAccountId?: string;
   duplicateDelivery?: boolean;
   archiveDelivery?: boolean;
   missingMessageId?: boolean;
@@ -120,6 +121,7 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
         wait: options.sendWait,
         failure: options.sendFailure,
         rejectRecipients: options.rejectRecipients ?? [],
+        receiptAccountId: options.receiptAccountId ?? account.id,
       });
     },
   );
@@ -336,6 +338,7 @@ class TestMailSender implements MailSender {
     readonly wait: Promise<void> | undefined;
     readonly failure: Error | undefined;
     readonly rejectRecipients: readonly string[];
+    readonly receiptAccountId: string;
   };
 
   constructor(
@@ -347,7 +350,14 @@ class TestMailSender implements MailSender {
       readonly wait: Promise<void> | undefined;
       readonly failure: Error | undefined;
       readonly rejectRecipients: readonly string[];
-    } = { onAttempt: () => {}, wait: undefined, failure: undefined, rejectRecipients: [] },
+      readonly receiptAccountId: string;
+    } = {
+      onAttempt: () => {},
+      wait: undefined,
+      failure: undefined,
+      rejectRecipients: [],
+      receiptAccountId: accountId,
+    },
   ) {
     this.#accountId = accountId;
     this.#onSent = onSent;
@@ -370,7 +380,7 @@ class TestMailSender implements MailSender {
     const rejected = new Set(this.#behavior.rejectRecipients.map((address) => address.toLocaleLowerCase()));
     const receipt = sendReceiptSchema.parse({
       id,
-      accountId: this.#accountId,
+      accountId: this.#behavior.receiptAccountId,
       messageId: `<${id}@example.test>`,
       accepted: recipients.filter((address) => !rejected.has(address.toLocaleLowerCase())),
       rejected: recipients.filter((address) => rejected.has(address.toLocaleLowerCase())),

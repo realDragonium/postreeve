@@ -37,14 +37,32 @@ import {
   type UpdateAccountInput,
 } from "../shared/contracts";
 
-const errorSchema = {
-  parse(value: unknown): string | null {
-    if (typeof value !== "object" || value === null) return null;
-    if ("error" in value && typeof value.error === "string") return value.error;
-    if ("message" in value && typeof value.message === "string") return value.message;
-    return null;
-  },
-};
+export type ApiErrorCode = "draft_conflict" | "draft_not_found";
+
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly code: ApiErrorCode | null;
+
+  constructor(message: string, status: number, code: ApiErrorCode | null) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function apiError(value: unknown): { message: string | null; code: ApiErrorCode | null } {
+  if (typeof value !== "object" || value === null) return { message: null, code: null };
+  const message = "error" in value && typeof value.error === "string"
+    ? value.error
+    : "message" in value && typeof value.message === "string"
+      ? value.message
+      : null;
+  const code = "code" in value && (value.code === "draft_conflict" || value.code === "draft_not_found")
+    ? value.code
+    : null;
+  return { message, code };
+}
 
 async function request<T>(path: string, schema: ZodType<T>, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, {
@@ -57,7 +75,8 @@ async function request<T>(path: string, schema: ZodType<T>, init?: RequestInit):
   });
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(errorSchema.parse(body) ?? `Request failed (${response.status})`);
+    const error = apiError(body);
+    throw new ApiRequestError(error.message ?? `Request failed (${response.status})`, response.status, error.code);
   }
 
   const direct = schema.safeParse(body);
@@ -162,6 +181,16 @@ export const api = {
     `/accounts/${encodeURIComponent(accountId)}/drafts/${encodeURIComponent(draftId)}`,
     connectionTestResultSchema,
     { method: "DELETE", ...jsonBody(input), ...withSignal(signal) },
+  ),
+  copyDraft: (
+    accountId: string,
+    draftId: string,
+    input: DraftVersionInput,
+    signal?: AbortSignal,
+  ): Promise<Draft> => request(
+    `/accounts/${encodeURIComponent(accountId)}/drafts/${encodeURIComponent(draftId)}/copy`,
+    draftSchema,
+    { method: "POST", ...jsonBody(input), ...withSignal(signal) },
   ),
   sendDraft: (
     accountId: string,

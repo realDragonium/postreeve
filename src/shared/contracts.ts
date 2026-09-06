@@ -289,7 +289,7 @@ export const draftDeliverySchema = z.discriminatedUnion("status", [
     status: z.literal("failed"),
     failedAt: z.iso.datetime(),
     error: z.string().min(1),
-    receipt: sendReceiptSchema,
+    receipt: sendReceiptSchema.optional(),
   }),
   z.object({
     status: z.literal("uncertain"),

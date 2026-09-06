@@ -1,5 +1,5 @@
 import { afterAll, expect, spyOn, test } from "bun:test";
-import { api } from "../src/web/api";
+import { ApiRequestError, api } from "../src/web/api";
 
 const fetchSpy = spyOn(globalThis, "fetch");
 
@@ -68,11 +68,43 @@ test("web API sends typed draft lifecycle requests", async () => {
   expect(await api.createDraft({ accountId: draft.accountId, ...content })).toEqual(draft);
   expect(await api.updateDraft(draft.accountId, draft.id, { ...content, version: 1 })).toEqual(draft);
   expect(await api.removeDraft(draft.accountId, draft.id, { version: 1 })).toEqual({ ok: true });
+  expect(await api.copyDraft(draft.accountId, draft.id, { version: 1 })).toEqual(draft);
   expect(await api.sendDraft(draft.accountId, draft.id, { version: 1 })).toEqual(receipt);
   expect(requested).toEqual([
     { url: "/api/accounts/account%2Fone/drafts", method: "POST", body: content },
     { url: "/api/accounts/account%2Fone/drafts/draft%2Fone", method: "PUT", body: { ...content, version: 1 } },
     { url: "/api/accounts/account%2Fone/drafts/draft%2Fone", method: "DELETE", body: { version: 1 } },
+    { url: "/api/accounts/account%2Fone/drafts/draft%2Fone/copy", method: "POST", body: { version: 1 } },
     { url: "/api/accounts/account%2Fone/drafts/draft%2Fone/send", method: "POST", body: { version: 1 } },
   ]);
+});
+
+test("web API preserves typed draft error codes and HTTP status", async () => {
+  fetchSpy.mockImplementation(Object.assign(async (input: string | URL | Request) => {
+    if (String(input).includes("missing")) {
+      return Response.json({ error: "Draft not found", code: "draft_not_found" }, { status: 404 });
+    }
+    return Response.json({ error: "Draft version conflict", code: "draft_conflict" }, { status: 409 });
+  }, { preconnect: globalThis.fetch.preconnect }));
+
+  const conflict = await api.updateDraft("account", "conflict", {
+    mode: "new",
+    to: [],
+    cc: [],
+    bcc: [],
+    subject: "",
+    body: "",
+    identity: { name: "Person", address: "person@example.test" },
+    version: 1,
+  }).catch((error: unknown) => error);
+  expect(conflict).toBeInstanceOf(ApiRequestError);
+  if (!(conflict instanceof ApiRequestError)) throw new Error("Expected ApiRequestError");
+  expect(conflict.code).toBe("draft_conflict");
+  expect(conflict.status).toBe(409);
+
+  const missing = await api.draft("account", "missing").catch((error: unknown) => error);
+  expect(missing).toBeInstanceOf(ApiRequestError);
+  if (!(missing instanceof ApiRequestError)) throw new Error("Expected ApiRequestError");
+  expect(missing.code).toBe("draft_not_found");
+  expect(missing.status).toBe(404);
 });

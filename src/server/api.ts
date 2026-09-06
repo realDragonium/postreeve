@@ -164,6 +164,15 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
       },
     )
     .post(
+      "/accounts/:accountId/drafts/:draftId/copy",
+      zValidator("param", draftParamsSchema),
+      zValidator("json", draftVersionInputSchema),
+      async (context) => {
+        const { accountId, draftId } = context.req.valid("param");
+        return context.json(await service.copyDraftForRecovery(accountId, draftId, context.req.valid("json")), 201);
+      },
+    )
+    .post(
       "/accounts/:accountId/drafts/:draftId/send",
       zValidator("param", draftParamsSchema),
       zValidator("json", draftVersionInputSchema),

@@ -21,7 +21,7 @@ import type {
   ProviderMessageSummary,
 } from "./provider";
 import { normalizeIdentificationFields, normalizeReferenceSequences } from "./message-id";
-import type { ConversationSendContext, MailSender } from "./sender";
+import { MailSendPreDispatchError, type ConversationSendContext, type MailSender } from "./sender";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -256,8 +256,19 @@ export class GmailMailClient implements MailProvider, MailSender {
     const reply = context?.type === "reply" || context?.type === "reply_all" ? context : undefined;
     const submittedAt = new Date().toISOString();
     const messageId = `<${crypto.randomUUID()}@postreeve.local>`;
-    const raw = await buildMessage(this.#account, input, messageId, submittedAt, reply);
-    const sent = await this.#request("/messages/send", sentMessageSchema, {
+    let raw: string;
+    try {
+      raw = await buildMessage(this.#account, input, messageId, submittedAt, reply);
+    } catch (error) {
+      throw preDispatchError(error);
+    }
+    let token: string;
+    try {
+      token = await this.#token();
+    } catch (error) {
+      throw preDispatchError(error);
+    }
+    const sent = await this.#requestWithToken(token, "/messages/send", sentMessageSchema, {
       method: "POST",
       body: JSON.stringify({
         raw: toBase64Url(Buffer.from(raw, "utf8")),
@@ -324,6 +335,10 @@ export class GmailMailClient implements MailProvider, MailSender {
 
   async #request<T>(path: string, schema: ZodType<T>, init: RequestInit = {}): Promise<T> {
     const token = await this.#token();
+    return this.#requestWithToken(token, path, schema, init);
+  }
+
+  async #requestWithToken<T>(token: string, path: string, schema: ZodType<T>, init: RequestInit = {}): Promise<T> {
     const response = await this.#fetch(`${GMAIL_API}${path}`, {
       ...init,
       headers: {
@@ -576,6 +591,12 @@ function isEmail(value: string): boolean {
 
 function replySubject(subject: string): string {
   return /^re:/i.test(subject) ? subject : `Re: ${subject}`;
+}
+
+function preDispatchError(error: unknown): MailSendPreDispatchError {
+  return error instanceof MailSendPreDispatchError
+    ? error
+    : new MailSendPreDispatchError(error instanceof Error ? error.message : "Mail preparation failed", { cause: error });
 }
 
 async function buildMessage(

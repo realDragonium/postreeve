@@ -38,6 +38,7 @@ export const drafts = sqliteTable("drafts", {
   deliveryReceipt: text("delivery_receipt", { mode: "json" }).$type<SendReceipt>(),
   deliveryError: text("delivery_error"),
   claimedAt: text("claimed_at"),
+  claimOwner: text("claim_owner"),
   settledAt: text("settled_at"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
@@ -48,15 +49,20 @@ export const drafts = sqliteTable("drafts", {
   check("drafts_version_check", sql`${table.version} > 0`),
   check("drafts_delivery_state_check", sql`
     (${table.deliveryStatus} = 'editable' AND ${table.deliveryReceipt} IS NULL
-      AND ${table.deliveryError} IS NULL AND ${table.claimedAt} IS NULL AND ${table.settledAt} IS NULL)
+      AND ${table.deliveryError} IS NULL AND ${table.claimedAt} IS NULL
+      AND ${table.claimOwner} IS NULL AND ${table.settledAt} IS NULL)
     OR (${table.deliveryStatus} = 'sending' AND ${table.deliveryReceipt} IS NULL
-      AND ${table.deliveryError} IS NULL AND ${table.claimedAt} IS NOT NULL AND ${table.settledAt} IS NULL)
-    OR (${table.deliveryStatus} = 'failed' AND ${table.deliveryReceipt} IS NOT NULL
-      AND ${table.deliveryError} IS NOT NULL AND ${table.claimedAt} IS NOT NULL AND ${table.settledAt} IS NOT NULL)
+      AND ${table.deliveryError} IS NULL AND ${table.claimedAt} IS NOT NULL
+      AND ${table.claimOwner} IS NOT NULL AND ${table.settledAt} IS NULL)
+    OR (${table.deliveryStatus} = 'failed'
+      AND ${table.deliveryError} IS NOT NULL AND ${table.claimedAt} IS NOT NULL
+      AND ${table.claimOwner} IS NOT NULL AND ${table.settledAt} IS NOT NULL)
     OR (${table.deliveryStatus} = 'uncertain' AND ${table.deliveryReceipt} IS NULL
-      AND ${table.deliveryError} IS NOT NULL AND ${table.claimedAt} IS NOT NULL AND ${table.settledAt} IS NOT NULL)
+      AND ${table.deliveryError} IS NOT NULL AND ${table.claimedAt} IS NOT NULL
+      AND ${table.claimOwner} IS NOT NULL AND ${table.settledAt} IS NOT NULL)
     OR (${table.deliveryStatus} = 'sent' AND ${table.deliveryReceipt} IS NOT NULL
-      AND ${table.deliveryError} IS NULL AND ${table.claimedAt} IS NOT NULL AND ${table.settledAt} IS NOT NULL)
+      AND ${table.deliveryError} IS NULL AND ${table.claimedAt} IS NOT NULL
+      AND ${table.claimOwner} IS NOT NULL AND ${table.settledAt} IS NOT NULL)
   `),
 ]);
 

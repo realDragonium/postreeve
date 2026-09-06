@@ -8,7 +8,7 @@ import { GoogleOAuth } from "./google/oauth";
 import { GmailMailClient } from "./mail/gmail";
 import { ImapMailProvider } from "./mail/imap";
 import { MailProviderRegistry } from "./mail/provider";
-import { MailSenderRegistry } from "./mail/sender";
+import { MailSendPreDispatchError, MailSenderRegistry } from "./mail/sender";
 import { SmtpMailSender } from "./mail/smtp";
 import { CredentialVault } from "./security/credentials";
 import { desktopApiAuthentication } from "./security/desktop-auth";
@@ -51,7 +51,9 @@ const service = new PostreeveService(
           throw new Error("This existing account has no SMTP configuration; add it again with outgoing-mail settings");
         },
         send: async () => {
-          throw new Error("This existing account has no SMTP configuration; add it again with outgoing-mail settings");
+          throw new MailSendPreDispatchError(
+            "This existing account has no SMTP configuration; add it again with outgoing-mail settings",
+          );
         },
       };
     }
@@ -75,6 +77,7 @@ const service = new PostreeveService(
     return { provider: client, sender: client };
   },
 );
+await service.recoverInterruptedDraftSends();
 await service.initialize();
 
 const app = new Hono();

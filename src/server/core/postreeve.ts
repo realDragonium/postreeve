@@ -50,7 +50,12 @@ import {
   type ProviderLocationMove,
   type ProviderMessageSummary,
 } from "../mail/provider";
-import { MailSenderRegistry, type ConversationSendContext, type MailSender } from "../mail/sender";
+import {
+  MailSendPreDispatchError,
+  MailSenderRegistry,
+  type ConversationSendContext,
+  type MailSender,
+} from "../mail/sender";
 import { DraftConflictError, DraftNotFoundError } from "./errors";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
 import {
@@ -88,6 +93,7 @@ export class PostreeveService {
   readonly #imapProviderFactory: ImapProviderFactory;
   readonly #mailSenderFactory: MailSenderFactory;
   readonly #gmailClientFactory: GmailClientFactory;
+  readonly #draftClaimOwner = crypto.randomUUID();
 
   constructor(
     store: Store,
@@ -115,6 +121,14 @@ export class PostreeveService {
   async initialize(): Promise<void> {
     const accounts = await this.#store.listAccounts();
     for (const account of accounts) this.#registerStoredAccount(account);
+  }
+
+  async recoverInterruptedDraftSends(): Promise<Draft[]> {
+    return this.#store.recoverInterruptedDraftSends(
+      this.#context.tenantId,
+      this.#draftClaimOwner,
+      new Date().toISOString(),
+    );
   }
 
   async listAccounts(): Promise<Account[]> {
@@ -397,6 +411,19 @@ export class PostreeveService {
     await this.#store.deleteDraft(this.#context.tenantId, accountId, id, version);
   }
 
+  async copyDraftForRecovery(accountId: string, id: string, rawInput: DraftVersionInput): Promise<Draft> {
+    await this.#requireAccount(accountId);
+    const { version } = draftVersionInputSchema.parse(rawInput);
+    return this.#store.copyUncertainDraft(
+      this.#context.tenantId,
+      accountId,
+      id,
+      version,
+      crypto.randomUUID(),
+      new Date().toISOString(),
+    );
+  }
+
   async sendDraft(accountId: string, id: string, rawInput: DraftVersionInput): Promise<SendReceipt> {
     const { version } = draftVersionInputSchema.parse(rawInput);
     const draft = await this.getDraft(accountId, id);
@@ -434,29 +461,40 @@ export class PostreeveService {
       id,
       version,
       new Date().toISOString(),
+      this.#draftClaimOwner,
     );
     if (claim.kind === "sent") return claim.receipt;
 
     let receipt: SendReceipt;
     try {
       receipt = await this.#dispatchMessageSend(prepared);
-      if (receipt.accountId !== accountId) {
-        throw new Error("Mail sender returned a receipt for another account");
-      }
     } catch (error) {
       const failedAt = new Date().toISOString();
       try {
-        await this.#store.markDraftSendUncertain(
-          this.#context.tenantId,
-          accountId,
-          id,
-          claim.draft.version,
-          errorMessage(error),
-          failedAt,
-        );
+        if (error instanceof MailSendPreDispatchError) {
+          await this.#store.markDraftSendFailed(
+            this.#context.tenantId,
+            accountId,
+            id,
+            claim.draft.version,
+            errorMessage(error),
+            failedAt,
+            this.#draftClaimOwner,
+          );
+        } else {
+          await this.#store.markDraftSendUncertain(
+            this.#context.tenantId,
+            accountId,
+            id,
+            claim.draft.version,
+            errorMessage(error),
+            failedAt,
+            this.#draftClaimOwner,
+          );
+        }
       } catch (persistenceError) {
         throw new Error(
-          `${errorMessage(error)}; the draft remains claimed because its uncertain delivery state could not be persisted: ${errorMessage(persistenceError)}`,
+          `${errorMessage(error)}; the draft remains claimed because its delivery state could not be persisted: ${errorMessage(persistenceError)}`,
         );
       }
       throw error;
@@ -469,14 +507,45 @@ export class PostreeveService {
         id,
         claim.draft.version,
         receipt,
+        this.#draftClaimOwner,
       );
       return receipt;
-    } catch (error) {
+    } catch (settlementError) {
+      const recoveredAt = new Date().toISOString();
+      let recoveryError: unknown;
+      try {
+        if (receipt.accepted.length > 0) {
+          await this.#store.markDraftSendUncertain(
+            this.#context.tenantId,
+            accountId,
+            id,
+            claim.draft.version,
+            "Delivery was accepted, but its receipt could not be stored",
+            recoveredAt,
+            this.#draftClaimOwner,
+          );
+        } else {
+          await this.#store.markDraftSendFailed(
+            this.#context.tenantId,
+            accountId,
+            id,
+            claim.draft.version,
+            "No recipients were accepted for delivery",
+            recoveredAt,
+            this.#draftClaimOwner,
+          );
+        }
+      } catch (error) {
+        recoveryError = error;
+      }
       return sendReceiptSchema.parse({
         ...receipt,
         warning: [
           receipt.warning,
-          `Delivery completed, but the local draft could not be settled: ${errorMessage(error)}. Automatic retry is blocked.`,
+          `Delivery completed, but the local draft receipt could not be stored: ${errorMessage(settlementError)}.`,
+          recoveryError
+            ? `Its recoverable delivery state also could not be stored: ${errorMessage(recoveryError)}. Automatic retry remains blocked.`
+            : "The draft remains recoverable without automatic retry.",
         ].filter((message): message is string => message !== undefined).join(" "),
       });
     }
@@ -582,7 +651,10 @@ export class PostreeveService {
   }
 
   async #dispatchMessageSend(prepared: PreparedMessageSend): Promise<SendReceipt> {
-    const receipt = await prepared.sender.send(prepared.input, prepared.context);
+    const receipt = sendReceiptSchema.parse(await prepared.sender.send(prepared.input, prepared.context));
+    if (receipt.accountId !== prepared.input.accountId) {
+      throw new Error("Mail sender returned a receipt for another account");
+    }
     return prepared.context && receipt.accepted.length > 0
       ? this.#recordConversationSend(prepared.input.accountId, prepared.account.kind, receipt, prepared.context)
       : receipt;

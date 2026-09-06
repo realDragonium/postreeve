@@ -144,6 +144,7 @@ export class Store {
       deliveryReceipt: null,
       deliveryError: null,
       claimedAt: null,
+      claimOwner: null,
       settledAt: null,
       createdAt: draft.createdAt,
       updatedAt: draft.updatedAt,
@@ -177,7 +178,8 @@ export class Store {
       UPDATE drafts SET
         mode = ?, recipients_to = ?, recipients_cc = ?, recipients_bcc = ?, subject = ?, body = ?,
         identity = ?, source = ?, delivery_status = 'editable', delivery_receipt = NULL,
-        delivery_error = NULL, claimed_at = NULL, settled_at = NULL, updated_at = ?, version = version + 1
+        delivery_error = NULL, claimed_at = NULL, claim_owner = NULL, settled_at = NULL,
+        updated_at = ?, version = version + 1
       WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
         AND delivery_status IN ('editable', 'failed')
       RETURNING *
@@ -216,6 +218,7 @@ export class Store {
     id: string,
     expectedVersion: number,
     claimedAt: string,
+    claimOwner: string,
   ): Promise<DraftSendClaim> {
     const claim = this.#sqlite.transaction((): DraftSendClaim => {
       const current = this.#draftRow(tenantId, accountId, id);
@@ -234,11 +237,11 @@ export class Store {
       }
       const row = this.#sqlite.query(`
         UPDATE drafts SET delivery_status = 'sending', delivery_receipt = NULL, delivery_error = NULL,
-          claimed_at = ?, settled_at = NULL, updated_at = ?, version = version + 1
+          claimed_at = ?, claim_owner = ?, settled_at = NULL, updated_at = ?, version = version + 1
         WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
           AND delivery_status IN ('editable', 'failed')
         RETURNING *
-      `).get(claimedAt, claimedAt, tenantId, accountId, id, expectedVersion) as DraftRow | null;
+      `).get(claimedAt, claimOwner, claimedAt, tenantId, accountId, id, expectedVersion) as DraftRow | null;
       if (!row) throw new DraftConflictError();
       return { kind: "claimed", draft: toDraft(row) };
     });
@@ -251,17 +254,23 @@ export class Store {
     id: string,
     expectedVersion: number,
     receipt: SendReceipt,
+    claimOwner: string,
   ): Promise<Draft> {
-    const delivered = receipt.accepted.length > 0;
-    const settledAt = receipt.submittedAt;
+    const validatedReceipt = sendReceiptSchema.parse(receipt);
+    if (validatedReceipt.accountId !== accountId) {
+      throw new Error("Draft delivery receipt belongs to another account");
+    }
+    const delivered = validatedReceipt.accepted.length > 0;
+    const settledAt = validatedReceipt.submittedAt;
     const error = delivered ? null : "No recipients were accepted for delivery";
     const row = this.#sqlite.query(`
       UPDATE drafts SET delivery_status = ?, delivery_receipt = ?, delivery_error = ?,
         settled_at = ?, updated_at = ?, version = version + 1
-      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ? AND delivery_status = 'sending'
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+        AND delivery_status = 'sending' AND claim_owner = ?
       RETURNING *
-    `).get(delivered ? "sent" : "failed", JSON.stringify(receipt), error, settledAt, settledAt,
-      tenantId, accountId, id, expectedVersion) as DraftRow | null;
+    `).get(delivered ? "sent" : "failed", JSON.stringify(validatedReceipt), error, settledAt, settledAt,
+      tenantId, accountId, id, expectedVersion, claimOwner) as DraftRow | null;
     if (!row) this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "settled");
     return toDraft(row);
   }
@@ -273,15 +282,99 @@ export class Store {
     expectedVersion: number,
     error: string,
     failedAt: string,
+    claimOwner: string,
   ): Promise<Draft> {
     const row = this.#sqlite.query(`
       UPDATE drafts SET delivery_status = 'uncertain', delivery_error = ?, settled_at = ?,
         updated_at = ?, version = version + 1
-      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ? AND delivery_status = 'sending'
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+        AND delivery_status = 'sending' AND claim_owner = ?
       RETURNING *
-    `).get(error, failedAt, failedAt, tenantId, accountId, id, expectedVersion) as DraftRow | null;
+    `).get(error, failedAt, failedAt, tenantId, accountId, id, expectedVersion, claimOwner) as DraftRow | null;
     if (!row) this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "marked uncertain");
     return toDraft(row);
+  }
+
+  async markDraftSendFailed(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    expectedVersion: number,
+    error: string,
+    failedAt: string,
+    claimOwner: string,
+  ): Promise<Draft> {
+    const row = this.#sqlite.query(`
+      UPDATE drafts SET delivery_status = 'failed', delivery_receipt = NULL, delivery_error = ?,
+        settled_at = ?, updated_at = ?, version = version + 1
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+        AND delivery_status = 'sending' AND claim_owner = ?
+      RETURNING *
+    `).get(error, failedAt, failedAt, tenantId, accountId, id, expectedVersion, claimOwner) as DraftRow | null;
+    if (!row) this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "marked failed");
+    return toDraft(row);
+  }
+
+  async recoverInterruptedDraftSends(
+    tenantId: string,
+    activeClaimOwner: string,
+    recoveredAt: string,
+  ): Promise<Draft[]> {
+    const rows = this.#sqlite.query(`
+      UPDATE drafts SET delivery_status = 'uncertain', delivery_receipt = NULL,
+        delivery_error = 'Delivery was interrupted before its outcome could be recorded',
+        settled_at = ?, updated_at = ?, version = version + 1
+      WHERE tenant_id = ? AND delivery_status = 'sending'
+        AND (claim_owner IS NULL OR claim_owner <> ?)
+      RETURNING *
+    `).all(recoveredAt, recoveredAt, tenantId, activeClaimOwner) as DraftRow[];
+    return rows.map(toDraft);
+  }
+
+  async copyUncertainDraft(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    expectedVersion: number,
+    copyId: string,
+    copiedAt: string,
+  ): Promise<Draft> {
+    const copy = this.#sqlite.transaction((): Draft => {
+      const source = this.#sqlite.query(`
+        UPDATE drafts SET updated_at = ?, version = version + 1
+        WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+          AND delivery_status = 'uncertain'
+        RETURNING *
+      `).get(copiedAt, tenantId, accountId, id, expectedVersion) as DraftRow | null;
+      if (!source) {
+        this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "copied for recovery");
+      }
+      this.#sqlite.query(`
+        INSERT INTO drafts (
+          id, tenant_id, account_id, mode, recipients_to, recipients_cc, recipients_bcc,
+          subject, body, identity, source, delivery_status, delivery_receipt, delivery_error,
+          claimed_at, claim_owner, settled_at, created_at, updated_at, version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL, ?, ?, 1)
+      `).run(
+        copyId,
+        source.tenant_id,
+        source.account_id,
+        source.mode,
+        source.recipients_to,
+        source.recipients_cc,
+        source.recipients_bcc,
+        source.subject,
+        source.body,
+        source.identity,
+        source.source,
+        copiedAt,
+        copiedAt,
+      );
+      const row = this.#draftRow(tenantId, accountId, copyId);
+      if (!row) throw new Error("Recovery draft copy was not stored");
+      return toDraft(row);
+    });
+    return copy();
   }
 
   async insertProposal(proposal: Proposal): Promise<void> {
@@ -1021,6 +1114,7 @@ export class Store {
           delivery_receipt TEXT,
           delivery_error TEXT,
           claimed_at TEXT,
+          claim_owner TEXT,
           settled_at TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
@@ -1028,15 +1122,20 @@ export class Store {
           PRIMARY KEY (tenant_id, id),
           CHECK (
             (delivery_status = 'editable' AND delivery_receipt IS NULL
-              AND delivery_error IS NULL AND claimed_at IS NULL AND settled_at IS NULL)
+              AND delivery_error IS NULL AND claimed_at IS NULL
+              AND claim_owner IS NULL AND settled_at IS NULL)
             OR (delivery_status = 'sending' AND delivery_receipt IS NULL
-              AND delivery_error IS NULL AND claimed_at IS NOT NULL AND settled_at IS NULL)
-            OR (delivery_status = 'failed' AND delivery_receipt IS NOT NULL
-              AND delivery_error IS NOT NULL AND claimed_at IS NOT NULL AND settled_at IS NOT NULL)
+              AND delivery_error IS NULL AND claimed_at IS NOT NULL
+              AND claim_owner IS NOT NULL AND settled_at IS NULL)
+            OR (delivery_status = 'failed'
+              AND delivery_error IS NOT NULL AND claimed_at IS NOT NULL
+              AND claim_owner IS NOT NULL AND settled_at IS NOT NULL)
             OR (delivery_status = 'uncertain' AND delivery_receipt IS NULL
-              AND delivery_error IS NOT NULL AND claimed_at IS NOT NULL AND settled_at IS NOT NULL)
+              AND delivery_error IS NOT NULL AND claimed_at IS NOT NULL
+              AND claim_owner IS NOT NULL AND settled_at IS NOT NULL)
             OR (delivery_status = 'sent' AND delivery_receipt IS NOT NULL
-              AND delivery_error IS NULL AND claimed_at IS NOT NULL AND settled_at IS NOT NULL)
+              AND delivery_error IS NULL AND claimed_at IS NOT NULL
+              AND claim_owner IS NOT NULL AND settled_at IS NOT NULL)
           )
         );
         CREATE INDEX drafts_tenant_account_updated_idx ON drafts(tenant_id, account_id, updated_at);
@@ -1443,6 +1542,7 @@ interface DraftRow {
   delivery_receipt: string | null;
   delivery_error: string | null;
   claimed_at: string | null;
+  claim_owner: string | null;
   settled_at: string | null;
   created_at: string;
   updated_at: string;
@@ -1451,6 +1551,9 @@ interface DraftRow {
 
 function toDraft(row: DraftRow): Draft {
   const receipt = parseStoredReceipt(row.delivery_receipt);
+  if (receipt && receipt.accountId !== row.account_id) {
+    throw new Error("Draft delivery receipt belongs to another account");
+  }
   const delivery: Draft["delivery"] = (() => {
     switch (row.delivery_status) {
       case "editable":
@@ -1459,10 +1562,15 @@ function toDraft(row: DraftRow): Draft {
         if (!row.claimed_at) throw new Error("Sending draft is missing its claim timestamp");
         return { status: "sending", claimedAt: row.claimed_at };
       case "failed":
-        if (!row.settled_at || !row.delivery_error || !receipt) {
+        if (!row.settled_at || !row.delivery_error) {
           throw new Error("Failed draft is missing its delivery result");
         }
-        return { status: "failed", failedAt: row.settled_at, error: row.delivery_error, receipt };
+        return {
+          status: "failed",
+          failedAt: row.settled_at,
+          error: row.delivery_error,
+          ...(receipt ? { receipt } : {}),
+        };
       case "uncertain":
         if (!row.settled_at || !row.delivery_error) {
           throw new Error("Uncertain draft is missing its delivery failure");

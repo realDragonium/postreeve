@@ -7,7 +7,7 @@ import {
   toCanonicalObservation,
   type ProviderMessageObservation,
 } from "../src/server/mail/provider";
-import { MailSenderRegistry } from "../src/server/mail/sender";
+import { MailSendPreDispatchError, MailSenderRegistry } from "../src/server/mail/sender";
 import { Store } from "../src/server/db/store";
 import { GoogleOAuth, type OAuthFetch } from "../src/server/google/oauth";
 import { PostreeveService } from "../src/server/core/postreeve";
@@ -109,6 +109,32 @@ function rawThreadingSource(input: {
 }
 
 describe("Gmail compatibility", () => {
+  test("classifies token acquisition failure as proven pre-dispatch", async () => {
+    const requests: string[] = [];
+    const client = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "stored-refresh-token" },
+      clientId: "desktop-client-id",
+      fetch: async (input) => {
+        requests.push(String(input));
+        return Response.json({ error: "invalid_grant" }, { status: 401 });
+      },
+    });
+
+    const error = await client.send({
+      accountId: account.id,
+      to: [{ name: "Recipient", address: "recipient@example.test" }],
+      cc: [],
+      bcc: [],
+      subject: "Pre-dispatch",
+      text: "No provider submission should occur.",
+      intent: { type: "new" },
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(MailSendPreDispatchError);
+    expect(requests).toEqual(["https://oauth2.googleapis.com/token"]);
+  });
+
   test("refreshes OAuth, lists Gmail labels and messages, reads source, applies actions, and sends", async () => {
     const requests: Array<{ url: string; method: string; body: string }> = [];
     let historyId = 10;

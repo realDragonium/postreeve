@@ -4,6 +4,8 @@ import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Account, CreateDraftInput, Draft, UpdateDraftInput } from "../src/shared/contracts";
+import { Store } from "../src/server/db/store";
+import { MailSendPreDispatchError } from "../src/server/mail/sender";
 import { createEmptyTestHarness, createTestHarness, testAccountInput } from "./support/test-mail";
 
 const paths: string[] = [];
@@ -67,6 +69,28 @@ describe("server-authoritative drafts", () => {
     store.close();
   });
 
+  test("atomically rejects concurrent edits from independent Store handles", async () => {
+    const path = temporaryStore();
+    const first = await createEmptyTestHarness({ storePath: path });
+    const account = await first.service.createAccount(testAccountInput());
+    const draft = await first.service.createDraft(draftInput(account));
+    const second = new Store(path);
+    const updatedAt = new Date().toISOString();
+    const content = updateInput(draft, { subject: "Shared winner" });
+    const { version, ...draftContent } = content;
+
+    const results = await Promise.allSettled([
+      first.store.updateDraft("test-tenant", account.id, draft.id, version, draftContent, updatedAt),
+      second.updateDraft("test-tenant", account.id, draft.id, version, { ...draftContent, subject: "Other winner" }, updatedAt),
+    ]);
+
+    expect(results.filter(({ status }) => status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(({ status }) => status === "rejected")).toHaveLength(1);
+    expect((await first.service.getDraft(account.id, draft.id)).version).toBe(2);
+    second.close();
+    first.store.close();
+  });
+
   test("rejects future and stale send versions before incomplete content validation", async () => {
     const { store, service, sendAttempts } = await createEmptyTestHarness();
     const account = await service.createAccount(testAccountInput());
@@ -91,10 +115,10 @@ describe("server-authoritative drafts", () => {
     let markClaimReached: () => void = () => {};
     const claimWait = new Promise<void>((resolve) => { releaseClaim = resolve; });
     const claimReached = new Promise<void>((resolve) => { markClaimReached = resolve; });
-    store.claimDraftSend = async (tenantId, accountId, id, expectedVersion, claimedAt) => {
+    store.claimDraftSend = async (tenantId, accountId, id, expectedVersion, claimedAt, claimOwner) => {
       markClaimReached();
       await claimWait;
-      return claimDraftSend(tenantId, accountId, id, expectedVersion, claimedAt);
+      return claimDraftSend(tenantId, accountId, id, expectedVersion, claimedAt, claimOwner);
     };
 
     const sending = service.sendDraft(account.id, draft.id, { version: draft.version });
@@ -128,6 +152,8 @@ describe("server-authoritative drafts", () => {
       .rejects.toThrow("Draft version conflict");
     await expect(first.service.removeDraft(account.id, draft.id, { version: draft.version }))
       .rejects.toThrow("Draft version conflict");
+    expect(await first.service.recoverInterruptedDraftSends()).toEqual([]);
+    expect((await first.service.getDraft(account.id, draft.id)).delivery.status).toBe("sending");
     expect(first.sendAttempts).toHaveLength(1);
 
     releaseSend();
@@ -171,7 +197,7 @@ describe("server-authoritative drafts", () => {
     reopened.store.close();
   });
 
-  test("preserves an in-progress claim across restart instead of risking a second dispatch", async () => {
+  test("recovers a prior-process claim as uncertain and copies its content without resending", async () => {
     const path = temporaryStore();
     const first = await createEmptyTestHarness({ storePath: path });
     const account = await first.service.createAccount(testAccountInput());
@@ -182,15 +208,38 @@ describe("server-authoritative drafts", () => {
       draft.id,
       draft.version,
       new Date().toISOString(),
+      "prior-process",
     );
     expect(claim.kind).toBe("claimed");
     first.store.close();
 
     const reopened = await createEmptyTestHarness({ storePath: path });
-    const claimed = await reopened.service.getDraft(account.id, draft.id);
-    expect(claimed.delivery.status).toBe("sending");
-    await expect(reopened.service.sendDraft(account.id, draft.id, { version: claimed.version }))
-      .rejects.toThrow("already in progress");
+    const recovered = await reopened.service.recoverInterruptedDraftSends();
+    expect(recovered).toHaveLength(1);
+    expect(recovered[0]).toMatchObject({
+      id: draft.id,
+      body: draft.body,
+      version: 3,
+      delivery: { status: "uncertain", error: "Delivery was interrupted before its outcome could be recorded" },
+    });
+    await expect(reopened.service.sendDraft(account.id, draft.id, { version: recovered[0]!.version }))
+      .rejects.toThrow("cannot be retried automatically");
+    const other = await reopened.service.createAccount(testAccountInput("Other", "other@example.test"));
+    await expect(reopened.service.copyDraftForRecovery(other.id, draft.id, { version: recovered[0]!.version }))
+      .rejects.toThrow("Draft not found");
+    const copy = await reopened.service.copyDraftForRecovery(account.id, draft.id, { version: recovered[0]!.version });
+    expect(copy).toMatchObject({
+      accountId: account.id,
+      body: draft.body,
+      subject: draft.subject,
+      delivery: { status: "editable" },
+      version: 1,
+    });
+    expect(copy.id).not.toBe(draft.id);
+    const original = await reopened.service.getDraft(account.id, draft.id);
+    expect(original).toMatchObject({ version: 4, delivery: recovered[0]!.delivery });
+    await expect(reopened.service.copyDraftForRecovery(account.id, draft.id, { version: recovered[0]!.version }))
+      .rejects.toThrow("Draft version conflict");
     expect(reopened.sendAttempts).toHaveLength(0);
     reopened.store.close();
   });
@@ -229,7 +278,7 @@ describe("server-authoritative drafts", () => {
     rejected.store.close();
   });
 
-  test("keeps pre-dispatch failures editable and post-accept persistence failures claimed", async () => {
+  test("keeps proven pre-dispatch failures retryable and post-accept persistence failures uncertain", async () => {
     const { store, service, sendAttempts } = await createEmptyTestHarness();
     const account = await service.createAccount(testAccountInput());
     const incomplete = await service.createDraft(draftInput(account));
@@ -237,19 +286,94 @@ describe("server-authoritative drafts", () => {
     expect(await service.getDraft(account.id, incomplete.id)).toEqual(incomplete);
     expect(sendAttempts).toHaveLength(0);
 
+    const preDispatch = await createEmptyTestHarness({
+      sendFailure: new MailSendPreDispatchError("message construction failed"),
+    });
+    const preDispatchAccount = await preDispatch.service.createAccount(testAccountInput());
+    const retryable = await preDispatch.service.createDraft(deliverableDraftInput(preDispatchAccount));
+    await expect(preDispatch.service.sendDraft(preDispatchAccount.id, retryable.id, { version: retryable.version }))
+      .rejects.toThrow("message construction failed");
+    const failed = await preDispatch.service.getDraft(preDispatchAccount.id, retryable.id);
+    expect(failed.delivery).toEqual({
+      status: "failed",
+      failedAt: expect.any(String),
+      error: "message construction failed",
+    });
+    expect(await preDispatch.service.updateDraft(
+      preDispatchAccount.id,
+      retryable.id,
+      updateInput(failed, { body: "Corrected content" }),
+    )).toMatchObject({ body: "Corrected content", delivery: { status: "editable" } });
+    preDispatch.store.close();
+
     const deliverable = await service.createDraft(deliverableDraftInput(account));
     store.settleDraftSend = async () => {
       throw new Error("fixture settlement failure");
     };
     const receipt = await service.sendDraft(account.id, deliverable.id, { version: deliverable.version });
     expect(receipt.accepted).toEqual(["recipient@example.test"]);
-    expect(receipt.warning).toContain("local draft could not be settled");
-    const claimed = await service.getDraft(account.id, deliverable.id);
-    expect(claimed.delivery.status).toBe("sending");
-    await expect(service.sendDraft(account.id, deliverable.id, { version: claimed.version }))
-      .rejects.toThrow("already in progress");
+    expect(receipt.warning).toContain("local draft receipt could not be stored");
+    const uncertain = await service.getDraft(account.id, deliverable.id);
+    expect(uncertain.delivery).toMatchObject({
+      status: "uncertain",
+      error: "Delivery was accepted, but its receipt could not be stored",
+    });
+    await expect(service.sendDraft(account.id, deliverable.id, { version: uncertain.version }))
+      .rejects.toThrow("cannot be retried automatically");
     expect(sendAttempts).toHaveLength(1);
     store.close();
+  });
+
+  test("rejects a receipt for another account before conversation mutation and at Store settlement", async () => {
+    const reply = await createTestHarness({ receiptAccountId: "another-account" });
+    const source = reply.messages[0]!;
+    const draft = await reply.service.createDraft({
+      ...deliverableDraftInput(reply.account),
+      mode: "reply",
+      source: { canonicalMessageId: source.canonicalId, conversationId: source.conversationId },
+    });
+    let conversationWrites = 0;
+    const recordConversationSend = reply.store.recordConversationSend.bind(reply.store);
+    reply.store.recordConversationSend = async (...args) => {
+      conversationWrites += 1;
+      return recordConversationSend(...args);
+    };
+
+    await expect(reply.service.sendDraft(reply.account.id, draft.id, { version: draft.version }))
+      .rejects.toThrow("receipt for another account");
+    expect(conversationWrites).toBe(0);
+    expect((await reply.service.getDraft(reply.account.id, draft.id)).delivery.status).toBe("uncertain");
+    reply.store.close();
+
+    const direct = await createEmptyTestHarness();
+    const account = await direct.service.createAccount(testAccountInput());
+    const storedDraft = await direct.service.createDraft(deliverableDraftInput(account));
+    const claim = await direct.store.claimDraftSend(
+      "test-tenant",
+      account.id,
+      storedDraft.id,
+      storedDraft.version,
+      new Date().toISOString(),
+      "direct-claim",
+    );
+    if (claim.kind !== "claimed") throw new Error("Expected a fresh claim");
+    await expect(direct.store.settleDraftSend(
+      "test-tenant",
+      account.id,
+      storedDraft.id,
+      claim.draft.version,
+      {
+        id: "wrong-account-receipt",
+        accountId: "another-account",
+        messageId: "<wrong-account@example.test>",
+        accepted: ["recipient@example.test"],
+        rejected: [],
+        submittedAt: new Date().toISOString(),
+      },
+      "direct-claim",
+    )).rejects.toThrow("belongs to another account");
+    expect((await direct.service.getDraft(account.id, storedDraft.id)).delivery.status).toBe("sending");
+    direct.store.close();
   });
 
   test("settles accepted delivery even when local conversation history cannot be recorded", async () => {
