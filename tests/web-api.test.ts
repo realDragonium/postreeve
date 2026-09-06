@@ -79,8 +79,14 @@ test("web API sends typed draft lifecycle requests", async () => {
   ]);
 });
 
-test("web API preserves typed draft error codes and HTTP status", async () => {
+test("web API preserves typed lifecycle error codes and HTTP status", async () => {
   fetchSpy.mockImplementation(Object.assign(async (input: string | URL | Request) => {
+    if (String(input).endsWith("/accounts/active")) {
+      return Response.json({
+        error: "Account has a draft delivery in progress",
+        code: "account_conflict",
+      }, { status: 409 });
+    }
     if (String(input).includes("missing")) {
       return Response.json({ error: "Draft not found", code: "draft_not_found" }, { status: 404 });
     }
@@ -107,4 +113,10 @@ test("web API preserves typed draft error codes and HTTP status", async () => {
   if (!(missing instanceof ApiRequestError)) throw new Error("Expected ApiRequestError");
   expect(missing.code).toBe("draft_not_found");
   expect(missing.status).toBe(404);
+
+  const accountConflict = await api.removeAccount("active").catch((error: unknown) => error);
+  expect(accountConflict).toBeInstanceOf(ApiRequestError);
+  if (!(accountConflict instanceof ApiRequestError)) throw new Error("Expected ApiRequestError");
+  expect(accountConflict.code).toBe("account_conflict");
+  expect(accountConflict.status).toBe(409);
 });

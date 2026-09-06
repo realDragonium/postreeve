@@ -11,3 +11,10 @@ export class DraftConflictError extends Error {
     this.name = "DraftConflictError";
   }
 }
+
+export class AccountConflictError extends Error {
+  constructor(message = "Account has a draft delivery in progress") {
+    super(message);
+    this.name = "AccountConflictError";
+  }
+}

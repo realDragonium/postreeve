@@ -18,7 +18,7 @@ import type {
   SendReceipt,
 } from "../../shared/contracts";
 import { draftSchema, sendReceiptSchema } from "../../shared/contracts";
-import { DraftConflictError, DraftNotFoundError } from "../core/errors";
+import { AccountConflictError, DraftConflictError, DraftNotFoundError } from "../core/errors";
 import { accounts, batches, drafts, proposals, type StoredOperation } from "./schema";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
 import type { ProviderMessageObservation } from "../mail/provider";
@@ -112,9 +112,13 @@ export class Store {
   }
 
   async deleteAccount(id: string): Promise<boolean> {
-    const account = await this.getAccount(id);
-    if (!account) return false;
-    const remove = this.#sqlite.transaction((accountId: string) => {
+    const remove = this.#sqlite.transaction((accountId: string): boolean => {
+      const account = this.#sqlite.query("SELECT 1 FROM accounts WHERE id = ?").get(accountId);
+      if (!account) return false;
+      const sending = this.#sqlite.query(`
+        SELECT 1 FROM drafts WHERE account_id = ? AND delivery_status = 'sending' LIMIT 1
+      `).get(accountId);
+      if (sending) throw new AccountConflictError();
       this.#sqlite.query("DELETE FROM drafts WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_provider_conversations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_locations WHERE account_id = ?").run(accountId);
@@ -122,9 +126,9 @@ export class Store {
       this.#sqlite.query("DELETE FROM operation_batches WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM proposals WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM accounts WHERE id = ?").run(accountId);
+      return true;
     });
-    remove(id);
-    return true;
+    return remove.immediate(id);
   }
 
   async insertDraft(tenantId: string, draft: Draft): Promise<void> {

@@ -4,6 +4,7 @@ import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Account, CreateDraftInput, Draft, UpdateDraftInput } from "../src/shared/contracts";
+import { AccountConflictError } from "../src/server/core/errors";
 import { Store } from "../src/server/db/store";
 import { MailSendPreDispatchError } from "../src/server/mail/sender";
 import { createEmptyTestHarness, createTestHarness, testAccountInput } from "./support/test-mail";
@@ -173,6 +174,111 @@ describe("server-authoritative drafts", () => {
     expect(await reopened.service.sendDraft(account.id, draft.id, { version: draft.version })).toEqual(receipt);
     expect(reopened.sendAttempts).toHaveLength(0);
     reopened.store.close();
+  });
+
+  for (const outcome of ["accepted", "uncertain"] as const) {
+    test(`blocks account removal during an active send and preserves its ${outcome} outcome`, async () => {
+      const path = temporaryStore();
+      let releaseSend: () => void = () => {};
+      let markAttempted: () => void = () => {};
+      const sendWait = new Promise<void>((resolve) => { releaseSend = resolve; });
+      const attempted = new Promise<void>((resolve) => { markAttempted = resolve; });
+      const first = await createEmptyTestHarness({
+        storePath: path,
+        sendWait,
+        onSendAttempt: markAttempted,
+        ...(outcome === "uncertain" ? { sendFailure: new Error("provider outcome is ambiguous") } : {}),
+      });
+      const account = await first.service.createAccount(testAccountInput());
+      const unrelated = await first.service.createAccount(testAccountInput("Other", "other@example.test"));
+      const active = await first.service.createDraft(deliverableDraftInput(account));
+      const editable = await first.service.createDraft(draftInput(account));
+      const failedDraft = await first.service.createDraft({ ...deliverableDraftInput(account), subject: "Failed" });
+      const failedClaim = await first.store.claimDraftSend(
+        "test-tenant",
+        account.id,
+        failedDraft.id,
+        failedDraft.version,
+        new Date().toISOString(),
+        "fixture-failed",
+      );
+      if (failedClaim.kind !== "claimed") throw new Error("Expected a fresh draft claim");
+      await first.store.markDraftSendFailed(
+        "test-tenant",
+        account.id,
+        failedDraft.id,
+        failedClaim.draft.version,
+        "Known pre-dispatch failure",
+        new Date().toISOString(),
+        "fixture-failed",
+      );
+      const unrelatedDraft = await first.service.createDraft(draftInput(unrelated));
+
+      const sending = first.service.sendDraft(account.id, active.id, { version: active.version });
+      await attempted;
+      const second = await createEmptyTestHarness({ storePath: path });
+      const claimed = await second.service.getDraft(account.id, active.id);
+      await expect(second.service.removeAccount(account.id)).rejects.toBeInstanceOf(AccountConflictError);
+      expect(await second.service.getDraft(account.id, active.id)).toEqual(claimed);
+      expect(await second.store.getAccount(account.id)).not.toBeNull();
+
+      await second.service.removeAccount(unrelated.id);
+      expect(await second.store.getAccount(unrelated.id)).toBeNull();
+      expect(await second.store.getDraft("test-tenant", unrelated.id, unrelatedDraft.id)).toBeNull();
+
+      releaseSend();
+      if (outcome === "accepted") {
+        const receipt = await sending;
+        expect((await second.service.getDraft(account.id, active.id)).delivery)
+          .toEqual({ status: "sent", settledAt: receipt.submittedAt, receipt });
+        expect(await second.service.sendDraft(account.id, active.id, { version: active.version })).toEqual(receipt);
+      } else {
+        await expect(sending).rejects.toThrow("provider outcome is ambiguous");
+        expect(await second.service.getDraft(account.id, active.id)).toMatchObject({
+          body: active.body,
+          delivery: { status: "uncertain", error: "provider outcome is ambiguous" },
+        });
+      }
+      expect(first.sendAttempts).toHaveLength(1);
+
+      await second.service.removeAccount(account.id);
+      expect(await second.store.getAccount(account.id)).toBeNull();
+      for (const draftId of [active.id, editable.id, failedDraft.id]) {
+        expect(await second.store.getDraft("test-tenant", account.id, draftId)).toBeNull();
+      }
+      second.store.close();
+      first.store.close();
+    });
+  }
+
+  test("does not dispatch when account removal wins before the send claim", async () => {
+    const path = temporaryStore();
+    const first = await createEmptyTestHarness({ storePath: path });
+    const account = await first.service.createAccount(testAccountInput());
+    const draft = await first.service.createDraft(deliverableDraftInput(account));
+    const claimDraftSend = first.store.claimDraftSend.bind(first.store);
+    let releaseClaim: () => void = () => {};
+    let markClaimReached: () => void = () => {};
+    const claimWait = new Promise<void>((resolve) => { releaseClaim = resolve; });
+    const claimReached = new Promise<void>((resolve) => { markClaimReached = resolve; });
+    first.store.claimDraftSend = async (tenantId, accountId, id, expectedVersion, claimedAt, claimOwner) => {
+      markClaimReached();
+      await claimWait;
+      return claimDraftSend(tenantId, accountId, id, expectedVersion, claimedAt, claimOwner);
+    };
+
+    const sending = first.service.sendDraft(account.id, draft.id, { version: draft.version });
+    await claimReached;
+    const second = await createEmptyTestHarness({ storePath: path });
+    await second.service.removeAccount(account.id);
+    releaseClaim();
+
+    await expect(sending).rejects.toThrow("Draft not found");
+    expect(first.sendAttempts).toHaveLength(0);
+    expect(await second.store.getAccount(account.id)).toBeNull();
+    expect(await second.store.getDraft("test-tenant", account.id, draft.id)).toBeNull();
+    second.store.close();
+    first.store.close();
   });
 
   test("retains uncertain delivery without permitting an automatic retry", async () => {

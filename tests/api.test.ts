@@ -367,6 +367,40 @@ describe("Hono RPC API", () => {
     store.close();
   });
 
+  test("returns a typed conflict when account removal meets an active draft send", async () => {
+    let releaseSend: () => void = () => {};
+    let markAttempted: () => void = () => {};
+    const sendWait = new Promise<void>((resolve) => { releaseSend = resolve; });
+    const attempted = new Promise<void>((resolve) => { markAttempted = resolve; });
+    const { store, service } = await createEmptyTestHarness({ sendWait, onSendAttempt: markAttempted });
+    const account = await service.createAccount(testAccountInput());
+    const draft = await service.createDraft({
+      accountId: account.id,
+      mode: "new",
+      to: [{ name: "Recipient", address: "recipient@example.test" }],
+      cc: [],
+      bcc: [],
+      subject: "Active delivery",
+      body: "Keep this draft until delivery settles.",
+      identity: { name: account.name, address: account.email },
+    });
+    const sending = service.sendDraft(account.id, draft.id, { version: draft.version });
+    await attempted;
+    const client = hc<AppType>("http://postreeve.local", { fetch: createApi(service).request });
+
+    const response = await client.api.accounts[":accountId"].$delete({ param: { accountId: account.id } });
+    expect(response.status).toBe(409);
+    const body: unknown = await response.json();
+    expect(body).toEqual({
+      error: "Account has a draft delivery in progress",
+      code: "account_conflict",
+    });
+
+    releaseSend();
+    await sending;
+    store.close();
+  });
+
   test("copies an uncertain draft through the typed recovery route without dispatching", async () => {
     const { store, service, sendAttempts } = await createEmptyTestHarness({
       sendFailure: new Error("provider outcome unknown"),
