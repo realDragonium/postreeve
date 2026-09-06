@@ -341,7 +341,12 @@ export class PostreeveService {
     }
     const locations = await this.#store.listMessageLocations(this.#context.tenantId, source.id);
     const accountLocations = locations.filter(({ accountId }) => accountId === input.accountId);
-    if (accountLocations.length === 0) {
+    if (!await this.#store.hasMessageProviderAssociation(
+      this.#context.tenantId,
+      source.id,
+      input.accountId,
+      account.kind,
+    )) {
       throw new Error("Conversation send source does not belong to the selected account");
     }
     if (intent.type === "forward") {
@@ -361,16 +366,6 @@ export class PostreeveService {
       ...(parentReferences.length > 0 ? parentReferences : parentInReplyTo.length === 1 ? parentInReplyTo : []),
       inReplyTo,
     ]);
-    const sourceDetail = account.kind === "gmail"
-      ? await this.#readFirstAvailableMessage(input.accountId, accountLocations.map((location) => ({
-        accountId: location.accountId,
-        mailbox: location.mailbox,
-        uidValidity: location.uidValidity,
-        uid: location.uid,
-        modseq: location.modseq,
-        ...(location.providerId ? { providerId: location.providerId } : {}),
-      })))
-      : null;
     const sourceProviderConversationId = account.kind === "gmail" && inReplyTo
       ? await this.#store.getProviderConversationId(
         this.#context.tenantId,
@@ -378,6 +373,20 @@ export class PostreeveService {
         input.accountId,
         account.kind,
         intent.source.providerConversationId,
+      )
+      : null;
+    const sourceDetail = sourceProviderConversationId
+      ? await this.#readMessageForProviderConversation(
+        input.accountId,
+        accountLocations.map((location) => ({
+          accountId: location.accountId,
+          mailbox: location.mailbox,
+          uidValidity: location.uidValidity,
+          uid: location.uid,
+          modseq: location.modseq,
+          ...(location.providerId ? { providerId: location.providerId } : {}),
+        })),
+        sourceProviderConversationId,
       )
       : null;
     const providerConversationId = sourceProviderConversationId
@@ -618,20 +627,21 @@ export class PostreeveService {
     }
   }
 
-  async #readFirstAvailableMessage(
+  async #readMessageForProviderConversation(
     accountId: string,
     references: readonly MessageRef[],
-  ): Promise<ProviderMessageDetail> {
+    providerConversationId: string,
+  ): Promise<ProviderMessageDetail | null> {
     const provider = this.#providers.forAccount(accountId);
     for (const reference of references) {
       try {
         const [detail] = await provider.readMessages(accountId, [reference]);
-        if (detail) return detail;
+        if (detail?.providerConversationId === providerConversationId) return detail;
       } catch {
         continue;
       }
     }
-    throw new Error("Conversation send source could not be read from any current account location");
+    return null;
   }
 
   #registerStoredAccount(account: StoredAccount): void {

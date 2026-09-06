@@ -559,6 +559,39 @@ describe("Postreeve core workflow", () => {
     store.close();
   });
 
+  test("sends every conversation mode after the source loses its final live location", async () => {
+    const { store, service, account, messages, sent, sendContexts } = await createTestHarness();
+    const source = messages[0]!;
+    await store.reconcileMailbox({
+      tenantId: "test-tenant",
+      accountId: account.id,
+      provider: "imap",
+      mailbox: "INBOX",
+      observations: [],
+      authoritative: true,
+    });
+
+    expect(await store.listMessageLocations("test-tenant", source.canonicalId)).toEqual([]);
+    for (const type of ["reply", "reply_all", "forward"] as const) {
+      await service.sendMessage({
+        accountId: account.id,
+        to: [{ name: "Recipient", address: "recipient@example.test" }],
+        cc: [],
+        bcc: [],
+        subject: type === "forward" ? `Fwd: ${source.subject}` : `Re: ${source.subject}`,
+        text: `${type} body.`,
+        intent: {
+          type,
+          source: { canonicalMessageId: source.canonicalId, conversationId: source.conversationId },
+        },
+      });
+    }
+
+    expect(sent.map(({ intent }) => intent?.type)).toEqual(["reply", "reply_all", "forward"]);
+    expect(sendContexts.map((context) => context?.type)).toEqual(["reply", "reply_all", "forward"]);
+    store.close();
+  });
+
   test("uses source In-Reply-To as reply ancestry when References is absent", async () => {
     const { store, service, account, messages, sendContexts } = await createTestHarness({
       readOverrides: { inReplyTo: "<earlier@example.test>", references: [] },

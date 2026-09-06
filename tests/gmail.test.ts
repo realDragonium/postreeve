@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { simpleParser } from "mailparser";
 import { GmailMailClient, type HttpFetch } from "../src/server/mail/gmail";
-import { MailProviderRegistry, toCanonicalObservation } from "../src/server/mail/provider";
+import {
+  MailProviderRegistry,
+  toCanonicalObservation,
+  type ProviderMessageObservation,
+} from "../src/server/mail/provider";
 import { MailSenderRegistry } from "../src/server/mail/sender";
 import { Store } from "../src/server/db/store";
 import { GoogleOAuth, type OAuthFetch } from "../src/server/google/oauth";
@@ -17,6 +21,71 @@ const account = {
   email: "person@example.test",
   kind: "gmail" as const,
 };
+
+async function createConversationService(request: HttpFetch) {
+  const client = new GmailMailClient({
+    account,
+    credentials: { kind: "gmail", refreshToken: "stored-refresh-token" },
+    clientId: "desktop-client-id",
+    fetch: request,
+  });
+  const providers = new MailProviderRegistry();
+  const senders = new MailSenderRegistry();
+  const store = new Store(":memory:");
+  await store.insertAccount({ ...account, encryptedCredentials: null });
+  providers.register(account.id, client);
+  senders.register(account.id, client);
+  const unavailable = () => { throw new Error("Factory is not used by this fixture"); };
+  const service = new PostreeveService(
+    store,
+    { tenantId: "tenant-a" },
+    providers,
+    senders,
+    new CredentialVault(Buffer.alloc(32, 7).toString("base64")),
+    unavailable,
+    unavailable,
+  );
+  return { store, service };
+}
+
+function gmailObservation(
+  providerId: string,
+  providerConversationId: string,
+  mailbox = "INBOX",
+): ProviderMessageObservation {
+  return {
+    tenantId: "tenant-a",
+    messageId: "<gmail-conversation-source@example.test>",
+    inReplyTo: null,
+    references: [],
+    providerConversationId,
+    receivedAt: "2026-08-29T08:00:00.000Z",
+    location: {
+      accountId: account.id,
+      provider: "gmail",
+      mailbox,
+      uidValidity: "gmail",
+      uid: providerId === "source-a" ? 1 : 2,
+      modseq: "1",
+      providerId,
+      read: true,
+      flagged: false,
+    },
+  };
+}
+
+function rawSource(subject: string): string {
+  return Buffer.from([
+    "From: Sender <sender@example.test>",
+    "To: Person <person@example.test>",
+    `Subject: ${subject}`,
+    "Message-ID: <gmail-conversation-source@example.test>",
+    "Date: Sat, 29 Aug 2026 10:00:00 +0200",
+    "Content-Type: text/plain; charset=UTF-8",
+    "",
+    "Source body.",
+  ].join("\r\n"), "utf8").toString("base64url");
+}
 
 describe("Gmail compatibility", () => {
   test("refreshes OAuth, lists Gmail labels and messages, reads source, applies actions, and sends", async () => {
@@ -352,6 +421,134 @@ describe("Gmail compatibility", () => {
     expect(raw).toContain("Subject: A deliberate new subject\r\n");
     expect(raw).toContain("In-Reply-To: <source@example.test>\r\n");
     expect(raw).toContain("References: <root@example.test> <source@example.test>\r\n");
+  });
+
+  test("sends a Gmail reply without a forced thread when every source read fails", async () => {
+    let requestBody = "";
+    let sourceReads = 0;
+    const request: HttpFetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return json({ access_token: "short-lived-access-token", expires_in: 3600 });
+      }
+      if (url.includes("/messages/unreadable?format=raw")) {
+        sourceReads += 1;
+        return new Response(null, { status: 404 });
+      }
+      if (url.endsWith("/messages/send")) {
+        requestBody = typeof init?.body === "string" ? init.body : "";
+        return json({ id: "sent-without-source-read", threadId: "gmail-selected-thread" });
+      }
+      return new Response(null, { status: 404 });
+    };
+    const { store, service } = await createConversationService(request);
+    try {
+      const [source] = await store.reconcileMailbox({
+        tenantId: "tenant-a",
+        accountId: account.id,
+        provider: "gmail",
+        mailbox: "INBOX",
+        observations: [gmailObservation("unreadable", "stale-source-thread")],
+        authoritative: true,
+      });
+      if (!source) throw new Error("Expected a canonical Gmail source");
+
+      const receipt = await service.sendMessage({
+        accountId: account.id,
+        to: [{ name: "Sender", address: "sender@example.test" }],
+        cc: [],
+        bcc: [],
+        subject: "Re: Gmail source",
+        text: "Reply despite stale Gmail source locations.",
+        intent: {
+          type: "reply",
+          source: { canonicalMessageId: source.id, conversationId: source.conversationId },
+        },
+      });
+
+      const sent = JSON.parse(requestBody) as { raw: string; threadId?: string };
+      const raw = Buffer.from(sent.raw, "base64url").toString("utf8");
+      expect(sourceReads).toBe(1);
+      expect(sent).not.toHaveProperty("threadId");
+      expect(raw).toContain("In-Reply-To: <gmail-conversation-source@example.test>\r\n");
+      expect(raw).toContain("References: <gmail-conversation-source@example.test>\r\n");
+      expect(receipt).toMatchObject({ id: "sent-without-source-read", providerConversationId: "gmail-selected-thread" });
+    } finally {
+      store.close();
+    }
+  });
+
+  test("validates a Gmail reply subject against the selected provider thread", async () => {
+    const sourceReads: string[] = [];
+    let requestBody = "";
+    const request: HttpFetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return json({ access_token: "short-lived-access-token", expires_in: 3600 });
+      }
+      const sourceId = /\/messages\/(source-[ab])\?format=raw/.exec(url)?.[1];
+      if (sourceId) {
+        sourceReads.push(sourceId);
+        const selected = sourceId === "source-b";
+        return json({
+          id: sourceId,
+          threadId: selected ? "thread-b" : "thread-a",
+          labelIds: [selected ? "INBOX" : "ARCHIVE"],
+          historyId: "1",
+          internalDate: "1787990400000",
+          raw: rawSource(selected ? "Selected subject" : "Other subject"),
+        });
+      }
+      if (url.endsWith("/messages/send")) {
+        requestBody = typeof init?.body === "string" ? init.body : "";
+        return json({ id: "sent-selected-thread", threadId: "thread-b" });
+      }
+      return new Response(null, { status: 404 });
+    };
+    const { store, service } = await createConversationService(request);
+    try {
+      const [archiveSource] = await store.reconcileMailbox({
+        tenantId: "tenant-a",
+        accountId: account.id,
+        provider: "gmail",
+        mailbox: "Archive",
+        observations: [gmailObservation("source-a", "thread-a", "Archive")],
+        authoritative: true,
+      });
+      const [source] = await store.reconcileMailbox({
+        tenantId: "tenant-a",
+        accountId: account.id,
+        provider: "gmail",
+        mailbox: "INBOX",
+        observations: [gmailObservation("source-b", "thread-b")],
+        authoritative: true,
+      });
+      if (!archiveSource || !source) throw new Error("Expected canonical Gmail sources");
+      expect(source.id).toBe(archiveSource.id);
+
+      await service.sendMessage({
+        accountId: account.id,
+        to: [{ name: "Sender", address: "sender@example.test" }],
+        cc: [],
+        bcc: [],
+        subject: "Re: Selected subject",
+        text: "Reply in the explicitly selected Gmail thread.",
+        intent: {
+          type: "reply",
+          source: {
+            canonicalMessageId: source.id,
+            conversationId: source.conversationId,
+            providerConversationId: "thread-b",
+          },
+        },
+      });
+
+      const sent = JSON.parse(requestBody) as { raw: string; threadId?: string };
+      expect(sourceReads).toEqual(["source-a", "source-b"]);
+      expect(sent.threadId).toBe("thread-b");
+    } finally {
+      store.close();
+    }
   });
 
   test("retains ordered References from a raw Gmail message", async () => {

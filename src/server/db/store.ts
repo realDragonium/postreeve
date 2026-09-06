@@ -555,6 +555,22 @@ export class Store {
     return rows.map(toStoredLocation);
   }
 
+  async hasMessageProviderAssociation(
+    tenantId: string,
+    messageId: string,
+    accountId: string,
+    provider: MailProviderKind,
+  ): Promise<boolean> {
+    const message = this.#getMessage(tenantId, messageId);
+    if (!message) return false;
+    const association = this.#sqlite.query(`
+      SELECT 1 FROM message_provider_associations
+      WHERE tenant_id = ? AND message_id = ? AND account_id = ? AND provider = ?
+      LIMIT 1
+    `).get(tenantId, message.id, accountId, provider);
+    return association !== null;
+  }
+
   async getProviderConversationId(
     tenantId: string,
     messageId: string,
