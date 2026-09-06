@@ -508,9 +508,11 @@ export class ImapMailProvider implements MailProvider {
     if (exact.uid !== ref.uid) {
       throw new Error(`IMAP returned the wrong UID while resolving draft UID ${ref.uid}`);
     }
-    if (!exact.flags) throw new Error(`IMAP did not return flags for draft UID ${ref.uid}`);
+    if (!exact.flags || !exact.headers) {
+      throw new Error(`IMAP returned incomplete data while resolving draft UID ${ref.uid}`);
+    }
     const deleted = hasFlag(exact.flags, DELETED_FLAG);
-    const markers = exact.headers ? parseProviderDraftMarkers(exact.headers) : null;
+    const markers = parseProviderDraftMarkers(exact.headers);
     if (!hasFlag(exact.flags, DRAFT_FLAG)
       || (deleted && !allowDeleted)
       || markers?.tenantId !== scope.tenantId
@@ -549,13 +551,20 @@ export class ImapMailProvider implements MailProvider {
     );
     if (selected.length > MAX_PROVIDER_DRAFTS) throw new Error("IMAP draft reconciliation exceeded its bound");
     const drafts: ListedProviderDraft[] = [];
+    const remaining = new Set(selected);
     for await (const message of client.fetch(
       selected,
       { uid: true, flags: true, headers: providerDraftMarkerHeaders },
       { uid: true },
     )) {
+      if (!remaining.delete(message.uid)) {
+        throw new Error(`IMAP returned unexpected draft UID ${message.uid}`);
+      }
+      if (!message.flags || !message.headers) {
+        throw new Error(`IMAP returned incomplete data for draft UID ${message.uid}`);
+      }
       const deleted = hasFlag(message.flags, DELETED_FLAG);
-      if (!hasFlag(message.flags, DRAFT_FLAG) || (!includeDeleted && deleted) || !message.headers) continue;
+      if (!hasFlag(message.flags, DRAFT_FLAG) || (!includeDeleted && deleted)) continue;
       const markers = parseProviderDraftMarkers(message.headers);
       if (!markers || markers.tenantId !== scope.tenantId || markers.accountId !== scope.accountId) continue;
       drafts.push({
@@ -568,6 +577,9 @@ export class ImapMailProvider implements MailProvider {
           uid: message.uid,
         },
       });
+    }
+    if (remaining.size > 0) {
+      throw new Error("IMAP did not return every selected provider draft");
     }
     return drafts;
   }

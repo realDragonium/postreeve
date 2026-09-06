@@ -212,7 +212,8 @@ export class GmailMailClient implements MailProvider, MailSender {
       for (const { id } of response.drafts) {
         const container = await this.#request(`/drafts/${encodeURIComponent(id)}?format=raw`, gmailDraftSchema);
         const raw = container.message.raw;
-        const markers = raw ? parseProviderDraftMarkers(fromBase64Url(raw)) : null;
+        if (raw === undefined) throw new Error(`Gmail did not return raw content for draft ${container.id}`);
+        const markers = parseProviderDraftMarkers(fromBase64Url(raw));
         if (markers?.tenantId === scope.tenantId && markers.accountId === scope.accountId) {
           listed.push({ ...markers, ref: { kind: "gmail", draftId: container.id } });
         }
@@ -468,9 +469,9 @@ export class GmailMailClient implements MailProvider, MailSender {
       throw error;
     }
     if (container.id !== id) throw new Error(`Gmail returned the wrong draft while resolving ${id}`);
-    const markers = container.message.raw
-      ? parseProviderDraftMarkers(fromBase64Url(container.message.raw))
-      : null;
+    const raw = container.message.raw;
+    if (raw === undefined) throw new Error(`Gmail did not return raw content for draft ${container.id}`);
+    const markers = parseProviderDraftMarkers(fromBase64Url(raw));
     return markers?.tenantId === scope.tenantId
       && markers.accountId === scope.accountId
       && markers.postreeveId === postreeveId

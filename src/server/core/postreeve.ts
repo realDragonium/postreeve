@@ -643,7 +643,7 @@ export class PostreeveService {
           message,
           preferred ? candidate : undefined,
         );
-        if (!recorded && repairStale) return this.#repairStaleMirrorLocked(draft, candidate);
+        if (!recorded && repairStale) return this.#repairStaleMirrorLocked(draft, candidate, false);
         if (!recorded && candidate) {
           return this.#retainDraftMirrorArtifactLocked(draft, candidate, message);
         }
@@ -671,7 +671,7 @@ export class PostreeveService {
         ref,
       );
       const completed = { ref, mirroredVersion: draft.version };
-      if (!recorded && repairStale) return this.#repairStaleMirrorLocked(draft, completed);
+      if (!recorded && repairStale) return this.#repairStaleMirrorLocked(draft, completed, true);
       if (!recorded) {
         return this.#retainDraftMirrorArtifactLocked(
           draft,
@@ -692,8 +692,12 @@ export class PostreeveService {
     }
   }
 
-  async #repairStaleMirrorLocked(completed: Draft, artifact: DraftMirrorArtifact | undefined): Promise<Draft> {
-    const current = await this.#store.getDraft(this.#context.tenantId, completed.accountId, completed.id);
+  async #repairStaleMirrorLocked(
+    completed: Draft,
+    artifact: DraftMirrorArtifact | undefined,
+    providerWriteCompleted: boolean,
+  ): Promise<Draft> {
+    let current = await this.#store.getDraft(this.#context.tenantId, completed.accountId, completed.id);
     if (!current) {
       try {
         await this.#providers.forAccount(completed.accountId)
@@ -719,6 +723,22 @@ export class PostreeveService {
         throw error;
       }
       return completed;
+    }
+    if (providerWriteCompleted && artifact) {
+      const superseded = await this.#store.supersedeDraftMirrorArtifact(
+        this.#context.tenantId,
+        current.accountId,
+        current.id,
+        current.version,
+        artifact,
+        `Provider draft version ${completed.version} completed after backend version ${current.version}`,
+      );
+      if (!superseded) {
+        return this.#repairStaleMirrorLocked(completed, artifact, false);
+      }
+      const retained = await this.#store.getDraft(this.#context.tenantId, current.accountId, current.id);
+      if (!retained) return this.#repairStaleMirrorLocked(completed, artifact, false);
+      current = retained;
     }
     const preferred = newerMirrorArtifact(draftMirrorArtifact(current), artifact);
     if (current.delivery.status === "sent") {

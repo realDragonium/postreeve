@@ -1397,6 +1397,79 @@ describe("server-authoritative drafts", () => {
     harness.store.close();
   });
 
+  test("remirrors the winning version after an older provider write completes last", async () => {
+    let harness: Awaited<ReturnType<typeof createEmptyTestHarness>> | undefined;
+    let account: Account | undefined;
+    let initialRef: ProviderDraftRef | undefined;
+    let injectWinningWrite = false;
+    const updateRefs: ProviderDraftRef[] = [];
+    harness = await createEmptyTestHarness({
+      rotateDraftRefOnUpdate: true,
+      onDraftUpdate: (_draft, ref) => {
+        updateRefs.push(ref);
+      },
+      onDraftMirror: async (draft) => {
+        if (!injectWinningWrite || draft.version !== 2) return;
+        injectWinningWrite = false;
+        if (!harness || !account || !initialRef) throw new Error("Expected initialized race fixture");
+        const winningInput = updateInput(draft, { body: "Winning version three" });
+        const { version, ...content } = winningInput;
+        const winning = await harness.store.updateDraft(
+          "test-tenant",
+          account.id,
+          draft.id,
+          version,
+          content,
+          new Date().toISOString(),
+        );
+        const provider = harness.providerForAccount(account.id);
+        if (!provider) throw new Error("Expected shared provider");
+        const winningRef = await provider.updateDraft(
+          { tenantId: "test-tenant", accountId: account.id },
+          winning,
+          initialRef,
+        );
+        expect(await harness.store.completeDraftMirror(
+          "test-tenant",
+          account.id,
+          draft.id,
+          winning.version,
+          winningRef,
+        )).toBe(true);
+      },
+    });
+    account = await harness.service.createAccount(testAccountInput());
+    const created = await harness.service.createDraft({ ...draftInput(account), clientId: "last-provider-write" });
+    if (created.mirror.status !== "synced") throw new Error("Expected initial provider mirror");
+    initialRef = created.mirror.ref;
+    injectWinningWrite = true;
+
+    const completed = await harness.service.updateDraft(
+      account.id,
+      created.id,
+      updateInput(created, { body: "Older version two" }),
+    );
+
+    expect(completed).toMatchObject({
+      version: 3,
+      body: "Winning version three",
+      mirror: { status: "synced", mirroredVersion: 3, ref: expect.objectContaining({ kind: "imap", uid: 4 }) },
+    });
+    expect(updateRefs).toEqual([
+      expect.objectContaining({ kind: "imap", uid: 1 }),
+      expect.objectContaining({ kind: "imap", uid: 1 }),
+      expect.objectContaining({ kind: "imap", uid: 3 }),
+    ]);
+    expect(await harness.providerDrafts(account.id)).toEqual([{
+      tenantId: "test-tenant",
+      accountId: account.id,
+      postreeveId: created.id,
+      version: 3,
+      ref: expect.objectContaining({ kind: "imap", uid: 4 }),
+    }]);
+    harness.store.close();
+  });
+
   test("retains a completed create ref when the winning-version repair fails", async () => {
     const path = temporaryStore();
     let releaseCreate: (() => void) | undefined;

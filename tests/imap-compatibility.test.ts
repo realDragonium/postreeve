@@ -59,6 +59,9 @@ interface FakeState {
   readonly messageDeleteFalse: Map<number, "present" | "absent">;
   readonly messageDeleteSuccessWithoutRemoval: Set<number>;
   readonly omittedDraftSearchUids: Set<number>;
+  readonly omittedFetchUids: Set<number>;
+  readonly fetchWithoutFlags: Set<number>;
+  readonly fetchWithoutHeaders: Set<number>;
   readonly fetchOneFailures: Map<number, Error>;
   readonly fetchOneFalse: Set<number>;
   readonly exactUidSearchFailures: Set<number>;
@@ -648,6 +651,56 @@ describe("Bun IMAP compatibility", () => {
     expect(state.flagAdds).toEqual([]);
   });
 
+  test("rejects incomplete draft discovery without acknowledging provider removal", async () => {
+    const state = fakeState();
+    const drafts = state.mailboxes.get("Drafts");
+    if (!drafts) throw new Error("Expected special-use Drafts mailbox");
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const draft = providerDraft(1);
+    const ref = await provider.createDraft(draftScope, draft);
+    if (ref.kind !== "imap") throw new Error("Expected IMAP ref");
+    state.omittedFetchUids.add(ref.uid);
+
+    await expect(provider.removeDraft(draftScope, draft.id, ref))
+      .rejects.toThrow("did not return every selected provider draft");
+    expect(drafts.messages.has(ref.uid)).toBe(true);
+    expect(state.messageDeletes).toEqual([]);
+    expect(state.flagAdds).toEqual([]);
+  });
+
+  test("rejects incomplete exact draft data before mutation", async () => {
+    for (const missing of ["flags", "headers"] as const) {
+      const state = fakeState();
+      const drafts = state.mailboxes.get("Drafts");
+      if (!drafts) throw new Error("Expected special-use Drafts mailbox");
+      const provider = new ImapMailProvider(config, fakeFactory(state));
+      const draft = providerDraft(1);
+      const ref = await provider.createDraft(draftScope, draft);
+      if (ref.kind !== "imap") throw new Error("Expected IMAP ref");
+      state.omittedDraftSearchUids.add(ref.uid);
+      state[missing === "flags" ? "fetchWithoutFlags" : "fetchWithoutHeaders"].add(ref.uid);
+
+      await expect(provider.removeDraft(draftScope, draft.id, ref))
+        .rejects.toThrow(`incomplete data while resolving draft UID ${ref.uid}`);
+      expect(drafts.messages.has(ref.uid)).toBe(true);
+      expect(state.messageDeletes).toEqual([]);
+      expect(state.flagAdds).toEqual([]);
+    }
+  });
+
+  test("accepts an explicit empty header result for an unmarked provider draft", async () => {
+    const state = fakeState();
+    const drafts = state.mailboxes.get("Drafts");
+    if (!drafts) throw new Error("Expected special-use Drafts mailbox");
+    const unmarked = fakeMessage(50, 50n, "Unmarked draft", "Body", new Set(["\\Draft"]));
+    delete unmarked.source;
+    unmarked.headers = Buffer.alloc(0);
+    drafts.messages.set(unmarked.uid, unmarked);
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+
+    expect(await provider.listDrafts(draftScope)).toEqual([]);
+  });
+
   test("rejects an unreadable non-UIDPLUS flag failure while the exact UID still exists", async () => {
     const state = fakeState();
     const drafts = state.mailboxes.get("Drafts");
@@ -1191,8 +1244,9 @@ class FakeImapClient implements ImapClient {
     this.#state.fetchQueries.push(query);
     const mailbox = this.#requireSelected();
     for (const uid of range) {
+      if (this.#state.omittedFetchUids.has(uid)) continue;
       const message = mailbox.messages.get(uid);
-      if (message) yield fetchedMessage(message, query);
+      if (message) yield this.#withFetchOmissions(fetchedMessage(message, query));
     }
   }
 
@@ -1206,7 +1260,14 @@ class FakeImapClient implements ImapClient {
     if (failure) throw failure;
     if (this.#state.fetchOneFalse.has(sequence)) return false;
     const message = this.#requireSelected().messages.get(sequence);
-    return message ? fetchedMessage(message, query) : false;
+    return message ? this.#withFetchOmissions(fetchedMessage(message, query)) : false;
+  }
+
+  #withFetchOmissions(message: FetchMessageObject): FetchMessageObject {
+    const result = { ...message };
+    if (this.#state.fetchWithoutFlags.has(message.uid)) delete result.flags;
+    if (this.#state.fetchWithoutHeaders.has(message.uid)) delete result.headers;
+    return result;
   }
 
   async messageFlagsAdd(
@@ -1369,6 +1430,9 @@ function fakeState(): FakeState {
     messageDeleteFalse: new Map(),
     messageDeleteSuccessWithoutRemoval: new Set(),
     omittedDraftSearchUids: new Set(),
+    omittedFetchUids: new Set(),
+    fetchWithoutFlags: new Set(),
+    fetchWithoutHeaders: new Set(),
     fetchOneFailures: new Map(),
     fetchOneFalse: new Set(),
     exactUidSearchFailures: new Set(),

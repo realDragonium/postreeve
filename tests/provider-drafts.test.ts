@@ -391,6 +391,43 @@ describe("Gmail provider drafts", () => {
     expect([...containers.keys()].sort()).toEqual(["foreign", "malformed"]);
   });
 
+  test("rejects missing requested Gmail draft content before mutation", async () => {
+    const deleted: string[] = [];
+    let includeInDiscovery = true;
+    const request: HttpFetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      const method = init?.method ?? "GET";
+      if (url.origin === "https://oauth2.googleapis.com") {
+        return Response.json({ access_token: "draft-token", expires_in: 3600 });
+      }
+      const id = /^\/gmail\/v1\/users\/me\/drafts\/([^/]+)$/.exec(url.pathname)?.[1];
+      if (url.pathname.endsWith("/drafts") && method === "GET") {
+        return Response.json({ drafts: includeInDiscovery ? [{ id: "incomplete" }] : [] });
+      }
+      if (id === "incomplete" && method === "GET") {
+        return Response.json({ id, message: { id: "message-incomplete" } });
+      }
+      if (id && method === "DELETE") {
+        deleted.push(id);
+        return Response.json(null);
+      }
+      return Response.json({ error: { message: "unexpected fixture request" } }, { status: 500 });
+    };
+    const client = new GmailMailClient({
+      account: gmailAccount,
+      credentials: { kind: "gmail", refreshToken: "refresh" },
+      clientId: "client",
+      fetch: request,
+    });
+
+    await expect(client.listDrafts(draftScope()))
+      .rejects.toThrow("did not return raw content for draft incomplete");
+    includeInDiscovery = false;
+    await expect(client.removeDraft(draftScope(), "draft-1", { kind: "gmail", draftId: "incomplete" }))
+      .rejects.toThrow("did not return raw content for draft incomplete");
+    expect(deleted).toEqual([]);
+  });
+
   test("updates an omitted exact Gmail ref and fails uncertain lookup before creating", async () => {
     const current = draft(1, { body: "Original body" });
     const containers = new Map<string, string>([[

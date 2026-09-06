@@ -396,6 +396,39 @@ export class Store {
     return result.changes === 1;
   }
 
+  async supersedeDraftMirrorArtifact(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    expectedVersion: number,
+    completed: { readonly ref: ProviderDraftRef; readonly mirroredVersion: number },
+    error: string,
+  ): Promise<boolean> {
+    const validatedRef = providerDraftRefSchema.parse(completed.ref);
+    if (!Number.isInteger(completed.mirroredVersion)
+      || completed.mirroredVersion < 1
+      || completed.mirroredVersion > expectedVersion) {
+      throw new Error("Completed provider draft version is invalid");
+    }
+    const account = this.#sqlite.query("SELECT kind FROM accounts WHERE id = ?").get(accountId) as { kind: MailProviderKind } | null;
+    if (account && account.kind !== validatedRef.kind) {
+      throw new Error("Draft mirror reference does not match the account provider");
+    }
+    const result = this.#sqlite.query(`
+      UPDATE drafts SET mirror_status = 'failed', mirror_ref = ?, mirrored_version = ?, mirror_error = ?
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+    `).run(
+      JSON.stringify(validatedRef),
+      completed.mirroredVersion,
+      normalizeDeliveryError(error, "Provider draft mirroring failed"),
+      tenantId,
+      accountId,
+      id,
+      expectedVersion,
+    );
+    return result.changes === 1;
+  }
+
   async retainDraftMirrorArtifact(
     tenantId: string,
     accountId: string,
