@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { Account, Draft, Folder, MessageSummary, TriageAction } from "../shared/contracts";
+import type { Account, Draft, Folder, MessageSummary, ReceivedAttachment, TriageAction } from "../shared/contracts";
 import { api } from "./api";
 import { registerPostreeveWebMcp } from "../server/webmcp/register";
 import { subscribeToWebMcpFolderLists, subscribeToWebMcpMailboxViews, webMcpServices } from "./webmcp";
@@ -218,6 +218,18 @@ function App() {
         queryClient.invalidateQueries({ queryKey: ["proposals", account.id] }),
       ]),
     ]);
+  }
+
+  async function downloadReceivedAttachment(accountId: string, attachment: ReceivedAttachment): Promise<void> {
+    const content = await api.downloadAttachment(accountId, attachment);
+    const url = URL.createObjectURL(content);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = attachment.filename;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   }
 
   const actionMutation = useMutation({
@@ -571,6 +583,7 @@ function App() {
 
           {openKey ? <section className="mail-reader-pane" aria-label="Message reader">
             {detailQuery.data ? <Reader
+              key={`${detailQuery.data.ref.accountId}:${detailQuery.data.canonicalId}`}
               message={detailQuery.data}
               folders={foldersByAccount.get(detailQuery.data.ref.accountId) ?? []}
               provenance={provenance.get(provenanceKey(detailQuery.data.ref))}
@@ -589,6 +602,10 @@ function App() {
                 accountId: detailQuery.data.ref.accountId,
                 intent: { mode, message: detailQuery.data },
               })}
+              onDownloadAttachment={(attachment) => downloadReceivedAttachment(
+                detailQuery.data!.ref.accountId,
+                attachment,
+              )}
             /> : <div className="pad t-dim">{detailQuery.isError ? detailQuery.error.message : "Loading message…"}</div>}
           </section> : null}
         </div> : null}

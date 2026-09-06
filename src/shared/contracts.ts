@@ -61,6 +61,15 @@ export const messageAddressSchema = z.object({
   address: z.string(),
 });
 
+export const receivedAttachmentSchema = z.object({
+  reference: z.string().min(1),
+  canonicalMessageId: z.string().min(1),
+  filename: z.string().min(1),
+  mediaType: z.string().min(1),
+  size: z.number().int().nonnegative(),
+  sizeIsEstimate: z.boolean(),
+});
+
 export const messageSummarySchema = z.object({
   canonicalId: z.string().min(1).optional(),
   canonicalAliases: z.array(z.string().min(1)).optional(),
@@ -122,6 +131,7 @@ export const canonicalMessageSchema = z.object({
 export const messageDetailSchema = messageSummarySchema.extend({
   text: z.string(),
   html: z.string().nullable(),
+  attachments: z.array(receivedAttachmentSchema),
 });
 
 export const canonicalMessageDetailSchema = messageDetailSchema.required({ canonicalId: true }).extend({
@@ -399,6 +409,7 @@ export type MessageSummary = z.infer<typeof messageSummarySchema>;
 export type CanonicalMessageSummary = z.infer<typeof canonicalMessageSummarySchema>;
 export type MessageDetail = z.infer<typeof messageDetailSchema>;
 export type CanonicalMessageDetail = z.infer<typeof canonicalMessageDetailSchema>;
+export type ReceivedAttachment = z.infer<typeof receivedAttachmentSchema>;
 export type MailProviderKind = z.infer<typeof mailProviderKindSchema>;
 export type CanonicalMessageObservation = z.input<typeof canonicalMessageObservationSchema>;
 export type CanonicalMessage = z.infer<typeof canonicalMessageSchema>;

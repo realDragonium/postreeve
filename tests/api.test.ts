@@ -51,6 +51,73 @@ describe("Hono RPC API", () => {
     store.close();
   });
 
+  test("serves attachment bytes only through their account-scoped canonical reference", async () => {
+    const filename = "résumé (Sam's)*.txt";
+    const content = Buffer.from("safe bytes");
+    let providerContent = content;
+    const locator = {
+      kind: "imap" as const,
+      mailbox: "INBOX",
+      uidValidity: "1723371481",
+      uid: 103,
+      part: "2",
+    };
+    const downloads: Array<{ accountId: string; maxBytes: number }> = [];
+    const { store, service, account, messages } = await createTestHarness({
+      maxAttachmentBytes: 64,
+      readOverrides: {
+        attachments: [{
+          locator,
+          filename,
+          mediaType: "text/plain",
+          size: content.byteLength,
+          sizeIsEstimate: true,
+        }],
+      },
+      downloadAttachment: (accountId, requested, maxBytes) => {
+        expect(requested).toEqual(locator);
+        downloads.push({ accountId, maxBytes });
+        return { filename, mediaType: "text/plain", content: providerContent };
+      },
+    });
+    const [detail] = await service.readMessages([messages[0]!.ref]);
+    const attachment = detail?.attachments[0];
+    if (!detail || !attachment) throw new Error("Expected an attachment");
+    const app = createApi(service);
+    const path = `/api/accounts/${account.id}/messages/${detail.canonicalId}/attachments/${attachment.reference}`;
+    const response = await app.request(path);
+
+    expect(response.status).toBe(200);
+    expect(Buffer.from(await response.arrayBuffer())).toEqual(content);
+    expect(response.headers.get("content-type")).toBe("text/plain");
+    expect(response.headers.get("content-disposition")).toBe(
+      "attachment; filename=\"r_sum_ (Sam's)*.txt\"; filename*=UTF-8''r%C3%A9sum%C3%A9%20%28Sam%27s%29%2A.txt",
+    );
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(downloads).toEqual([{ accountId: account.id, maxBytes: 64 }]);
+
+    providerContent = Buffer.alloc(65);
+    const oversized = await app.request(path);
+    expect(oversized.status).toBe(400);
+    expect(await oversized.json()).toEqual({ error: "Attachment exceeds the 64-byte download limit" });
+
+    const wrongMessage = await app.request(path.replace(detail.canonicalId, "another-message"));
+    expect(wrongMessage.status).toBe(400);
+    const decoded = JSON.parse(Buffer.from(attachment.reference, "base64url").toString("utf8")) as Record<string, unknown>;
+    const tampered = Buffer.from(JSON.stringify({ ...decoded, accountId: "other-account" })).toString("base64url");
+    const wrongScope = await app.request(
+      `/api/accounts/${account.id}/messages/${detail.canonicalId}/attachments/${tampered}`,
+    );
+    expect(wrongScope.status).toBe(400);
+    const malformed = await app.request(
+      `/api/accounts/${account.id}/messages/${detail.canonicalId}/attachments/not-base64!`,
+    );
+    expect(malformed.status).toBe(400);
+    expect(downloads).toHaveLength(2);
+    store.close();
+  });
+
   test("returns one canonical summary for duplicate deliveries in list and search responses", async () => {
     const { store, service } = await createEmptyTestHarness({ duplicateDelivery: true });
     const account = await service.createAccount(testAccountInput());

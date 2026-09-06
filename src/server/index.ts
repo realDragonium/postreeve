@@ -24,9 +24,11 @@ const googleClientSecret = process.env.POSTREEVE_GOOGLE_CLIENT_SECRET?.trim() ??
 const serverConfig = z.object({
   hostname: z.string().trim().min(1),
   port: z.coerce.number().int().min(1).max(65535),
+  maxAttachmentBytes: z.coerce.number().int().positive(),
 }).parse({
   hostname: process.env.POSTREEVE_HOST ?? "127.0.0.1",
   port: process.env.PORT ?? "3000",
+  maxAttachmentBytes: process.env.POSTREEVE_MAX_ATTACHMENT_BYTES ?? String(25 * 1024 * 1024),
 });
 const googleOAuth = googleClientId && googleClientSecret
   ? new GoogleOAuth(
@@ -39,7 +41,7 @@ const googleOAuth = googleClientId && googleClientSecret
 
 const service = new PostreeveService(
   store,
-  { tenantId: "local" },
+  { tenantId: "local", maxAttachmentBytes: serverConfig.maxAttachmentBytes },
   providers,
   senders,
   vault,
@@ -89,7 +91,7 @@ app.route("/", createApi(service, googleOAuth, {
 app.use("/*", serveStatic({ root: "./dist" }));
 app.get("/*", serveStatic({ path: "./dist/index.html" }));
 
-const server = Bun.serve({ ...serverConfig, fetch: app.fetch });
+const server = Bun.serve({ hostname: serverConfig.hostname, port: serverConfig.port, fetch: app.fetch });
 console.info(`Postreeve listening on http://${server.hostname}:${server.port}`);
 
 export default server;

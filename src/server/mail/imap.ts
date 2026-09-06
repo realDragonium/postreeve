@@ -7,10 +7,12 @@ import {
   type FetchQueryObject,
   type FetchMessageObject,
   type ImapFlowOptions,
+  type DownloadObject,
   type ListOptions,
   type ListResponse,
   type MailboxObject,
   type MailboxOpenOptions,
+  type MessageStructureObject,
   type SearchObject,
   type StatusObject,
   type StoreOptions,
@@ -20,7 +22,6 @@ import { simpleParser, type EmailAddress, type ParsedMail } from "mailparser";
 import type {
   Draft,
   Folder,
-  MessageDetail,
   MessageRef,
   MessageSummary,
   TriageAction,
@@ -35,7 +36,11 @@ import type {
   ProviderMessageSummary,
   ProviderDraft,
   ProviderDraftScope,
+  ProviderAttachment,
+  ProviderAttachmentDownload,
+  ProviderAttachmentLocator,
 } from "./provider";
+import { safeAttachmentFilename, safeAttachmentMediaType } from "../core/attachment-reference";
 import { buildProviderDraftMessage, parseProviderDraftMarkers } from "./provider-draft";
 import { normalizeIdentificationFields, normalizeReferenceSequences } from "./message-id";
 
@@ -76,6 +81,11 @@ export interface ImapClient {
     query: FetchQueryObject,
     options?: FetchOptions,
   ): Promise<FetchMessageObject | false>;
+  download(
+    range: number,
+    part?: string,
+    options?: { uid?: boolean; maxBytes?: number; chunkSize?: number },
+  ): Promise<DownloadObject>;
   messageFlagsAdd(
     range: number,
     flags: string[],
@@ -248,29 +258,62 @@ export class ImapMailProvider implements MailProvider {
     });
   }
 
-  async readMessages(accountId: string, references: MessageRef[]): Promise<MessageDetail[]> {
+  async readMessages(accountId: string, references: MessageRef[]): Promise<ProviderMessageDetail[]> {
     this.#assertAccount(accountId);
     for (const reference of references) this.#assertReference(reference);
 
     return this.#withClient(async (client) => {
-      const details: MessageDetail[] = [];
+      const details: ProviderMessageDetail[] = [];
       for (const [mailbox, mailboxReferences] of groupByMailbox(references)) {
         const opened = await client.mailboxOpen(mailbox, { readOnly: true });
         for (const reference of mailboxReferences) {
           assertUidValidity(opened, reference);
           const message = await client.fetchOne(
             reference.uid,
-            { uid: true, flags: true, envelope: true, internalDate: true, source: true },
+            { uid: true, flags: true, envelope: true, internalDate: true, headers: true, bodyStructure: true },
             { uid: true },
           );
           assertCurrentMessage(message, reference);
-          if (!message.source) throw new Error(`Message ${reference.uid} has no downloadable source`);
-
-          const parsed = await parseMessage(message.source);
-          details.push(toDetail(this.#config.accountId, mailbox, opened, message, parsed));
+          if (!message.headers || !message.bodyStructure) {
+            throw new Error(`Message ${reference.uid} has no readable MIME structure`);
+          }
+          const parsedHeaders = await parseMessage(message.headers);
+          const rendered = await renderImapBody(client, {
+            kind: "imap",
+            mailbox,
+            uidValidity: opened.uidValidity.toString(),
+            uid: reference.uid,
+            part: "root",
+          }, message.bodyStructure);
+          details.push(toDetail(this.#config.accountId, mailbox, opened, message, parsedHeaders, rendered));
         }
       }
       return details;
+    });
+  }
+
+  async downloadAttachment(
+    accountId: string,
+    locator: ProviderAttachmentLocator,
+    maxBytes: number,
+  ): Promise<ProviderAttachmentDownload> {
+    this.#assertAccount(accountId);
+    if (locator.kind !== "imap") throw new Error("IMAP cannot download another provider's attachment");
+    return this.#withClient(async (client) => {
+      const opened = await client.mailboxOpen(locator.mailbox, { readOnly: true });
+      if (opened.uidValidity.toString() !== locator.uidValidity) throw new Error("IMAP attachment reference is stale");
+      const message = await client.fetchOne(locator.uid, { uid: true, bodyStructure: true }, { uid: true });
+      if (!message || message.uid !== locator.uid || !message.bodyStructure) {
+        throw new Error("IMAP attachment reference is stale");
+      }
+      const attachment = imapAttachments(locator, message.bodyStructure)
+        .find(({ locator: candidate }) => candidate.kind === "imap" && candidate.part === locator.part);
+      if (!attachment) throw new Error("IMAP attachment reference is stale");
+      const part = visibleImapParts(message.bodyStructure)
+        .find((candidate) => candidate.section === locator.part && isFileNode(candidate.node));
+      if (!part) throw new Error("IMAP attachment reference is stale");
+      const content = await downloadImapAttachmentBytes(client, locator.uid, part, maxBytes);
+      return { filename: attachment.filename, mediaType: attachment.mediaType, content };
     });
   }
 
@@ -954,12 +997,200 @@ function toDetail(
   mailbox: MailboxObject,
   message: FetchMessageObject,
   parsed: ParsedMail,
+  rendered: { text: string; html: string | null; attachments: ProviderAttachment[] },
 ): ProviderMessageDetail {
   return {
     ...toSummary(accountId, mailboxPath, mailbox, message, parsed),
-    text: parsed.text ?? "",
-    html: typeof parsed.html === "string" ? parsed.html : null,
+    ...rendered,
   };
+}
+
+async function renderImapBody(
+  client: ImapClient,
+  location: Extract<ProviderAttachmentLocator, { kind: "imap" }>,
+  root: MessageStructureObject,
+): Promise<{ text: string; html: string | null; attachments: ProviderAttachment[] }> {
+  const body = await readImapText(client, location.uid, root);
+  const cids = referencedCids(body.html);
+  let html = body.html;
+  if (html) {
+    for (const { node: part, section } of visibleImapParts(root)) {
+      const cid = normalizedCid(part.id);
+      if (!section || !cid || !cids.has(cid) || !safeAttachmentMediaType(part.type).startsWith("image/")) continue;
+      const downloaded = await client.download(location.uid, section, { uid: true });
+      const content = await readableBytes(downloaded.content);
+      html = replaceCid(html, cid, `data:${safeAttachmentMediaType(part.type)};base64,${content.toString("base64")}`);
+    }
+  }
+  return {
+    ...body,
+    html,
+    attachments: imapAttachments(location, root),
+  };
+}
+
+async function readImapText(
+  client: ImapClient,
+  uid: number,
+  root: MessageStructureObject,
+): Promise<{ text: string; html: string | null }> {
+  const plain: string[] = [];
+  const html: string[] = [];
+  for (const { node: part, section } of visibleImapParts(root)) {
+    const mediaType = safeAttachmentMediaType(part.type);
+    if (!section || (mediaType !== "text/plain" && mediaType !== "text/html") || isFileNode(part)) continue;
+    const downloaded = await client.download(uid, section, { uid: true });
+    const value = (await readableBytes(downloaded.content)).toString("utf8").replace(/\r?\n/g, "\n");
+    if (mediaType === "text/plain") plain.push(value);
+    else html.push(value);
+  }
+  return { text: plain.join("\n"), html: html.length > 0 ? html.join("<br/>\n") : null };
+}
+
+function imapAttachments(
+  location: Extract<ProviderAttachmentLocator, { kind: "imap" }>,
+  root: MessageStructureObject,
+): ProviderAttachment[] {
+  return visibleImapParts(root).flatMap(({ node: part, section }) => {
+    if (!section || !isFileNode(part)) return [];
+    return [{
+      locator: { ...location, part: section },
+      filename: safeAttachmentFilename(imapFilename(part) ?? "attachment"),
+      mediaType: safeAttachmentMediaType(part.type),
+      size: estimatedDecodedSize(part),
+      sizeIsEstimate: true,
+    }];
+  });
+}
+
+interface VisibleImapPart {
+  readonly node: MessageStructureObject;
+  readonly section: string | null;
+}
+
+function visibleImapParts(root: MessageStructureObject): VisibleImapPart[] {
+  const result: VisibleImapPart[] = [];
+  const pending = [{ node: root, root: true }];
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current) continue;
+    result.push({ node: current.node, section: current.node.part ?? (current.root ? "1" : null) });
+    if (!isFileNode(current.node)) {
+      pending.push(...(current.node.childNodes ?? []).toReversed().map((node) => ({ node, root: false })));
+    }
+  }
+  return result;
+}
+
+function imapFilename(part: MessageStructureObject): string | undefined {
+  return part.dispositionParameters?.filename ?? part.parameters?.name;
+}
+
+function isFileNode(part: MessageStructureObject): boolean {
+  return Boolean(imapFilename(part)?.trim() || part.disposition?.toLowerCase() === "attachment");
+}
+
+function estimatedDecodedSize(part: MessageStructureObject): number {
+  const encoded = part.size ?? 0;
+  return part.encoding?.toLowerCase() === "base64" ? Math.floor(encoded / 4) * 3 : encoded;
+}
+
+async function downloadImapAttachmentBytes(
+  client: ImapClient,
+  uid: number,
+  part: VisibleImapPart,
+  maxBytes: number,
+): Promise<Buffer> {
+  if (!part.section) throw new Error("IMAP attachment has no part identifier");
+  const encoding = part.node.encoding?.toLowerCase() ?? "";
+  const binary = client.capabilities.has("BINARY");
+  const encodedLimit = encoding === "quoted-printable"
+    ? (maxBytes + 1) * 4
+    : encoding === "base64"
+      ? (maxBytes + 1) * 2
+      : maxBytes + 1;
+  const fetchLimit = binary ? maxBytes + 1 : encodedLimit;
+  if (!binary && part.node.size !== undefined && part.node.size > encodedLimit) {
+    throw new Error(`Attachment exceeds the ${maxBytes}-byte download limit`);
+  }
+  const response = await client.fetchOne(
+    uid,
+    { uid: true, bodyParts: [{ key: part.node.part ?? "TEXT", start: 0, maxLength: fetchLimit }] },
+    { uid: true, binary: true },
+  );
+  const fetchSection = part.node.part ?? "TEXT";
+  const encoded = response && response.bodyParts?.get(fetchSection);
+  if (!response || response.uid !== uid || !encoded) throw new Error("IMAP attachment reference is stale");
+  const content = response.binaryParts?.has(fetchSection)
+    ? encoded
+    : decodeTransferEncoding(encoded, encoding);
+  if (content.byteLength > maxBytes || encoded.byteLength >= fetchLimit) {
+    throw new Error(`Attachment exceeds the ${maxBytes}-byte download limit`);
+  }
+  return content;
+}
+
+function decodeTransferEncoding(content: Buffer, encoding: string): Buffer {
+  if (encoding === "base64") return Buffer.from(content.toString("ascii").replace(/\s/g, ""), "base64");
+  if (encoding !== "quoted-printable") return content;
+  const bytes: number[] = [];
+  for (let index = 0; index < content.length; index += 1) {
+    if (content[index] !== 0x3d) {
+      bytes.push(content[index]!);
+      continue;
+    }
+    if (content[index + 1] === 0x0d && content[index + 2] === 0x0a) {
+      index += 2;
+      continue;
+    }
+    if (content[index + 1] === 0x0a) {
+      index += 1;
+      continue;
+    }
+    const hex = content.subarray(index + 1, index + 3).toString("ascii");
+    if (/^[0-9a-f]{2}$/i.test(hex)) {
+      bytes.push(Number.parseInt(hex, 16));
+      index += 2;
+    } else {
+      bytes.push(0x3d);
+    }
+  }
+  return Buffer.from(bytes);
+}
+
+async function readableBytes(stream: DownloadObject["content"]): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+  }
+  return Buffer.concat(chunks);
+}
+
+function normalizedCid(value: string | undefined): string | null {
+  const normalized = value?.trim().replace(/^<|>$/g, "").trim().toLowerCase();
+  return normalized || null;
+}
+
+function referencedCids(html: string | null): Set<string> {
+  const result = new Set<string>();
+  for (const match of html?.matchAll(/\bcid:([^'"\s>]+)/gi) ?? []) {
+    try {
+      result.add(decodeURIComponent(match[1]!).toLowerCase());
+    } catch {
+      result.add(match[1]!.toLowerCase());
+    }
+  }
+  return result;
+}
+
+function replaceCid(html: string, cid: string, replacement: string): string {
+  return html.replace(/\bcid:([^'"\s>]+)/gi, (match, value: string) => {
+    try {
+      return decodeURIComponent(value).toLowerCase() === cid ? replacement : match;
+    } catch {
+      return value.toLowerCase() === cid ? replacement : match;
+    }
+  });
 }
 
 function referenceFor(
