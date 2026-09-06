@@ -55,10 +55,10 @@ export const drafts = sqliteTable("drafts", {
       AND ${table.deliveryError} IS NULL AND ${table.claimedAt} IS NOT NULL
       AND ${table.claimOwner} IS NOT NULL AND ${table.settledAt} IS NULL)
     OR (${table.deliveryStatus} = 'failed'
-      AND ${table.deliveryError} IS NOT NULL AND ${table.claimedAt} IS NOT NULL
+      AND length(trim(${table.deliveryError})) > 0 AND ${table.claimedAt} IS NOT NULL
       AND ${table.claimOwner} IS NOT NULL AND ${table.settledAt} IS NOT NULL)
     OR (${table.deliveryStatus} = 'uncertain' AND ${table.deliveryReceipt} IS NULL
-      AND ${table.deliveryError} IS NOT NULL AND ${table.claimedAt} IS NOT NULL
+      AND length(trim(${table.deliveryError})) > 0 AND ${table.claimedAt} IS NOT NULL
       AND ${table.claimOwner} IS NOT NULL AND ${table.settledAt} IS NOT NULL)
     OR (${table.deliveryStatus} = 'sent' AND ${table.deliveryReceipt} IS NOT NULL
       AND ${table.deliveryError} IS NULL AND ${table.claimedAt} IS NOT NULL

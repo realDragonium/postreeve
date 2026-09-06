@@ -17,7 +17,7 @@ export type ConversationSendContext = ConversationSourceContext & ({
 
 export class MailSendPreDispatchError extends Error {
   constructor(message: string, options?: ErrorOptions) {
-    super(message, options);
+    super(message.trim() || "Mail could not be submitted", options);
     this.name = "MailSendPreDispatchError";
   }
 }

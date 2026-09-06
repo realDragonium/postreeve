@@ -406,8 +406,10 @@ function googleError(body: unknown): string {
     error_description: z.string().optional(),
   }).safeParse(body);
   if (!parsed.success) return "Google rejected the request";
-  if (typeof parsed.data.error === "string") return parsed.data.error_description ?? parsed.data.error;
-  return parsed.data.error?.message ?? "Google rejected the request";
+  if (typeof parsed.data.error === "string") {
+    return parsed.data.error_description?.trim() || parsed.data.error.trim() || "Google rejected the request";
+  }
+  return parsed.data.error?.message?.trim() || "Google rejected the request";
 }
 
 function isVisibleLabel(label: z.infer<typeof labelSchema>): boolean {
@@ -594,7 +596,7 @@ function replySubject(subject: string): string {
 }
 
 function preDispatchError(error: unknown): MailSendPreDispatchError {
-  return error instanceof MailSendPreDispatchError
+  return error instanceof MailSendPreDispatchError && error.message.trim()
     ? error
     : new MailSendPreDispatchError(error instanceof Error ? error.message : "Mail preparation failed", { cause: error });
 }

@@ -284,13 +284,14 @@ export class Store {
     failedAt: string,
     claimOwner: string,
   ): Promise<Draft> {
+    const deliveryError = normalizeDeliveryError(error, "Delivery outcome is uncertain");
     const row = this.#sqlite.query(`
       UPDATE drafts SET delivery_status = 'uncertain', delivery_error = ?, settled_at = ?,
         updated_at = ?, version = version + 1
       WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
         AND delivery_status = 'sending' AND claim_owner = ?
       RETURNING *
-    `).get(error, failedAt, failedAt, tenantId, accountId, id, expectedVersion, claimOwner) as DraftRow | null;
+    `).get(deliveryError, failedAt, failedAt, tenantId, accountId, id, expectedVersion, claimOwner) as DraftRow | null;
     if (!row) this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "marked uncertain");
     return toDraft(row);
   }
@@ -304,13 +305,14 @@ export class Store {
     failedAt: string,
     claimOwner: string,
   ): Promise<Draft> {
+    const deliveryError = normalizeDeliveryError(error, "Delivery failed before provider submission");
     const row = this.#sqlite.query(`
       UPDATE drafts SET delivery_status = 'failed', delivery_receipt = NULL, delivery_error = ?,
         settled_at = ?, updated_at = ?, version = version + 1
       WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
         AND delivery_status = 'sending' AND claim_owner = ?
       RETURNING *
-    `).get(error, failedAt, failedAt, tenantId, accountId, id, expectedVersion, claimOwner) as DraftRow | null;
+    `).get(deliveryError, failedAt, failedAt, tenantId, accountId, id, expectedVersion, claimOwner) as DraftRow | null;
     if (!row) this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "marked failed");
     return toDraft(row);
   }
@@ -1128,10 +1130,10 @@ export class Store {
               AND delivery_error IS NULL AND claimed_at IS NOT NULL
               AND claim_owner IS NOT NULL AND settled_at IS NULL)
             OR (delivery_status = 'failed'
-              AND delivery_error IS NOT NULL AND claimed_at IS NOT NULL
+              AND length(trim(delivery_error)) > 0 AND claimed_at IS NOT NULL
               AND claim_owner IS NOT NULL AND settled_at IS NOT NULL)
             OR (delivery_status = 'uncertain' AND delivery_receipt IS NULL
-              AND delivery_error IS NOT NULL AND claimed_at IS NOT NULL
+              AND length(trim(delivery_error)) > 0 AND claimed_at IS NOT NULL
               AND claim_owner IS NOT NULL AND settled_at IS NOT NULL)
             OR (delivery_status = 'sent' AND delivery_receipt IS NOT NULL
               AND delivery_error IS NULL AND claimed_at IS NOT NULL
@@ -1549,6 +1551,10 @@ interface DraftRow {
   version: number;
 }
 
+function normalizeDeliveryError(error: string, fallback: string): string {
+  return error.trim() || fallback;
+}
+
 function toDraft(row: DraftRow): Draft {
   const receipt = parseStoredReceipt(row.delivery_receipt);
   if (receipt && receipt.accountId !== row.account_id) {
@@ -1562,20 +1568,20 @@ function toDraft(row: DraftRow): Draft {
         if (!row.claimed_at) throw new Error("Sending draft is missing its claim timestamp");
         return { status: "sending", claimedAt: row.claimed_at };
       case "failed":
-        if (!row.settled_at || !row.delivery_error) {
+        if (!row.settled_at || !row.delivery_error?.trim()) {
           throw new Error("Failed draft is missing its delivery result");
         }
         return {
           status: "failed",
           failedAt: row.settled_at,
-          error: row.delivery_error,
+          error: row.delivery_error.trim(),
           ...(receipt ? { receipt } : {}),
         };
       case "uncertain":
-        if (!row.settled_at || !row.delivery_error) {
+        if (!row.settled_at || !row.delivery_error?.trim()) {
           throw new Error("Uncertain draft is missing its delivery failure");
         }
-        return { status: "uncertain", failedAt: row.settled_at, error: row.delivery_error };
+        return { status: "uncertain", failedAt: row.settled_at, error: row.delivery_error.trim() };
       case "sent":
         if (!row.settled_at || !receipt) throw new Error("Sent draft is missing its delivery result");
         return { status: "sent", settledAt: row.settled_at, receipt };

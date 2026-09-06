@@ -84,6 +84,8 @@ interface PreparedMessageSend {
   readonly context?: ConversationSendContext;
 }
 
+const draftClaimOwner = crypto.randomUUID();
+
 export class PostreeveService {
   readonly #store: Store;
   readonly #context: PostreeveContext;
@@ -93,7 +95,6 @@ export class PostreeveService {
   readonly #imapProviderFactory: ImapProviderFactory;
   readonly #mailSenderFactory: MailSenderFactory;
   readonly #gmailClientFactory: GmailClientFactory;
-  readonly #draftClaimOwner = crypto.randomUUID();
 
   constructor(
     store: Store,
@@ -126,7 +127,7 @@ export class PostreeveService {
   async recoverInterruptedDraftSends(): Promise<Draft[]> {
     return this.#store.recoverInterruptedDraftSends(
       this.#context.tenantId,
-      this.#draftClaimOwner,
+      draftClaimOwner,
       new Date().toISOString(),
     );
   }
@@ -461,7 +462,7 @@ export class PostreeveService {
       id,
       version,
       new Date().toISOString(),
-      this.#draftClaimOwner,
+      draftClaimOwner,
     );
     if (claim.kind === "sent") return claim.receipt;
 
@@ -479,7 +480,7 @@ export class PostreeveService {
             claim.draft.version,
             errorMessage(error),
             failedAt,
-            this.#draftClaimOwner,
+            draftClaimOwner,
           );
         } else {
           await this.#store.markDraftSendUncertain(
@@ -489,7 +490,7 @@ export class PostreeveService {
             claim.draft.version,
             errorMessage(error),
             failedAt,
-            this.#draftClaimOwner,
+            draftClaimOwner,
           );
         }
       } catch (persistenceError) {
@@ -507,7 +508,7 @@ export class PostreeveService {
         id,
         claim.draft.version,
         receipt,
-        this.#draftClaimOwner,
+        draftClaimOwner,
       );
       return receipt;
     } catch (settlementError) {
@@ -522,7 +523,7 @@ export class PostreeveService {
             claim.draft.version,
             "Delivery was accepted, but its receipt could not be stored",
             recoveredAt,
-            this.#draftClaimOwner,
+            draftClaimOwner,
           );
         } else {
           await this.#store.markDraftSendFailed(
@@ -532,7 +533,7 @@ export class PostreeveService {
             claim.draft.version,
             "No recipients were accepted for delivery",
             recoveredAt,
-            this.#draftClaimOwner,
+            draftClaimOwner,
           );
         }
       } catch (error) {
@@ -1033,5 +1034,6 @@ function toPublicBatch(batch: StoredBatch): OperationBatch {
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Unknown mail provider failure";
+  const message = error instanceof Error ? error.message.trim() : "";
+  return message || "Unknown mail provider failure";
 }

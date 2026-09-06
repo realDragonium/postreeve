@@ -152,15 +152,21 @@ describe("server-authoritative drafts", () => {
       .rejects.toThrow("Draft version conflict");
     await expect(first.service.removeDraft(account.id, draft.id, { version: draft.version }))
       .rejects.toThrow("Draft version conflict");
-    expect(await first.service.recoverInterruptedDraftSends()).toEqual([]);
-    expect((await first.service.getDraft(account.id, draft.id)).delivery.status).toBe("sending");
+    const second = await createEmptyTestHarness({ storePath: path });
+    expect(await second.service.recoverInterruptedDraftSends()).toEqual([]);
+    expect(await second.service.getDraft(account.id, draft.id)).toMatchObject({
+      version: 2,
+      delivery: { status: "sending" },
+    });
     expect(first.sendAttempts).toHaveLength(1);
 
     releaseSend();
     const receipt = await sending;
     const settled = await first.service.getDraft(account.id, draft.id);
     expect(settled.delivery).toEqual({ status: "sent", settledAt: receipt.submittedAt, receipt });
+    expect(await second.service.getDraft(account.id, draft.id)).toEqual(settled);
     expect(await first.service.listDrafts(account.id)).toEqual([]);
+    second.store.close();
     first.store.close();
 
     const reopened = await createEmptyTestHarness({ storePath: path });
@@ -195,6 +201,73 @@ describe("server-authoritative drafts", () => {
       .rejects.toThrow("cannot be retried automatically");
     expect(reopened.sendAttempts).toHaveLength(0);
     reopened.store.close();
+  });
+
+  test("normalizes empty provider errors without hiding healthy drafts", async () => {
+    const { store, service } = await createEmptyTestHarness({ sendFailure: new Error("") });
+    const account = await service.createAccount(testAccountInput());
+    const healthy = await service.createDraft(draftInput(account));
+    const uncertainDraft = await service.createDraft(deliverableDraftInput(account));
+
+    await expect(service.sendDraft(account.id, uncertainDraft.id, { version: uncertainDraft.version })).rejects.toThrow();
+    const uncertain = await service.getDraft(account.id, uncertainDraft.id);
+    expect(uncertain.delivery).toMatchObject({
+      status: "uncertain",
+      error: "Unknown mail provider failure",
+    });
+    expect((await service.listDrafts(account.id)).map(({ id }) => id).sort())
+      .toEqual([healthy.id, uncertain.id].sort());
+    store.close();
+  });
+
+  test("normalizes whitespace-only errors at both Store delivery transitions", async () => {
+    const { store, service } = await createEmptyTestHarness();
+    const account = await service.createAccount(testAccountInput());
+    const uncertainDraft = await service.createDraft(deliverableDraftInput(account));
+    const failedDraft = await service.createDraft({ ...deliverableDraftInput(account), subject: "Known failure" });
+    const uncertainClaim = await store.claimDraftSend(
+      "test-tenant",
+      account.id,
+      uncertainDraft.id,
+      uncertainDraft.version,
+      new Date().toISOString(),
+      "direct-uncertain",
+    );
+    const failedClaim = await store.claimDraftSend(
+      "test-tenant",
+      account.id,
+      failedDraft.id,
+      failedDraft.version,
+      new Date().toISOString(),
+      "direct-failed",
+    );
+    if (uncertainClaim.kind !== "claimed" || failedClaim.kind !== "claimed") {
+      throw new Error("Expected fresh draft claims");
+    }
+
+    const uncertain = await store.markDraftSendUncertain(
+      "test-tenant",
+      account.id,
+      uncertainDraft.id,
+      uncertainClaim.draft.version,
+      "   ",
+      new Date().toISOString(),
+      "direct-uncertain",
+    );
+    const failed = await store.markDraftSendFailed(
+      "test-tenant",
+      account.id,
+      failedDraft.id,
+      failedClaim.draft.version,
+      "\t",
+      new Date().toISOString(),
+      "direct-failed",
+    );
+
+    expect(uncertain.delivery).toMatchObject({ status: "uncertain", error: "Delivery outcome is uncertain" });
+    expect(failed.delivery).toMatchObject({ status: "failed", error: "Delivery failed before provider submission" });
+    expect(await service.listDrafts(account.id)).toHaveLength(2);
+    store.close();
   });
 
   test("recovers a prior-process claim as uncertain and copies its content without resending", async () => {
