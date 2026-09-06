@@ -1,11 +1,13 @@
 import {
   createDraftInputSchema,
+  outboundAddressSchema,
   type Account,
   type CreateDraftInput,
   type Draft,
   type DraftContent,
   type UpdateDraftInput,
 } from "../shared/contracts";
+import { ApiRequestError } from "./api";
 import { isLocalDraft, localDraftsKey } from "./mail-ui-state";
 
 export class DraftRecoveryConflictError extends Error {
@@ -49,6 +51,7 @@ export class DraftSaveQueue {
   save(content: DraftContent): Promise<Draft> {
     const operation = this.#tail.then(async () => {
       if (this.#draft) {
+        if (sameDraftContent(this.#draft, content)) return this.#draft;
         const stored = await this.#update(
           this.#accountId,
           this.#draft.id,
@@ -193,6 +196,10 @@ export async function migrateLocalDraftsOnce(
       continue;
     }
     const clientId = await migrationDraftId(candidate.accountId, candidate.id);
+    const legacyIdentity = outboundAddressSchema.safeParse({
+      name: candidate.from === account.email ? account.name : "",
+      address: candidate.from,
+    });
     const input = createDraftInputSchema.safeParse({
       accountId: candidate.accountId,
       clientId,
@@ -202,7 +209,9 @@ export async function migrateLocalDraftsOnce(
       bcc: candidate.bcc,
       subject: candidate.subject,
       body: candidate.body,
-      identity: { name: account.name, address: account.email },
+      identity: legacyIdentity.success
+        ? legacyIdentity.data
+        : { name: account.name, address: account.email },
       attachments: candidate.attachments,
       ...(candidate.source ? { source: candidate.source } : {}),
     });
@@ -213,7 +222,10 @@ export async function migrateLocalDraftsOnce(
     try {
       await create(input.data);
       migrated += 1;
-    } catch {
+    } catch (error) {
+      if (error instanceof ApiRequestError && error.status === 410 && error.code === "draft_deleted") {
+        continue;
+      }
       retryable += 1;
       remaining.push(candidate);
     }

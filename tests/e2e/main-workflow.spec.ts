@@ -95,6 +95,8 @@ class BrowserDraftFixture {
   drafts: Draft[] = [];
   listRequests = 0;
   getRequests = 0;
+  failedWriteRequests = 0;
+  writeFailure: { readonly message: string; readonly status: number } | null = null;
   readonly updates: UpdateDraftInput[] = [];
   #nextId = 1;
 
@@ -121,6 +123,11 @@ class BrowserDraftFixture {
       return true;
     }
     if (request.method() === "POST" && url.pathname === root) {
+      if (this.writeFailure) {
+        this.failedWriteRequests += 1;
+        await json(route, { error: this.writeFailure.message }, this.writeFailure.status);
+        return true;
+      }
       const input = createDraftInputSchema.parse({ accountId, ...request.postDataJSON() });
       const existing = input.clientId ? this.drafts.find(({ id }) => id === input.clientId) : undefined;
       if (existing) {
@@ -163,6 +170,11 @@ class BrowserDraftFixture {
       return true;
     }
     if (request.method() === "PUT" && match) {
+      if (this.writeFailure) {
+        this.failedWriteRequests += 1;
+        await json(route, { error: this.writeFailure.message }, this.writeFailure.status);
+        return true;
+      }
       const id = decodeURIComponent(match[1]!);
       const input = updateDraftInputSchema.parse(request.postDataJSON());
       this.updates.push(structuredClone(input));
@@ -728,6 +740,64 @@ test("refetches backend drafts on reopen and leaves unchanged structured drafts 
   await page.getByRole("button", { name: /Drafts/ }).click();
   await expect.poll(() => fixture.listRequests).toBeGreaterThan(beforeThirdOpen);
   await expect(page.getByText("Other client autosave", { exact: true })).toHaveCount(0);
+});
+
+test("keeps dirty compose content open until a failed backend save can be retried", async ({ page }) => {
+  const fixture = new BrowserDraftFixture();
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
+    if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, []);
+    if (await fixture.handle(route, account.id)) return;
+    if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
+    return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
+  });
+
+  await page.clock.install();
+  await page.goto("/");
+  fixture.writeFailure = { message: "Backend draft save unavailable", status: 503 };
+  await page.getByRole("button", { name: "New message" }).click();
+  await page.getByLabel("To", { exact: true }).fill("recipient@example.test");
+  await page.getByLabel("Subject", { exact: true }).fill("Recover failed saves");
+  await page.getByLabel("Message", { exact: true }).fill("Initial authored body");
+  await page.clock.fastForward(700);
+  await expect.poll(() => fixture.failedWriteRequests).toBe(1);
+  await expect(page.getByText(/Draft not saved: Backend draft save unavailable/)).toBeVisible();
+  await expect(page.getByText("Draft changes are not saved", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Saved in Postreeve/)).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Save draft" }).click();
+  await expect.poll(() => fixture.failedWriteRequests).toBe(2);
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("Initial authored body");
+
+  fixture.writeFailure = null;
+  await page.getByRole("button", { name: "Save draft" }).click();
+  await expect.poll(() => fixture.drafts[0]?.body).toBe("Initial authored body");
+  await expect(page.getByText(/Draft not saved:/)).toHaveCount(0);
+
+  await page.getByLabel("Message", { exact: true }).fill("Unsaved update must stay visible");
+  fixture.writeFailure = { message: "Backend draft update unavailable", status: 503 };
+  await page.clock.fastForward(700);
+  await expect.poll(() => fixture.failedWriteRequests).toBe(3);
+  await page.getByRole("button", { name: "Close New message" }).click();
+  await expect.poll(() => fixture.failedWriteRequests).toBe(4);
+  await expect(page.getByRole("heading", { name: "New message" })).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("Unsaved update must stay visible");
+  await page.getByLabel("Dismiss overlay").click({ position: { x: 5, y: 5 } });
+  await expect.poll(() => fixture.failedWriteRequests).toBe(5);
+  await expect(page.getByRole("heading", { name: "New message" })).toBeVisible();
+  await expect(page.getByText(/Saved in Postreeve/)).toHaveCount(0);
+
+  fixture.writeFailure = null;
+  await page.getByRole("button", { name: "Close New message" }).click();
+  await expect(page.getByRole("heading", { name: "New message" })).toHaveCount(0);
+  await page.getByRole("button", { name: /Drafts/ }).click();
+  await page.getByText("Recover failed saves", { exact: true }).click();
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("Unsaved update must stay visible");
 });
 
 test("reads a message and returns to the list on a narrow screen", async ({ page }) => {

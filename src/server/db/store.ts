@@ -19,7 +19,7 @@ import type {
   ProviderDraftRef,
 } from "../../shared/contracts";
 import { draftSchema, providerDraftRefSchema, sendReceiptSchema } from "../../shared/contracts";
-import { AccountConflictError, DraftConflictError, DraftNotFoundError } from "../core/errors";
+import { AccountConflictError, DraftConflictError, DraftDeletedError, DraftNotFoundError } from "../core/errors";
 import { accounts, batches, proposals, type StoredOperation } from "./schema";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
 import type { ProviderMessageObservation } from "../mail/provider";
@@ -127,6 +127,7 @@ export class Store {
       `).get(accountId);
       if (sending) throw new AccountConflictError();
       this.#sqlite.query("DELETE FROM drafts WHERE account_id = ?").run(accountId);
+      this.#sqlite.query("DELETE FROM draft_tombstones WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_provider_conversations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_locations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_provider_associations WHERE account_id = ?").run(accountId);
@@ -140,6 +141,10 @@ export class Store {
 
   async insertDraft(tenantId: string, draft: Draft): Promise<Draft> {
     const insert = this.#sqlite.transaction((): Draft => {
+      const tombstone = this.#sqlite.query(`
+        SELECT 1 FROM draft_tombstones WHERE tenant_id = ? AND account_id = ? AND id = ?
+      `).get(tenantId, draft.accountId, draft.id);
+      if (tombstone) throw new DraftDeletedError();
       const existing = this.#sqlite.query("SELECT * FROM drafts WHERE tenant_id = ? AND id = ?")
         .get(tenantId, draft.id) as DraftRow | null;
       if (existing) {
@@ -264,13 +269,18 @@ export class Store {
   }
 
   async deleteDraft(tenantId: string, accountId: string, id: string, expectedVersion: number): Promise<void> {
-    const deleted = this.#sqlite.query(`
-      DELETE FROM drafts
-      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ? AND delivery_status <> 'sending'
-      RETURNING id
-    `).get(tenantId, accountId, id, expectedVersion) as { id: string } | null;
-    if (deleted) return;
-    this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "removed");
+    const remove = this.#sqlite.transaction(() => {
+      const deleted = this.#sqlite.query(`
+        DELETE FROM drafts
+        WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ? AND delivery_status <> 'sending'
+        RETURNING id
+      `).get(tenantId, accountId, id, expectedVersion) as { id: string } | null;
+      if (!deleted) this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "removed");
+      this.#sqlite.query(`
+        INSERT INTO draft_tombstones (id, tenant_id, account_id, deleted_at) VALUES (?, ?, ?, ?)
+      `).run(id, tenantId, accountId, new Date().toISOString());
+    });
+    remove.immediate();
   }
 
   async claimDraftSend(
@@ -1123,6 +1133,7 @@ export class Store {
     this.#migrateDrafts();
     this.#migrateDraftMirrors();
     this.#migrateDraftAttachments();
+    this.#migrateDraftTombstones();
     const accountsTable = this.#sqlite.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
       .get() as { sql: string } | null;
     if (accountsTable && !accountsTable.sql.includes("'gmail'")) {
@@ -1236,6 +1247,25 @@ export class Store {
       this.#sqlite.exec(`
         ALTER TABLE drafts ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]';
         INSERT INTO schema_migrations (version, applied_at) VALUES (480001, CURRENT_TIMESTAMP);
+      `);
+    });
+    migrate();
+  }
+
+  #migrateDraftTombstones(): void {
+    if (this.#sqlite.query("SELECT 1 FROM schema_migrations WHERE version = 480002").get()) return;
+    const migrate = this.#sqlite.transaction(() => {
+      this.#sqlite.exec(`
+        CREATE TABLE draft_tombstones (
+          id TEXT NOT NULL,
+          tenant_id TEXT NOT NULL,
+          account_id TEXT NOT NULL REFERENCES accounts(id),
+          deleted_at TEXT NOT NULL,
+          PRIMARY KEY (tenant_id, account_id, id)
+        );
+        CREATE INDEX draft_tombstones_tenant_account_idx
+          ON draft_tombstones(tenant_id, account_id);
+        INSERT INTO schema_migrations (version, applied_at) VALUES (480002, CURRENT_TIMESTAMP);
       `);
     });
     migrate();

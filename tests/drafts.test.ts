@@ -4,10 +4,10 @@ import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { Account, CreateDraftInput, Draft, DraftContent, UpdateDraftInput } from "../src/shared/contracts";
-import { AccountConflictError } from "../src/server/core/errors";
+import { AccountConflictError, DraftDeletedError } from "../src/server/core/errors";
 import { Store } from "../src/server/db/store";
 import { MailSendPreDispatchError } from "../src/server/mail/sender";
-import { DraftRecoveryConflictError, DraftSaveQueue } from "../src/web/draft-state";
+import { DraftRecoveryConflictError, DraftSaveQueue, migrationDraftId } from "../src/web/draft-state";
 import { createEmptyTestHarness, createTestHarness, testAccountInput } from "./support/test-mail";
 
 const paths: string[] = [];
@@ -218,6 +218,98 @@ describe("server-authoritative drafts", () => {
     ]);
     expect(harness.draftMirrorAttempts.map(({ version }) => version)).toEqual([1, 1, 2]);
     harness.store.close();
+  });
+
+  test("keeps the same external migration identity active independently in two accounts", async () => {
+    const harness = await createEmptyTestHarness();
+    const firstAccount = await harness.service.createAccount(testAccountInput("First", "first@example.test"));
+    const secondAccount = await harness.service.createAccount(testAccountInput("Second", "second@example.test"));
+    const externalId = "shared-legacy-id";
+    const firstClientId = await migrationDraftId(firstAccount.id, externalId);
+    const secondClientId = await migrationDraftId(secondAccount.id, externalId);
+
+    expect(firstClientId).not.toBe(secondClientId);
+    const firstDraft = await harness.service.createDraft({ ...draftInput(firstAccount), clientId: firstClientId });
+    const secondDraft = await harness.service.createDraft({ ...draftInput(secondAccount), clientId: secondClientId });
+
+    expect(await harness.service.listDrafts(firstAccount.id)).toEqual([firstDraft]);
+    expect(await harness.service.listDrafts(secondAccount.id)).toEqual([secondDraft]);
+    expect(await harness.providerDrafts(firstAccount.id)).toHaveLength(1);
+    expect(await harness.providerDrafts(secondAccount.id)).toHaveLength(1);
+    harness.store.close();
+  });
+
+  test("scopes a deleted stable identity to its exact account", async () => {
+    const path = temporaryStore();
+    const first = await createEmptyTestHarness({ storePath: path });
+    const deletedAccount = await first.service.createAccount(testAccountInput("Deleted", "deleted@example.test"));
+    const independentAccount = await first.service.createAccount(testAccountInput("Independent", "independent@example.test"));
+    const deletedProvider = first.providerForAccount(deletedAccount.id);
+    const independentProvider = first.providerForAccount(independentAccount.id);
+    if (!deletedProvider || !independentProvider) throw new Error("Expected shared providers");
+    const second = await createEmptyTestHarness({
+      storePath: path,
+      providerForAccount: (accountId) => accountId === deletedAccount.id
+        ? deletedProvider
+        : accountId === independentAccount.id
+          ? independentProvider
+          : undefined,
+    });
+    const clientId = "lost-create-then-deleted";
+    const input = {
+      ...draftInput(deletedAccount),
+      clientId,
+      body: "The create response was lost",
+    };
+    const created = await first.service.createDraft(input);
+    await second.service.removeDraft(deletedAccount.id, created.id, { version: created.version });
+    const independent = await first.service.createDraft({
+      ...draftInput(independentAccount),
+      clientId,
+      body: "Independent account content",
+    });
+    if (independent.mirror.status !== "synced") throw new Error("Expected synced independent draft");
+    const independentReplay = await second.service.createDraft({
+      ...draftInput(independentAccount),
+      clientId,
+      body: "Replay must keep the accepted content",
+    });
+
+    await expect(first.service.createDraft({ ...input, body: "A stale client retry" }))
+      .rejects.toBeInstanceOf(DraftDeletedError);
+    expect(independentReplay).toEqual(independent);
+    expect(await first.store.getDraft("test-tenant", deletedAccount.id, created.id)).toBeNull();
+    expect(await second.store.getDraft("test-tenant", deletedAccount.id, created.id)).toBeNull();
+    expect(await first.store.getDraft("test-tenant", independentAccount.id, independent.id)).toEqual(independent);
+    expect(await first.providerDrafts(deletedAccount.id)).toEqual([]);
+    expect(await first.providerDrafts(independentAccount.id)).toEqual([
+      { postreeveId: independent.id, version: independent.version, ref: independent.mirror.ref },
+    ]);
+    expect(first.draftMirrorAttempts.filter(({ accountId }) => accountId === deletedAccount.id).map(({ version }) => version))
+      .toEqual([1]);
+    second.store.close();
+    first.store.close();
+  });
+
+  test("removes draft tombstones with the account's local state", async () => {
+    const store = new Store(":memory:");
+    const storedAccount = {
+      id: "tombstone-account",
+      name: "Tombstone owner",
+      email: "owner@example.test",
+      kind: "imap" as const,
+      encryptedCredentials: null,
+    };
+    await store.insertAccount(storedAccount);
+    const draft = draftForStore(storedAccount.id, storedAccount.name, storedAccount.email, "reusable-after-disconnect");
+    await store.insertDraft("test-tenant", draft);
+    await store.deleteDraft("test-tenant", storedAccount.id, draft.id, draft.version);
+    await expect(store.insertDraft("test-tenant", draft)).rejects.toBeInstanceOf(DraftDeletedError);
+
+    expect(await store.deleteAccount(storedAccount.id)).toBe(true);
+    await store.insertAccount(storedAccount);
+    await expect(store.insertDraft("test-tenant", draft)).resolves.toEqual(draft);
+    store.close();
   });
 
   test("keeps another client's edit when a lost create response is retried", async () => {
@@ -1338,6 +1430,26 @@ function contentOf(draft: Draft): DraftContent {
     identity: draft.identity,
     ...(draft.source ? { source: draft.source } : {}),
     attachments: draft.attachments,
+  };
+}
+
+function draftForStore(accountId: string, name: string, email: string, id: string): Draft {
+  return {
+    id,
+    accountId,
+    mode: "new",
+    to: [],
+    cc: [],
+    bcc: [],
+    subject: "",
+    body: "",
+    identity: { name, address: email },
+    attachments: [],
+    delivery: { status: "editable" },
+    mirror: { status: "pending" },
+    createdAt: "2026-09-06T10:00:00.000Z",
+    updatedAt: "2026-09-06T10:00:00.000Z",
+    version: 1,
   };
 }
 

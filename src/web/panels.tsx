@@ -285,11 +285,14 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   const [receipt, setReceipt] = useState<SendReceipt | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(saved?.updatedAt ?? null);
   const [mirrorError, setMirrorError] = useState<string | null>(saved?.mirror.status === "failed" ? saved.mirror.error : null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const autosaveTimeout = useRef<number | null>(null);
   const autosaveSuppressed = useRef(false);
   const active = useRef(true);
+  const closing = useRef(false);
+  const sendStarted = useRef(false);
   const saveSequence = useRef(0);
   const edited = useRef({ from: false, to: false, cc: false, bcc: false });
   const saver = useRef<DraftSaveQueue | null>(null);
@@ -320,7 +323,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     const sequence = ++saveSequence.current;
     if (active.current) {
       setSaving(true);
-      setMirrorError(null);
+      setSaveError(null);
     }
     try {
       const draft = await saver.current!.save(content);
@@ -328,25 +331,30 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       if (active.current) {
         setSavedAt(draft.updatedAt);
         setMirrorError(draft.mirror.status === "failed" ? draft.mirror.error : null);
+        setSaveError(null);
         setRecoveryError(null);
       }
       return draft;
+    } catch (cause) {
+      if (active.current) setSaveError(cause instanceof Error ? cause.message : "Draft save failed");
+      throw cause;
     } finally {
       if (active.current && saveSequence.current === sequence) setSaving(false);
     }
   }
 
-  useEffect(() => () => {
-    active.current = false;
+  useEffect(() => {
+    active.current = true;
+    return () => {
+      active.current = false;
+    };
   }, []);
 
   useEffect(() => {
     if (autosaveSuppressed.current) return;
     if (!saver.current!.isDirty(currentDraft())) return;
     const timeout = window.setTimeout(() => {
-      void saveCurrent().catch((cause: unknown) => {
-        if (active.current) setMirrorError(cause instanceof Error ? cause.message : "Draft save failed");
-      });
+      void saveCurrent().catch(() => undefined);
     }, 700);
     autosaveTimeout.current = timeout;
     return () => {
@@ -357,12 +365,25 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
 
   const mutation = useMutation({
     mutationFn: async (content: DraftContent) => {
+      sendStarted.current = false;
       const current = saver.current!.current;
-      const draft = !saver.current!.isDirty(content) && current ? current : await saver.current!.save(content);
+      let draft: Draft;
+      try {
+        draft = !saver.current!.isDirty(content) && current ? current : await saver.current!.save(content);
+      } catch (cause) {
+        if (active.current) setSaveError(cause instanceof Error ? cause.message : "Draft save failed");
+        throw cause;
+      }
+      if (active.current) {
+        setSaveError(null);
+        setMirrorError(draft.mirror.status === "failed" ? draft.mirror.error : null);
+      }
       onSaveDraft(draft);
+      sendStarted.current = true;
       return { receipt: await api.sendDraft(account.id, draft.id, { version: draft.version }), draftId: draft.id };
     },
     onSuccess: async ({ receipt: nextReceipt, draftId }) => {
+      setSaveError(null);
       setRecoveryError(null);
       setReceipt(nextReceipt);
       onSent(draftId);
@@ -377,6 +398,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     },
     onError: async () => {
       autosaveSuppressed.current = false;
+      if (!sendStarted.current) return;
       try {
         const refreshed = await saver.current!.refreshAfterSend(api.draft);
         if (!refreshed) return;
@@ -403,7 +425,31 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
         }
       }
     },
+    onSettled: () => {
+      sendStarted.current = false;
+    },
   });
+
+  async function closeCurrent(): Promise<void> {
+    if (closing.current) return;
+    if (!saver.current!.isDirty(currentDraft())) {
+      onClose();
+      return;
+    }
+    closing.current = true;
+    if (autosaveTimeout.current !== null) {
+      window.clearTimeout(autosaveTimeout.current);
+      autosaveTimeout.current = null;
+    }
+    try {
+      await saveCurrent();
+      onClose();
+    } catch {
+      return;
+    } finally {
+      closing.current = false;
+    }
+  }
 
   function submit(event: FormEvent): void {
     event.preventDefault();
@@ -444,14 +490,17 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   return <Sheet
     title={modeLabel}
     meta={account.email}
-    onClose={() => {
-      if (saver.current!.isDirty(currentDraft())) void saveCurrent().catch(() => undefined);
-      onClose();
-    }}
+    onClose={() => void closeCurrent()}
     onSubmit={submit}
     footer={<>
-      <span className="t-dim">{saving ? "Saving draft…" : savedAt ? `Draft saved ${formatDate(savedAt, true)}` : "Drafts autosave to the backend"}</span>
-      <button type="button" className="chip push" disabled={saving} onClick={() => void saveCurrent(true).catch((cause: unknown) => setMirrorError(cause instanceof Error ? cause.message : "Draft save failed"))}>Save draft</button>
+      <span className="t-dim">{saving
+        ? "Saving draft…"
+        : saveError
+          ? "Draft changes are not saved"
+          : savedAt
+            ? `Draft saved ${formatDate(savedAt, true)}`
+            : "Drafts autosave to the backend"}</span>
+      <button type="button" className="chip push" disabled={saving} onClick={() => void saveCurrent(true).catch(() => undefined)}>Save draft</button>
       <button className="btn" disabled={mutation.isPending || !body.trim() || backendPending} title={backendPending ? "Backend support is required before this message can be sent" : undefined}>
         {mutation.isPending ? "Sending…" : "Send message"}
       </button>
@@ -482,7 +531,8 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       ? <> This draft no longer has its source conversation. <button type="button" className="btn-underline" onClick={() => setEffectiveMode("new")}>Convert to a new message</button></>
       : null}{from !== account.email ? " Alternate From identities are not supported yet." : ""}{attachments.length > 0 ? " Attachment delivery is not supported yet." : ""}</div> : null}
     {validationError ? <div className="alert error">{validationError}</div> : null}
-    {mirrorError ? <div className="alert">Saved in Postreeve. Provider mirror needs repair: {mirrorError}</div> : null}
+    {saveError ? <div className="alert error">Draft not saved: {saveError}. Your form content was kept.</div> : null}
+    {!saveError && mirrorError ? <div className="alert">Saved in Postreeve. Provider mirror needs repair: {mirrorError}</div> : null}
     {recoveryError ? <div className="alert error">Send status recovery failed: {recoveryError}. Your form content was kept.</div> : null}
     {mutation.isError ? <div className="alert error">{mutation.error.message}</div> : null}
   </Sheet>;

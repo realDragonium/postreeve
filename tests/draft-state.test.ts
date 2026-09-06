@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Account, CreateDraftInput, Draft, DraftContent, UpdateDraftInput } from "../src/shared/contracts";
 import { DraftConflictError } from "../src/server/core/errors";
+import { ApiRequestError } from "../src/web/api";
 import {
   DraftRecoveryConflictError,
   DraftSaveQueue,
@@ -268,8 +269,82 @@ describe("backend draft UI state", () => {
     expect(accepted.has(deletedId)).toBe(false);
   });
 
+  test("clears only typed deleted migrations while unrelated failures remain retryable", async () => {
+    const deleted = localDraft("deleted", "Deleted tombstone", "Do not recreate");
+    const conflict = localDraft("conflict", "Unrelated client error", "Retry the 4xx");
+    const unavailable = localDraft("unavailable", "Backend unavailable", "Retry the 5xx");
+    const storage = memoryStorage({ [localDraftsKey]: JSON.stringify([deleted, conflict, unavailable]) });
+    const attempts: string[] = [];
+    let failures = true;
+    const create = async (input: CreateDraftInput): Promise<Draft> => {
+      attempts.push(input.subject);
+      if (input.subject === deleted.subject) {
+        throw new ApiRequestError("Draft was deleted", 410, "draft_deleted");
+      }
+      if (failures && input.subject === conflict.subject) {
+        throw new ApiRequestError("Draft version conflict", 409, "draft_conflict");
+      }
+      if (failures) throw new ApiRequestError("Backend unavailable", 503, null);
+      return storedDraft(1, input, input.clientId);
+    };
+
+    expect(await migrateLocalDraftsOnce(storage, [account], create))
+      .toEqual({ migrated: 0, ignored: 0, retryable: 2 });
+    expect(JSON.parse(storage.getItem(localDraftsKey) ?? "[]")).toEqual([conflict, unavailable]);
+    expect(storage.getItem(localDraftMigrationKey)).toBeNull();
+
+    failures = false;
+    expect(await migrateLocalDraftsOnce(storage, [account], create))
+      .toEqual({ migrated: 2, ignored: 0, retryable: 0 });
+    expect(attempts.filter((subject) => subject === deleted.subject)).toHaveLength(1);
+    expect(storage.getItem(localDraftsKey)).toBe("[]");
+    expect(storage.getItem(localDraftMigrationKey)).toBe("complete");
+  });
+
+  test("preserves a valid legacy alternate From identity and all other authored content", async () => {
+    const source = {
+      canonicalMessageId: "legacy-message",
+      conversationId: "legacy-conversation",
+      providerConversationId: "legacy-provider-conversation",
+    };
+    const legacy = {
+      ...localDraft("valid-alias", " Authored subject ", "Authored body\n"),
+      from: "alias@example.test",
+      source,
+    };
+    const storage = memoryStorage({ [localDraftsKey]: JSON.stringify([legacy]) });
+    const accepted: CreateDraftInput[] = [];
+
+    const result = await migrateLocalDraftsOnce(storage, [account], async (input) => {
+      accepted.push(structuredClone(input));
+      return storedDraft(1, input, input.clientId);
+    });
+
+    expect(result).toEqual({ migrated: 1, ignored: 0, retryable: 0 });
+    expect(accepted).toEqual([expect.objectContaining({
+      identity: { name: "", address: legacy.from },
+      mode: legacy.mode,
+      to: legacy.to,
+      cc: legacy.cc,
+      bcc: legacy.bcc,
+      subject: legacy.subject,
+      body: legacy.body,
+      attachments: legacy.attachments,
+      source,
+    })]);
+  });
+
   test("uses the available account identity for a legacy draft with an invalid From value", async () => {
-    const legacy = { ...localDraft("invalid-from", " Authored subject ", "Authored body\n"), from: "" };
+    const source = {
+      canonicalMessageId: "fallback-message",
+      conversationId: "fallback-conversation",
+      providerConversationId: "fallback-provider-conversation",
+    };
+    const legacy = {
+      ...localDraft("invalid-from", " Authored subject ", "Authored body\n"),
+      from: "",
+      source,
+    };
     const storage = memoryStorage({ [localDraftsKey]: JSON.stringify([legacy]) });
     const accepted: CreateDraftInput[] = [];
 
@@ -287,6 +362,7 @@ describe("backend draft UI state", () => {
       subject: legacy.subject,
       body: legacy.body,
       attachments: legacy.attachments,
+      source,
     })]);
     expect(storage.getItem(localDraftsKey)).toBe("[]");
     expect(storage.getItem(localDraftMigrationKey)).toBe("complete");

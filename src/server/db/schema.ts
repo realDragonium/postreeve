@@ -74,6 +74,16 @@ export const drafts = sqliteTable("drafts", {
   `),
 ]);
 
+export const draftTombstones = sqliteTable("draft_tombstones", {
+  id: text("id").notNull(),
+  tenantId: text("tenant_id").notNull(),
+  accountId: text("account_id").notNull().references(() => accounts.id),
+  deletedAt: text("deleted_at").notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.tenantId, table.accountId, table.id] }),
+  index("draft_tombstones_tenant_account_idx").on(table.tenantId, table.accountId),
+]);
+
 export const proposals = sqliteTable("proposals", {
   id: text("id").primaryKey(),
   accountId: text("account_id").notNull().references(() => accounts.id),
