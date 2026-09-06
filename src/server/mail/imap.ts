@@ -1044,7 +1044,15 @@ async function readImapText(
     if (mediaType === "text/plain") plain.push(value);
     else html.push(value);
   }
-  return { text: plain.join("\n"), html: html.length > 0 ? html.join("<br/>\n") : null };
+  const renderedHtml = html.length > 0 ? html.join("<br/>\n") : null;
+  let renderedText = plain.join("\n");
+  if (!renderedText && renderedHtml) {
+    const parsed = await simpleParser(Buffer.from(
+      `Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n${renderedHtml}`,
+    ), { skipTextToHtml: true });
+    renderedText = parsed.text ?? "";
+  }
+  return { text: renderedText, html: renderedHtml };
 }
 
 function imapAttachments(
@@ -1103,11 +1111,11 @@ async function downloadImapAttachmentBytes(
 ): Promise<Buffer> {
   if (!part.section) throw new Error("IMAP attachment has no part identifier");
   const encoding = part.node.encoding?.toLowerCase() ?? "";
-  const binary = client.capabilities.has("BINARY");
+  const binary = part.node.part !== undefined && client.capabilities.has("BINARY");
   const encodedLimit = encoding === "quoted-printable"
     ? (maxBytes + 1) * 4
     : encoding === "base64"
-      ? (maxBytes + 1) * 2
+      ? (maxBytes + 1) * 2 + 1
       : maxBytes + 1;
   const fetchLimit = binary ? maxBytes + 1 : encodedLimit;
   if (!binary && part.node.size !== undefined && part.node.size > encodedLimit) {
@@ -1115,10 +1123,10 @@ async function downloadImapAttachmentBytes(
   }
   const response = await client.fetchOne(
     uid,
-    { uid: true, bodyParts: [{ key: part.node.part ?? "TEXT", start: 0, maxLength: fetchLimit }] },
+    { uid: true, bodyParts: [{ key: part.node.part ?? "text", start: 0, maxLength: fetchLimit }] },
     { uid: true, binary: true },
   );
-  const fetchSection = part.node.part ?? "TEXT";
+  const fetchSection = (part.node.part ?? "text").toLowerCase();
   const encoded = response && response.bodyParts?.get(fetchSection);
   if (!response || response.uid !== uid || !encoded) throw new Error("IMAP attachment reference is stale");
   const content = response.binaryParts?.has(fetchSection)
@@ -1131,7 +1139,20 @@ async function downloadImapAttachmentBytes(
 }
 
 function decodeTransferEncoding(content: Buffer, encoding: string): Buffer {
-  if (encoding === "base64") return Buffer.from(content.toString("ascii").replace(/\s/g, ""), "base64");
+  if (encoding === "base64") {
+    const normalized = content.toString("ascii").replace(/[^A-Za-z0-9+/=]/g, "");
+    const unpadded = normalized.replace(/=+$/, "");
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)
+      || unpadded.length % 4 === 1
+      || (normalized.includes("=") && normalized.length % 4 !== 0)) {
+      throw new Error("IMAP returned malformed base64 attachment data");
+    }
+    const decoded = Buffer.from(normalized, "base64");
+    if (decoded.toString("base64").replace(/=+$/, "") !== unpadded) {
+      throw new Error("IMAP returned malformed base64 attachment data");
+    }
+    return decoded;
+  }
   if (encoding !== "quoted-printable") return content;
   const bytes: number[] = [];
   for (let index = 0; index < content.length; index += 1) {

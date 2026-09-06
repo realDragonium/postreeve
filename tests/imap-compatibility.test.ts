@@ -163,6 +163,15 @@ describe("Bun IMAP compatibility", () => {
     await expect(provider.downloadAttachment(config.accountId, inlineFile.locator, exact.byteLength - 1))
       .rejects.toThrow("download limit");
 
+    const pdfFile = detail?.attachments.find(({ filename }) => filename === "report.pdf");
+    if (!pdfFile) throw new Error("Expected base64 file");
+    message.bodyParts.set("3", Buffer.from("cG!Rm"));
+    expect(Buffer.from((await provider.downloadAttachment(config.accountId, pdfFile.locator, 100)).content))
+      .toEqual(Buffer.from("pdf"));
+    message.bodyParts.set("3", Buffer.from("Y"));
+    await expect(provider.downloadAttachment(config.accountId, pdfFile.locator, 100))
+      .rejects.toThrow("malformed base64 attachment data");
+
     message.uid = 999;
     await expect(provider.downloadAttachment(config.accountId, inlineFile.locator, 100)).rejects.toThrow("reference is stale");
   });
@@ -171,7 +180,7 @@ describe("Bun IMAP compatibility", () => {
     const state = fakeState();
     const message = state.mailboxes.get("INBOX")?.messages.get(2);
     if (!message) throw new Error("Expected message fixture");
-    const content = Buffer.from("root bytes");
+    const content = Buffer.from([7]);
     const encoded = Buffer.from(content.toString("base64"));
     message.bodyStructure = {
       type: "application/octet-stream",
@@ -181,7 +190,7 @@ describe("Bun IMAP compatibility", () => {
       encoding: "base64",
       size: encoded.byteLength,
     };
-    message.bodyParts = new Map([["TEXT", encoded]]);
+    message.bodyParts = new Map([["text", encoded]]);
     const provider = new ImapMailProvider(config, fakeFactory(state));
     const reference = {
       accountId: config.accountId,
@@ -201,8 +210,31 @@ describe("Bun IMAP compatibility", () => {
     });
     const attachment = detail?.attachments[0];
     if (!attachment) throw new Error("Expected root attachment");
-    expect(Buffer.from((await provider.downloadAttachment(config.accountId, attachment.locator, 20)).content))
+    expect(Buffer.from((await provider.downloadAttachment(config.accountId, attachment.locator, content.byteLength)).content))
       .toEqual(content);
+  });
+
+  test("preserves HTML-only reply text and ImapFlow-decoded visible-body charsets", async () => {
+    const state = fakeState();
+    const inbox = state.mailboxes.get("INBOX");
+    const htmlMessage = inbox?.messages.get(1);
+    const charsetMessage = inbox?.messages.get(2);
+    if (!htmlMessage || !charsetMessage) throw new Error("Expected message fixtures");
+    const html = "<p>HTML-only <strong>reply content</strong></p>";
+    htmlMessage.bodyStructure = { type: "text/html", parameters: { charset: "utf-8" }, size: Buffer.byteLength(html) };
+    htmlMessage.bodyParts = new Map([["1", Buffer.from(html)]]);
+    const latin1 = Buffer.from([0x63, 0x61, 0x66, 0xe9]);
+    charsetMessage.bodyStructure = { type: "text/plain", parameters: { charset: "iso-8859-1" }, size: latin1.byteLength };
+    charsetMessage.bodyParts = new Map([["1", latin1]]);
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+
+    const details = await provider.readMessages(config.accountId, [
+      { accountId: config.accountId, mailbox: "INBOX", uidValidity: "101", uid: 1, modseq: "11" },
+      { accountId: config.accountId, mailbox: "INBOX", uidValidity: "101", uid: 2, modseq: "12" },
+    ]);
+    expect(details[0]?.html).toBe(html);
+    expect(details[0]?.text).toContain("HTML-only reply content");
+    expect(details[1]?.text).toBe("café");
   });
 
   test("verifies authentication with a folder list and no mailbox mutation", async () => {
@@ -1393,10 +1425,17 @@ class FakeImapClient implements ImapClient {
     const message = this.#requireSelected().messages.get(range);
     const stored = part ? message?.bodyParts?.get(part) : message?.source;
     if (!message || !stored) throw new Error("Fake body part is missing");
-    const node = part ? findStructurePart(message.bodyStructure, part) : undefined;
-    const content = node?.encoding?.toLowerCase() === "base64"
+    const node = part
+      ? findStructurePart(message.bodyStructure, part)
+        ?? (part === "1" && !message.bodyStructure?.childNodes ? message.bodyStructure : undefined)
+      : undefined;
+    const transferDecoded = node?.encoding?.toLowerCase() === "base64"
       ? Buffer.from(stored.toString("ascii").replace(/\s/g, ""), "base64")
       : stored;
+    const charset = node?.parameters?.charset;
+    const content = charset && !/^utf-?8$/i.test(charset)
+      ? Buffer.from(new TextDecoder(charset).decode(transferDecoded))
+      : transferDecoded;
     const limited = content.subarray(0, options?.maxBytes);
     return {
       meta: { expectedSize: content.byteLength, contentType: message.bodyStructure?.type ?? "application/octet-stream" },

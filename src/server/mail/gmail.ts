@@ -34,6 +34,8 @@ import { MailSendPreDispatchError, type ConversationSendContext, type MailSender
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
+const GMAIL_MIN_FULL_RESPONSE_BYTES = 64 * 1024 * 1024;
+const GMAIL_JSON_OVERHEAD_BYTES = 2 * 1024 * 1024;
 export const GMAIL_ARCHIVE = "__archive__";
 
 const tokenSchema = z.object({
@@ -297,12 +299,13 @@ export class GmailMailClient implements MailProvider, MailSender {
   ): Promise<ProviderAttachmentDownload> {
     this.#assertAccount(accountId);
     if (locator.kind !== "gmail") throw new Error("Gmail cannot download another provider's attachment");
-    const responseLimit = Math.ceil(maxBytes * 4 / 3) + 2 * 1024 * 1024;
+    const attachmentResponseLimit = Math.ceil(maxBytes * 4 / 3) + GMAIL_JSON_OVERHEAD_BYTES;
+    const messageResponseLimit = Math.max(GMAIL_MIN_FULL_RESPONSE_BYTES, attachmentResponseLimit);
     const message = await this.#request(
       `/messages/${encodeURIComponent(locator.messageId)}?format=full`,
       gmailMessageSchema,
       {},
-      responseLimit,
+      messageResponseLimit,
     );
     if (message.id !== locator.messageId) throw new Error("Gmail attachment reference is stale");
     if (!message.payload) throw new Error("Gmail did not return the message body structure");
@@ -312,7 +315,7 @@ export class GmailMailClient implements MailProvider, MailSender {
     const part = visibleGmailParts(message.payload).find(({ part: candidate }) => candidate.partId === locator.partId)?.part;
     if (!part) throw new Error("Gmail attachment reference is stale");
     if (part.body.size > maxBytes) throw new Error(`Attachment exceeds the ${maxBytes}-byte download limit`);
-    const content = await this.#gmailPartContent(locator.messageId, part, responseLimit);
+    const content = await this.#gmailPartContent(locator.messageId, part, attachmentResponseLimit);
     if (content.byteLength > maxBytes) throw new Error(`Attachment exceeds the ${maxBytes}-byte download limit`);
     return { filename: attachment.filename, mediaType: attachment.mediaType, content };
   }

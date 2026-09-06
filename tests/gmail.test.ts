@@ -325,6 +325,54 @@ describe("Gmail compatibility", () => {
     await expect(client.downloadAttachment(account.id, locator, 2)).rejects.toThrow("reference is stale");
   });
 
+  test("keeps the target file limit independent from unrelated Gmail full-message content", async () => {
+    const largeText = Buffer.alloc(2 * 1024 * 1024, 0x61);
+    const client = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "refresh" },
+      clientId: "client",
+      fetch: async (input) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url === "https://oauth2.googleapis.com/token") return json({ access_token: "access", expires_in: 3600 });
+        if (url.includes("/messages/large-message?format=full")) {
+          return json({
+            id: "large-message",
+            labelIds: [],
+            snippet: "large body",
+            payload: {
+              mimeType: "multipart/mixed",
+              body: { size: 0 },
+              parts: [
+                {
+                  partId: "1",
+                  mimeType: "text/plain",
+                  body: { size: largeText.byteLength, data: largeText.toString("base64url") },
+                },
+                {
+                  partId: "2",
+                  mimeType: "application/octet-stream",
+                  filename: "small.bin",
+                  body: { size: 1, attachmentId: "small-body" },
+                },
+              ],
+            },
+          });
+        }
+        if (url.includes("/messages/large-message/attachments/small-body")) {
+          return json({ size: 1, data: Buffer.from([7]).toString("base64url") });
+        }
+        return new Response(null, { status: 404 });
+      },
+    });
+
+    const downloaded = await client.downloadAttachment(
+      account.id,
+      { kind: "gmail", messageId: "large-message", partId: "2" },
+      1024,
+    );
+    expect(Buffer.from(downloaded.content)).toEqual(Buffer.from([7]));
+  });
+
   test("classifies token acquisition failure as proven pre-dispatch", async () => {
     const requests: string[] = [];
     const { store, service } = await createConversationService(async (input) => {
