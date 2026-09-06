@@ -1112,14 +1112,14 @@ async function downloadImapAttachmentBytes(
   if (!part.section) throw new Error("IMAP attachment has no part identifier");
   const encoding = part.node.encoding?.toLowerCase() ?? "";
   const binary = part.node.part !== undefined && client.capabilities.has("BINARY");
-  const encodedLimit = encoding === "quoted-printable"
-    ? (maxBytes + 1) * 4
+  const transferLimit = encoding === "quoted-printable"
+    ? (maxBytes + 1) * 4 + 64 * 1024
     : encoding === "base64"
-      ? (maxBytes + 1) * 2 + 1
+      ? (maxBytes + 1) * 2 + 64 * 1024
       : maxBytes + 1;
-  const fetchLimit = binary ? maxBytes + 1 : encodedLimit;
-  if (!binary && part.node.size !== undefined && part.node.size > encodedLimit) {
-    throw new Error(`Attachment exceeds the ${maxBytes}-byte download limit`);
+  const fetchLimit = binary ? maxBytes + 1 : transferLimit + 1;
+  if (!binary && part.node.size !== undefined && part.node.size > transferLimit) {
+    throw new Error("IMAP attachment transfer representation exceeds the safe download bound");
   }
   const response = await client.fetchOne(
     uid,
@@ -1132,8 +1132,11 @@ async function downloadImapAttachmentBytes(
   const content = response.binaryParts?.has(fetchSection)
     ? encoded
     : decodeTransferEncoding(encoded, encoding);
-  if (content.byteLength > maxBytes || encoded.byteLength >= fetchLimit) {
+  if (content.byteLength > maxBytes) {
     throw new Error(`Attachment exceeds the ${maxBytes}-byte download limit`);
+  }
+  if (encoded.byteLength >= fetchLimit) {
+    throw new Error("IMAP attachment transfer representation exceeds the safe download bound");
   }
   return content;
 }

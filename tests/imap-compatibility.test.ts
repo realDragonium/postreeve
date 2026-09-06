@@ -212,6 +212,21 @@ describe("Bun IMAP compatibility", () => {
     if (!attachment) throw new Error("Expected root attachment");
     expect(Buffer.from((await provider.downloadAttachment(config.accountId, attachment.locator, content.byteLength)).content))
       .toEqual(content);
+    for (const tolerated of ["Bw==\r\n", "Bw==!"]) {
+      const transfer = Buffer.from(tolerated);
+      message.bodyParts.set("text", transfer);
+      message.bodyStructure.size = transfer.byteLength;
+      expect(Buffer.from((await provider.downloadAttachment(
+        config.accountId,
+        attachment.locator,
+        content.byteLength,
+      )).content)).toEqual(content);
+    }
+    const overflow = Buffer.from("CAk=");
+    message.bodyParts.set("text", overflow);
+    message.bodyStructure.size = overflow.byteLength;
+    await expect(provider.downloadAttachment(config.accountId, attachment.locator, content.byteLength))
+      .rejects.toThrow("1-byte download limit");
   });
 
   test("preserves HTML-only reply text and ImapFlow-decoded visible-body charsets", async () => {
