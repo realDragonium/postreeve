@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import { and, desc, eq } from "drizzle-orm";
 import { drizzle, type BunSQLiteDatabase } from "drizzle-orm/bun-sqlite";
 import type {
@@ -56,11 +56,17 @@ export type DraftSendClaim =
   | { kind: "claimed"; draft: Draft }
   | { kind: "sent"; receipt: SendReceipt };
 
+let memoryStoreSequence = 0;
+
 export class Store {
   readonly #sqlite: Database;
   readonly #db: BunSQLiteDatabase;
+  readonly coordinationIdentity: string;
 
   constructor(path = process.env.POSTREEVE_DB_PATH ?? "./data/postreeve.sqlite") {
+    this.coordinationIdentity = path === ":memory:"
+      ? `memory:${memoryStoreSequence += 1}`
+      : `file:${resolve(path)}`;
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.#sqlite = new Database(path, { create: true, strict: true });
     this.#sqlite.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");

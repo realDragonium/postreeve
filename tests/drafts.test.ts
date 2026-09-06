@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { Account, CreateDraftInput, Draft, UpdateDraftInput } from "../src/shared/contracts";
 import { AccountConflictError } from "../src/server/core/errors";
 import { Store } from "../src/server/db/store";
@@ -164,6 +164,105 @@ describe("server-authoritative drafts", () => {
     expect(results.filter(({ status }) => status === "rejected")).toHaveLength(1);
     expect((await first.service.getDraft(account.id, draft.id)).version).toBe(2);
     second.close();
+    first.store.close();
+  });
+
+  test("keeps separate in-memory stores out of the same provider lifecycle domain", () => {
+    const first = new Store(":memory:");
+    const second = new Store(":memory:");
+    try {
+      expect(first.coordinationIdentity).not.toBe(second.coordinationIdentity);
+    } finally {
+      second.close();
+      first.close();
+    }
+  });
+
+  test("serializes provider lifecycle mutations across services sharing one database", async () => {
+    const path = temporaryStore();
+    let releaseFirst: (() => void) | undefined;
+    let markFirstStarted: (() => void) | undefined;
+    const firstStarted = new Promise<void>((resolve) => { markFirstStarted = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let blockVersionOne = false;
+    let activeMutations = 0;
+    let maxConcurrentMutations = 0;
+    const providerVersionsBeforeRemoval: number[][] = [];
+    let inspectProvider = async (): Promise<Array<{ version: number }>> => [];
+    const enterMutation = (): void => {
+      activeMutations += 1;
+      maxConcurrentMutations = Math.max(maxConcurrentMutations, activeMutations);
+    };
+    const leaveMutation = (): void => {
+      activeMutations -= 1;
+    };
+    const first = await createEmptyTestHarness({
+      storePath: path,
+      onDraftMirror: async (draft) => {
+        enterMutation();
+        try {
+          if (blockVersionOne && draft.version === 1) {
+            blockVersionOne = false;
+            markFirstStarted?.();
+            await firstGate;
+          }
+        } finally {
+          leaveMutation();
+        }
+      },
+      onDraftRemove: async () => {
+        enterMutation();
+        try {
+          providerVersionsBeforeRemoval.push((await inspectProvider()).map(({ version }) => version));
+        } finally {
+          leaveMutation();
+        }
+      },
+    });
+    const account = await first.service.createAccount(testAccountInput());
+    const sharedProvider = first.providerForAccount(account.id);
+    if (!sharedProvider) throw new Error("Expected the shared provider boundary");
+    inspectProvider = async () => first.providerDrafts(account.id);
+    const equivalentPath = `${dirname(path)}/./${basename(path)}`;
+    const second = await createEmptyTestHarness({
+      storePath: equivalentPath,
+      providerForAccount: (accountId) => accountId === account.id ? sharedProvider : undefined,
+    });
+    expect(second.store.coordinationIdentity).toBe(first.store.coordinationIdentity);
+
+    blockVersionOne = true;
+    const creating = first.service.createDraft({
+      ...draftInput(account),
+      clientId: "shared-process-draft",
+      body: "Older body",
+    });
+    await firstStarted;
+    const original = await second.store.getDraft("test-tenant", account.id, "shared-process-draft");
+    if (!original) throw new Error("Expected the authoritative draft before provider completion");
+    const editing = second.service.updateDraft(
+      account.id,
+      original.id,
+      updateInput(original, { body: "Newer authoritative body" }),
+    );
+    const edited = await waitForDraftVersion(second.store, account.id, original.id, 2);
+    const removing = first.service.removeDraft(account.id, original.id, { version: edited.version });
+    await Promise.resolve();
+
+    expect(activeMutations).toBe(1);
+    expect(maxConcurrentMutations).toBe(1);
+    releaseFirst?.();
+    const [createdResult, editedResult] = await Promise.all([creating, editing]);
+    await removing;
+
+    expect(createdResult).toMatchObject({ version: 2, body: "Newer authoritative body" });
+    expect(editedResult).toMatchObject({ version: 2, body: "Newer authoritative body" });
+    expect(providerVersionsBeforeRemoval).toEqual([[2]]);
+    expect(maxConcurrentMutations).toBe(1);
+    expect(activeMutations).toBe(0);
+    expect(await first.providerDrafts(account.id)).toEqual([]);
+    expect(await first.store.getDraft("test-tenant", account.id, original.id)).toBeNull();
+    expect(await second.store.getDraft("test-tenant", account.id, original.id)).toBeNull();
+    second.store.close();
     first.store.close();
   });
 
@@ -712,9 +811,10 @@ describe("server-authoritative drafts", () => {
     await started;
     const stored = await harness.store.getDraft("test-tenant", account.id, "stable-edit-id");
     if (!stored) throw new Error("Expected authoritative draft before provider completion");
-    const updated = await harness.service.updateDraft(account.id, stored.id, updateInput(stored, { body: "Winning body" }));
+    const updating = harness.service.updateDraft(account.id, stored.id, updateInput(stored, { body: "Winning body" }));
+    await waitForDraftVersion(harness.store, account.id, stored.id, 2);
     releaseFirst?.();
-    const completed = await creating;
+    const [updated, completed] = await Promise.all([updating, creating]);
 
     expect(completed).toMatchObject({ version: updated.version, body: "Winning body", mirror: { status: "synced", mirroredVersion: 2 } });
     expect(await harness.providerDrafts(account.id)).toEqual([
@@ -723,7 +823,7 @@ describe("server-authoritative drafts", () => {
     harness.store.close();
   });
 
-  test("removes a late provider completion after an authoritative concurrent delete", async () => {
+  test("serializes a provider completion before an authoritative concurrent delete", async () => {
     let releaseMirror: (() => void) | undefined;
     let markStarted: (() => void) | undefined;
     const started = new Promise<void>((resolve) => { markStarted = resolve; });
@@ -737,9 +837,10 @@ describe("server-authoritative drafts", () => {
     const account = await harness.service.createAccount(testAccountInput());
     const creating = harness.service.createDraft({ ...draftInput(account), clientId: "stable-delete-id" });
     await started;
-    await harness.service.removeDraft(account.id, "stable-delete-id", { version: 1 });
+    const removing = harness.service.removeDraft(account.id, "stable-delete-id", { version: 1 });
+    await Promise.resolve();
     releaseMirror?.();
-    await creating;
+    await Promise.all([creating, removing]);
 
     expect(await harness.store.getDraft("test-tenant", account.id, "stable-delete-id")).toBeNull();
     expect(await harness.providerDrafts(account.id)).toEqual([]);
@@ -911,6 +1012,20 @@ function updateInput(draft: Draft, changes: Partial<UpdateDraftInput> = {}): Upd
     version: draft.version,
     ...changes,
   };
+}
+
+async function waitForDraftVersion(
+  store: Store,
+  accountId: string,
+  draftId: string,
+  version: number,
+): Promise<Draft> {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const draft = await store.getDraft("test-tenant", accountId, draftId);
+    if (draft?.version === version) return draft;
+    await Promise.resolve();
+  }
+  throw new Error(`Draft ${draftId} did not reach version ${version}`);
 }
 
 function temporaryStore(): string {
