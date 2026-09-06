@@ -499,7 +499,12 @@ export class ImapMailProvider implements MailProvider {
       { uid: true, flags: true, headers: providerDraftMarkerHeaders },
       { uid: true },
     );
-    if (!exact) return null;
+    if (!exact) {
+      if (await exactUidExists(client, ref.uid)) {
+        throw new Error(`IMAP could not read existing draft UID ${ref.uid}`);
+      }
+      return null;
+    }
     if (exact.uid !== ref.uid) {
       throw new Error(`IMAP returned the wrong UID while resolving draft UID ${ref.uid}`);
     }
@@ -684,7 +689,7 @@ async function retireDraftUids(client: ImapClient, uids: readonly number[]): Pro
   if (client.capabilities.has("UIDPLUS")) {
     for (const uid of uids) {
       await client.messageDelete(uid, { uid: true });
-      if (await client.fetchOne(uid, { uid: true }, { uid: true })) {
+      if (await exactUidExists(client, uid)) {
         throw new Error(`IMAP server did not confirm selective removal of draft UID ${uid}`);
       }
     }
@@ -699,6 +704,15 @@ async function retireDraftUids(client: ImapClient, uids: readonly number[]): Pro
       }
     }
   }
+}
+
+async function exactUidExists(client: ImapClient, uid: number): Promise<boolean> {
+  const result = await client.search({ uid }, { uid: true, returnOptions: ["ALL"] });
+  if (result === false) {
+    throw new Error(`IMAP server could not confirm whether draft UID ${uid} exists`);
+  }
+  if (Array.isArray(result)) return result.length > 0;
+  return newestUidsFromSequenceSet(result.all, 2).length > 0;
 }
 
 async function findDraftsMailbox(client: ImapClient): Promise<string> {

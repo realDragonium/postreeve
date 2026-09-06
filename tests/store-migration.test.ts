@@ -55,7 +55,7 @@ describe("Store migrations", () => {
     baseline.close();
 
     const pre479 = new Database(path);
-    pre479.exec("DROP TABLE draft_tombstones; DROP TABLE drafts; DELETE FROM schema_migrations WHERE version IN (479, 480, 480001, 480002);");
+    pre479.exec("DROP TABLE draft_tombstones; DROP TABLE drafts; DELETE FROM schema_migrations WHERE version IN (479, 480, 480001, 480002, 480003);");
     pre479.close();
 
     const migrated = new Store(path);
@@ -74,6 +74,7 @@ describe("Store migrations", () => {
     expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 480").get()).toEqual({ version: 480 });
     expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 480001").get()).toEqual({ version: 480001 });
     expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 480002").get()).toEqual({ version: 480002 });
+    expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 480003").get()).toEqual({ version: 480003 });
     expect((inspected.query("PRAGMA table_info('drafts')").all() as Array<{ name: string }>).map(({ name }) => name))
       .toContain("mirror_status");
     expect((inspected.query("PRAGMA table_info('drafts')").all() as Array<{ name: string }>).map(({ name }) => name))
@@ -87,6 +88,8 @@ describe("Store migrations", () => {
       .sort((left, right) => left.pk - right.pk)
       .map(({ name }) => name))
       .toEqual(["tenant_id", "account_id", "id"]);
+    expect((inspected.query("PRAGMA table_info('draft_tombstones')").all() as Array<{ name: string }>)
+      .map(({ name }) => name)).toContain("cleanup_ref");
     expect(inspected.query("PRAGMA foreign_key_check").all()).toEqual([]);
     inspected.close();
   });
@@ -123,7 +126,7 @@ describe("Store migrations", () => {
     baseline.close();
 
     const previous = new Database(path);
-    previous.exec("DROP TABLE draft_tombstones; DELETE FROM schema_migrations WHERE version = 480002;");
+    previous.exec("DROP TABLE draft_tombstones; DELETE FROM schema_migrations WHERE version IN (480002, 480003);");
     previous.close();
 
     const migrated = new Store(path);
@@ -133,6 +136,8 @@ describe("Store migrations", () => {
     const inspected = new Database(path);
     expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 480002").get())
       .toEqual({ version: 480002 });
+    expect(inspected.query("SELECT version FROM schema_migrations WHERE version = 480003").get())
+      .toEqual({ version: 480003 });
     expect(inspected.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'draft_tombstones'").get())
       .toEqual({ name: "draft_tombstones" });
     expect(inspected.query("PRAGMA foreign_key_check").all()).toEqual([]);

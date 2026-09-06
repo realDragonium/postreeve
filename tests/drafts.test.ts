@@ -1397,6 +1397,287 @@ describe("server-authoritative drafts", () => {
     harness.store.close();
   });
 
+  test("retains a completed create ref when the winning-version repair fails", async () => {
+    const path = temporaryStore();
+    let releaseCreate: (() => void) | undefined;
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+    let failRepair = true;
+    const updateRefs: ProviderDraftRef[] = [];
+    const first = await createEmptyTestHarness({
+      storePath: path,
+      rotateDraftRefOnUpdate: true,
+      onDraftUpdate: (draft, ref) => {
+        updateRefs.push(ref);
+        if (failRepair && draft.version === 2) throw new Error("provider repair unavailable");
+      },
+      onDraftMirror: async (draft) => {
+        if (draft.version !== 1) return;
+        markStarted?.();
+        await gate;
+      },
+    });
+    const account = await first.service.createAccount(testAccountInput());
+    const creating = first.service.createDraft({ ...draftInput(account), clientId: "failed-create-repair" });
+    await started;
+    const versionOne = await first.store.getDraft("test-tenant", account.id, "failed-create-repair");
+    if (!versionOne) throw new Error("Expected authoritative draft before provider completion");
+    const { version, ...content } = updateInput(versionOne, { body: "Winning version two" });
+    await first.store.updateDraft("test-tenant", account.id, versionOne.id, version, content, new Date().toISOString());
+    releaseCreate?.();
+    const failed = await creating;
+    expect(failed).toMatchObject({
+      version: 2,
+      body: "Winning version two",
+      mirror: { status: "failed", mirroredVersion: 1, ref: { kind: "imap", uid: 1 } },
+    });
+
+    const provider = first.providerForAccount(account.id);
+    if (!provider) throw new Error("Expected shared provider");
+    first.store.close();
+    failRepair = false;
+    const reopened = await createEmptyTestHarness({
+      storePath: path,
+      providerForAccount: (accountId) => accountId === account.id ? provider : undefined,
+    });
+    const repaired = await reopened.service.getDraft(account.id, versionOne.id);
+    expect(repaired).toMatchObject({
+      version: 2,
+      body: "Winning version two",
+      mirror: { status: "synced", mirroredVersion: 2, ref: { kind: "imap", uid: 2 } },
+    });
+    expect(updateRefs).toEqual([
+      expect.objectContaining({ kind: "imap", uid: 1 }),
+      expect.objectContaining({ kind: "imap", uid: 1 }),
+    ]);
+    expect(await reopened.providerDrafts(account.id)).toEqual([{
+      tenantId: "test-tenant",
+      accountId: account.id,
+      postreeveId: versionOne.id,
+      version: 2,
+      ref: expect.objectContaining({ kind: "imap", uid: 2 }),
+    }]);
+    reopened.store.close();
+  });
+
+  test("retains a completed replacement ref when the winning-version repair fails", async () => {
+    const path = temporaryStore();
+    let releaseVersionTwo: (() => void) | undefined;
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseVersionTwo = resolve; });
+    let blockVersionTwo = false;
+    let failRepair = true;
+    const updateRefs: ProviderDraftRef[] = [];
+    const first = await createEmptyTestHarness({
+      storePath: path,
+      rotateDraftRefOnUpdate: true,
+      onDraftUpdate: (draft, ref) => {
+        updateRefs.push(ref);
+        if (failRepair && draft.version === 3) throw new Error("provider repair unavailable");
+      },
+      onDraftMirror: async (draft) => {
+        if (!blockVersionTwo || draft.version !== 2) return;
+        blockVersionTwo = false;
+        markStarted?.();
+        await gate;
+      },
+    });
+    const account = await first.service.createAccount(testAccountInput());
+    const created = await first.service.createDraft({ ...draftInput(account), clientId: "failed-replacement-repair" });
+    blockVersionTwo = true;
+    const replacing = first.service.updateDraft(
+      account.id,
+      created.id,
+      updateInput(created, { body: "Provider version two" }),
+    );
+    await started;
+    const versionTwo = await first.store.getDraft("test-tenant", account.id, created.id);
+    if (!versionTwo) throw new Error("Expected version two before provider completion");
+    const { version, ...content } = updateInput(versionTwo, { body: "Winning version three" });
+    await first.store.updateDraft("test-tenant", account.id, created.id, version, content, new Date().toISOString());
+    releaseVersionTwo?.();
+    const failed = await replacing;
+    expect(failed).toMatchObject({
+      version: 3,
+      body: "Winning version three",
+      mirror: { status: "failed", mirroredVersion: 2, ref: { kind: "imap", uid: 2 } },
+    });
+
+    const provider = first.providerForAccount(account.id);
+    if (!provider) throw new Error("Expected shared provider");
+    first.store.close();
+    failRepair = false;
+    const reopened = await createEmptyTestHarness({
+      storePath: path,
+      providerForAccount: (accountId) => accountId === account.id ? provider : undefined,
+    });
+    const repaired = await reopened.service.getDraft(account.id, created.id);
+    expect(repaired).toMatchObject({
+      version: 3,
+      body: "Winning version three",
+      mirror: { status: "synced", mirroredVersion: 3, ref: { kind: "imap", uid: 3 } },
+    });
+    expect(updateRefs).toEqual([
+      expect.objectContaining({ kind: "imap", uid: 1 }),
+      expect.objectContaining({ kind: "imap", uid: 2 }),
+      expect.objectContaining({ kind: "imap", uid: 2 }),
+    ]);
+    expect(await reopened.providerDrafts(account.id)).toEqual([{
+      tenantId: "test-tenant",
+      accountId: account.id,
+      postreeveId: created.id,
+      version: 3,
+      ref: expect.objectContaining({ kind: "imap", uid: 3 }),
+    }]);
+    reopened.store.close();
+  });
+
+  test("retains a completed create ref when stale sent cleanup fails", async () => {
+    const path = temporaryStore();
+    let releaseCreate: (() => void) | undefined;
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+    let failRemoval = true;
+    const first = await createEmptyTestHarness({
+      storePath: path,
+      draftRemoveFailure: () => failRemoval ? new Error("provider cleanup unavailable") : undefined,
+      onDraftMirror: async (draft) => {
+        if (draft.version !== 1) return;
+        markStarted?.();
+        await gate;
+      },
+    });
+    const account = await first.service.createAccount(testAccountInput());
+    const creating = first.service.createDraft({ ...deliverableDraftInput(account), clientId: "failed-stale-cleanup" });
+    await started;
+    const claim = await first.store.claimDraftSend(
+      "test-tenant",
+      account.id,
+      "failed-stale-cleanup",
+      1,
+      new Date().toISOString(),
+      "stale-cleanup-send",
+    );
+    if (claim.kind !== "claimed") throw new Error("Expected a fresh claim");
+    const submittedAt = new Date().toISOString();
+    await first.store.settleDraftSend(
+      "test-tenant",
+      account.id,
+      "failed-stale-cleanup",
+      claim.draft.version,
+      {
+        id: "stale-cleanup-receipt",
+        accountId: account.id,
+        messageId: "<stale-cleanup@example.test>",
+        accepted: ["recipient@example.test"],
+        rejected: [],
+        submittedAt,
+      },
+      "stale-cleanup-send",
+    );
+    releaseCreate?.();
+    const settled = await creating;
+    expect(settled).toMatchObject({
+      version: 3,
+      delivery: { status: "sent" },
+      mirror: { status: "failed", mirroredVersion: 1, ref: { kind: "imap", uid: 1 } },
+    });
+
+    const provider = first.providerForAccount(account.id);
+    if (!provider) throw new Error("Expected shared provider");
+    first.store.close();
+    failRemoval = false;
+    const reopened = await createEmptyTestHarness({
+      storePath: path,
+      providerForAccount: (accountId) => accountId === account.id ? provider : undefined,
+    });
+    const receipt = await reopened.service.sendDraft(account.id, "failed-stale-cleanup", { version: 3 });
+    expect(receipt.id).toBe("stale-cleanup-receipt");
+    expect(await reopened.providerDrafts(account.id)).toEqual([]);
+    reopened.store.close();
+  });
+
+  for (const recovery of ["reconciliation", "deleted create replay"] as const) {
+    test(`retries a tombstoned stale-create cleanup after reopen through ${recovery}`, async () => {
+      const path = temporaryStore();
+      let releaseCreate: (() => void) | undefined;
+      let markStarted: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => { markStarted = resolve; });
+      const gate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+      let failRemoval = true;
+      const first = await createEmptyTestHarness({
+        storePath: path,
+        draftRemoveFailure: () => failRemoval ? new Error("provider cleanup unavailable") : undefined,
+        onDraftMirror: async (draft) => {
+          if (draft.version !== 1) return;
+          markStarted?.();
+          await gate;
+        },
+      });
+      const account = await first.service.createAccount(testAccountInput());
+      const clientId = `tombstoned-stale-create-${recovery}`;
+      const input = { ...draftInput(account), clientId };
+      const creating = first.service.createDraft(input);
+      await started;
+      await first.store.deleteDraft("test-tenant", account.id, clientId, 1);
+      releaseCreate?.();
+      await expect(creating).rejects.toThrow("provider cleanup unavailable");
+      expect(await first.providerDrafts(account.id)).toHaveLength(1);
+
+      const provider = first.providerForAccount(account.id);
+      if (!provider) throw new Error("Expected shared provider");
+      first.store.close();
+      failRemoval = false;
+      const reopened = await createEmptyTestHarness({
+        storePath: path,
+        providerForAccount: (accountId) => accountId === account.id ? provider : undefined,
+      });
+      if (recovery === "reconciliation") {
+        expect(await reopened.service.listDrafts(account.id)).toEqual([]);
+      } else {
+        await expect(reopened.service.createDraft(input)).rejects.toBeInstanceOf(DraftDeletedError);
+      }
+      expect(await reopened.providerDrafts(account.id)).toEqual([]);
+      await expect(reopened.service.createDraft(input)).rejects.toBeInstanceOf(DraftDeletedError);
+      reopened.store.close();
+    });
+  }
+
+  test("clears only the exact tombstone cleanup artifact and drops it with account state", async () => {
+    const store = new Store(":memory:");
+    const account = {
+      id: "cleanup-guard-account",
+      name: "Cleanup guard",
+      email: "cleanup@example.test",
+      kind: "imap" as const,
+      encryptedCredentials: null,
+    };
+    await store.insertAccount(account);
+    const draft = draftForStore(account.id, account.name, account.email, "cleanup-guard-draft");
+    await store.insertDraft("test-tenant", draft);
+    await store.deleteDraft("test-tenant", account.id, draft.id, draft.version);
+    const older = { ref: { kind: "imap", mailbox: "Drafts", uidValidity: "1", uid: 1 } as const, mirroredVersion: 1 };
+    const newer = { ref: { kind: "imap", mailbox: "Drafts", uidValidity: "1", uid: 2 } as const, mirroredVersion: 2 };
+    expect(await store.recordDraftCleanupFailure(
+      "test-tenant", account.id, draft.id, older, "older cleanup failure",
+    )).toBe(true);
+    expect(await store.recordDraftCleanupFailure(
+      "test-tenant", account.id, draft.id, newer, "newer cleanup failure",
+    )).toBe(true);
+    expect(await store.completeDraftCleanup("test-tenant", account.id, draft.id, older)).toBe(false);
+    expect(await store.getDraftCleanupArtifact("test-tenant", account.id, draft.id)).toEqual({ id: draft.id, ...newer });
+
+    expect(await store.deleteAccount(account.id)).toBe(true);
+    expect(await store.recordDraftCleanupFailure(
+      "test-tenant", account.id, draft.id, newer, "must not recreate account cleanup",
+    )).toBe(false);
+    expect(await store.getDraftCleanupArtifact("test-tenant", account.id, draft.id)).toBeNull();
+    store.close();
+  });
+
   test("serializes a provider completion before an authoritative concurrent delete", async () => {
     let releaseMirror: (() => void) | undefined;
     let markStarted: (() => void) | undefined;

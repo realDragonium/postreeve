@@ -60,6 +60,8 @@ interface FakeState {
   readonly messageDeleteSuccessWithoutRemoval: Set<number>;
   readonly omittedDraftSearchUids: Set<number>;
   readonly fetchOneFailures: Map<number, Error>;
+  readonly fetchOneFalse: Set<number>;
+  readonly exactUidSearchFailures: Set<number>;
 }
 
 const config = {
@@ -554,6 +556,13 @@ describe("Bun IMAP compatibility", () => {
       .rejects.toThrow("exact fetch unavailable");
     expect(drafts.nextUid).toBe(nextUid);
     expect(drafts.messages.has(updatedRef.uid)).toBe(true);
+
+    state.fetchOneFailures.delete(updatedRef.uid);
+    state.fetchOneFalse.add(updatedRef.uid);
+    state.exactUidSearchFailures.add(updatedRef.uid);
+    await expect(provider.updateDraft(draftScope, providerDraft(3), updatedRef))
+      .rejects.toThrow(`could not confirm whether draft UID ${updatedRef.uid} exists`);
+    expect(drafts.nextUid).toBe(nextUid);
   });
 
   test("never carries replacement UIDs into a new Drafts UIDVALIDITY generation", async () => {
@@ -1102,6 +1111,11 @@ class FakeImapClient implements ImapClient {
     const mailbox = this.#requireSelected();
     const messages = [...mailbox.messages.values()];
     if (query.all) return { all: this.#state.eSearchAll ?? messages.map((message) => message.uid).join(",") };
+    if (query.uid !== undefined) {
+      const uid = Number(query.uid);
+      if (this.#state.exactUidSearchFailures.has(uid)) return false;
+      return mailbox.messages.has(uid) ? { all: uid.toString() } : {};
+    }
     if (query.draft !== undefined || query.deleted !== undefined) {
       const matching = messages.filter((message) => {
         const flags = message.flags ?? new Set<string>();
@@ -1145,6 +1159,7 @@ class FakeImapClient implements ImapClient {
     this.#state.fetchQueries.push(query);
     const failure = this.#state.fetchOneFailures.get(sequence);
     if (failure) throw failure;
+    if (this.#state.fetchOneFalse.has(sequence)) return false;
     const message = this.#requireSelected().messages.get(sequence);
     return message ? fetchedMessage(message, query) : false;
   }
@@ -1306,6 +1321,8 @@ function fakeState(): FakeState {
     messageDeleteSuccessWithoutRemoval: new Set(),
     omittedDraftSearchUids: new Set(),
     fetchOneFailures: new Map(),
+    fetchOneFalse: new Set(),
+    exactUidSearchFailures: new Set(),
     mailboxes: new Map([
       [
         "INBOX",

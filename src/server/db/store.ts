@@ -45,6 +45,12 @@ export interface MailboxSnapshot {
   authoritative: boolean;
 }
 
+export interface DraftCleanupArtifact {
+  readonly id: string;
+  readonly ref: ProviderDraftRef;
+  readonly mirroredVersion: number;
+}
+
 export type StoredMessageLocation = CanonicalMessageObservation["location"] & {
   id: string;
   messageId: string;
@@ -195,6 +201,85 @@ export class Store {
     return row ? toDraft(row) : null;
   }
 
+  async getDraftCleanupArtifact(
+    tenantId: string,
+    accountId: string,
+    id: string,
+  ): Promise<DraftCleanupArtifact | null> {
+    const row = this.#sqlite.query(`
+      SELECT id, cleanup_ref, cleanup_version FROM draft_tombstones
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND cleanup_ref IS NOT NULL
+    `).get(tenantId, accountId, id) as DraftCleanupRow | null;
+    return row ? toDraftCleanupArtifact(row) : null;
+  }
+
+  async listDraftCleanupArtifacts(
+    tenantId: string,
+    accountId: string,
+    limit: number,
+  ): Promise<DraftCleanupArtifact[]> {
+    const rows = this.#sqlite.query(`
+      SELECT id, cleanup_ref, cleanup_version FROM draft_tombstones
+      WHERE tenant_id = ? AND account_id = ? AND cleanup_ref IS NOT NULL
+      ORDER BY deleted_at, id LIMIT ?
+    `).all(tenantId, accountId, limit) as DraftCleanupRow[];
+    return rows.map(toDraftCleanupArtifact);
+  }
+
+  async recordDraftCleanupFailure(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    completed: { readonly ref: ProviderDraftRef; readonly mirroredVersion: number },
+    error: string,
+  ): Promise<boolean> {
+    const validatedRef = providerDraftRefSchema.parse(completed.ref);
+    if (!Number.isInteger(completed.mirroredVersion) || completed.mirroredVersion < 1) {
+      throw new Error("Completed provider draft version is invalid");
+    }
+    const account = this.#sqlite.query("SELECT kind FROM accounts WHERE id = ?").get(accountId) as { kind: MailProviderKind } | null;
+    if (account && account.kind !== validatedRef.kind) {
+      throw new Error("Draft cleanup reference does not match the account provider");
+    }
+    const message = normalizeDeliveryError(error, "Provider draft cleanup failed");
+    const result = this.#sqlite.query(`
+      UPDATE draft_tombstones
+      SET cleanup_ref = ?, cleanup_version = ?, cleanup_error = ?
+      WHERE tenant_id = ? AND account_id = ? AND id = ?
+        AND (cleanup_version IS NULL OR cleanup_version <= ?)
+    `).run(
+      JSON.stringify(validatedRef),
+      completed.mirroredVersion,
+      message,
+      tenantId,
+      accountId,
+      id,
+      completed.mirroredVersion,
+    );
+    return result.changes === 1;
+  }
+
+  async completeDraftCleanup(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    completed: { readonly ref: ProviderDraftRef; readonly mirroredVersion: number },
+  ): Promise<boolean> {
+    const validatedRef = providerDraftRefSchema.parse(completed.ref);
+    const result = this.#sqlite.query(`
+      UPDATE draft_tombstones SET cleanup_ref = NULL, cleanup_version = NULL, cleanup_error = NULL
+      WHERE tenant_id = ? AND account_id = ? AND id = ?
+        AND cleanup_ref = ? AND cleanup_version = ?
+    `).run(
+      tenantId,
+      accountId,
+      id,
+      JSON.stringify(validatedRef),
+      completed.mirroredVersion,
+    );
+    return result.changes === 1;
+  }
+
   async updateDraft(
     tenantId: string,
     accountId: string,
@@ -259,8 +344,34 @@ export class Store {
     id: string,
     expectedVersion: number,
     error: string,
+    completed?: { readonly ref: ProviderDraftRef; readonly mirroredVersion: number },
   ): Promise<boolean> {
     const message = normalizeDeliveryError(error, "Provider draft mirroring failed");
+    if (completed) {
+      const validatedRef = providerDraftRefSchema.parse(completed.ref);
+      if (!Number.isInteger(completed.mirroredVersion)
+        || completed.mirroredVersion < 1
+        || completed.mirroredVersion > expectedVersion) {
+        throw new Error("Completed provider draft version is invalid");
+      }
+      const account = this.#sqlite.query("SELECT kind FROM accounts WHERE id = ?").get(accountId) as { kind: MailProviderKind } | null;
+      if (account && account.kind !== validatedRef.kind) {
+        throw new Error("Draft mirror reference does not match the account provider");
+      }
+      const result = this.#sqlite.query(`
+        UPDATE drafts SET mirror_status = 'failed', mirror_ref = ?, mirrored_version = ?, mirror_error = ?
+        WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+      `).run(
+        JSON.stringify(validatedRef),
+        completed.mirroredVersion,
+        message,
+        tenantId,
+        accountId,
+        id,
+        expectedVersion,
+      );
+      return result.changes === 1;
+    }
     const result = this.#sqlite.query(`
       UPDATE drafts SET mirror_status = 'failed', mirror_error = ?
       WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
@@ -1134,6 +1245,7 @@ export class Store {
     this.#migrateDraftMirrors();
     this.#migrateDraftAttachments();
     this.#migrateDraftTombstones();
+    this.#migrateDraftTombstoneCleanup();
     const accountsTable = this.#sqlite.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
       .get() as { sql: string } | null;
     if (accountsTable && !accountsTable.sql.includes("'gmail'")) {
@@ -1266,6 +1378,20 @@ export class Store {
         CREATE INDEX draft_tombstones_tenant_account_idx
           ON draft_tombstones(tenant_id, account_id);
         INSERT INTO schema_migrations (version, applied_at) VALUES (480002, CURRENT_TIMESTAMP);
+      `);
+    });
+    migrate();
+  }
+
+  #migrateDraftTombstoneCleanup(): void {
+    if (this.#sqlite.query("SELECT 1 FROM schema_migrations WHERE version = 480003").get()) return;
+    const migrate = this.#sqlite.transaction(() => {
+      this.#sqlite.exec(`
+        ALTER TABLE draft_tombstones ADD COLUMN cleanup_ref TEXT;
+        ALTER TABLE draft_tombstones ADD COLUMN cleanup_version INTEGER
+          CHECK (cleanup_version IS NULL OR cleanup_version > 0);
+        ALTER TABLE draft_tombstones ADD COLUMN cleanup_error TEXT;
+        INSERT INTO schema_migrations (version, applied_at) VALUES (480003, CURRENT_TIMESTAMP);
       `);
     });
     migrate();
@@ -1650,6 +1776,7 @@ export class Store {
 interface MessageRow { id: string; tenant_id: string; identity_key: string; message_id: string | null; in_reply_to: string | null; references: string; received_at: string | null; created_at: string; updated_at: string }
 interface LocationRow { id: string; message_id: string; tenant_id: string; account_id: string; provider: MailProviderKind; mailbox: string; uid_validity: string; uid: number; modseq: string | null; provider_id: string | null; read: number; flagged: number; observed_at: string }
 interface ConversationRow { id: string; tenant_id: string; created_at: string; updated_at: string }
+interface DraftCleanupRow { id: string; cleanup_ref: string | null; cleanup_version: number | null }
 interface DraftRow {
   id: string;
   tenant_id: string;
@@ -1680,6 +1807,17 @@ interface DraftRow {
 
 function normalizeDeliveryError(error: string, fallback: string): string {
   return error.trim() || fallback;
+}
+
+function toDraftCleanupArtifact(row: DraftCleanupRow): DraftCleanupArtifact {
+  if (row.cleanup_ref === null || row.cleanup_version === null) {
+    throw new Error("Draft cleanup artifact is incomplete");
+  }
+  return {
+    id: row.id,
+    ref: providerDraftRefSchema.parse(parseJson(row.cleanup_ref)),
+    mirroredVersion: row.cleanup_version,
+  };
 }
 
 function toDraft(row: DraftRow): Draft {
