@@ -288,7 +288,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       setSavedAt(draft.updatedAt);
     }, 700);
     return () => window.clearTimeout(timeout);
-  }, [attachments, bcc, body, cc, from, subject, to]);
+  }, [attachments, bcc, body, cc, effectiveMode, from, subject, to]);
 
   const mutation = useMutation({
     mutationFn: (input: Parameters<typeof api.sendMessage>[0]) => api.sendMessage(input),

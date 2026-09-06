@@ -153,6 +153,7 @@ describe("Gmail compatibility", () => {
       providerConversationId: "thread-1",
     });
     expect(receipt.id).toBe("sent-1");
+    expect(receipt.providerConversationId).toBe("thread-1");
     expect(requests.filter(({ url }) => url === "https://oauth2.googleapis.com/token")).toHaveLength(1);
     const sendBody = requests.find(({ url }) => url.endsWith("/messages/send"))?.body ?? "";
     expect(sendBody).not.toContain("Test body");
@@ -173,6 +174,45 @@ describe("Gmail compatibility", () => {
         ...extra,
       };
     }
+  });
+
+  test("returns Gmail's authoritative thread when it differs from the requested thread", async () => {
+    const request: HttpFetch = async (input) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return json({ access_token: "short-lived-access-token", expires_in: 3600 });
+      }
+      if (url.endsWith("/messages/send")) {
+        return json({ id: "sent-divergent", threadId: "returned-thread" });
+      }
+      return new Response(null, { status: 404 });
+    };
+    const client = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "stored-refresh-token" },
+      clientId: "desktop-client-id",
+      fetch: request,
+    });
+
+    const receipt = await client.send({
+      accountId: account.id,
+      to: [{ name: "Recipient", address: "recipient@example.test" }],
+      cc: [],
+      bcc: [],
+      subject: "Re: Original subject",
+      text: "Reply body.",
+      intent: { type: "reply", source: { canonicalMessageId: "source", conversationId: "conversation" } },
+    }, {
+      type: "reply",
+      sourceMessageId: "source",
+      conversationId: "conversation",
+      sourceSubject: "Original subject",
+      inReplyTo: "<source@example.test>",
+      references: ["<source@example.test>"],
+      providerConversationId: "requested-thread",
+    });
+
+    expect(receipt.providerConversationId).toBe("returned-thread");
   });
 
   test("folds long Unicode and References headers while retaining Bcc delivery", async () => {

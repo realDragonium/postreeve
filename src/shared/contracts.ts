@@ -261,6 +261,7 @@ export const sendReceiptSchema = z.object({
   id: z.string().min(1),
   accountId: accountIdSchema,
   messageId: z.string(),
+  providerConversationId: z.string().min(1).optional(),
   accepted: z.array(z.string()),
   rejected: z.array(z.string()),
   submittedAt: z.iso.datetime(),

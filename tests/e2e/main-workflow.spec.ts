@@ -346,6 +346,7 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await page.getByLabel("Subject", { exact: true }).fill("Planning decision follow-up");
   await page.getByLabel("Message", { exact: true }).fill("Replying to everyone.");
   await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByRole("heading", { name: "Message sent" })).toBeVisible();
   expect(sentMessages[2]).toMatchObject({
     cc: [{ address: "taylor@example.com" }],
     subject: "Planning decision follow-up",
@@ -358,6 +359,7 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await expect(page.getByLabel("Message", { exact: true })).toContainText("---------- Forwarded message ----------");
   await page.getByLabel("To", { exact: true }).fill("forward@example.com");
   await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByRole("heading", { name: "Message sent" })).toBeVisible();
   expect(sentMessages[3]).toMatchObject({
     to: [{ address: "forward@example.com" }],
     intent: { type: "forward" },
@@ -393,7 +395,15 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await page.getByText("Re: Legacy reply", { exact: true }).click();
   await expect(page.getByText("This local draft no longer has its source conversation.")).toBeVisible();
   await page.getByRole("button", { name: "Convert to a new message" }).click();
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("postreeve.local-drafts.v1")))
+    .toContain('"mode":"new"');
+  await page.getByRole("button", { name: "Close Edit draft" }).click();
+  await page.getByRole("button", { name: /Local drafts/ }).click();
+  await page.getByText("Re: Legacy reply", { exact: true }).click();
+  await expect(page.getByText("This local draft no longer has its source conversation.")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Send message" })).toBeEnabled();
   await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByRole("heading", { name: "Message sent" })).toBeVisible();
   expect(sentMessages[4]).toMatchObject({
     to: [{ address: "legacy-recipient@example.com" }],
     subject: "Re: Legacy reply",

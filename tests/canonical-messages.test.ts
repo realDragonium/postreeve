@@ -1055,7 +1055,7 @@ describe("canonical message persistence", () => {
     )).rejects.toThrow("no longer belongs");
   });
 
-  test("does not assign an edited-subject reply to the source Gmail thread before provider reconciliation", async () => {
+  test("records Gmail's returned thread without retaining a divergent requested thread", async () => {
     const store = await createStore();
     const sourceObservation = observation({
       messageId: "<gmail-source@example.test>",
@@ -1086,6 +1086,7 @@ describe("canonical message persistence", () => {
       id: "gmail-send-id",
       accountId: "gmail-account",
       messageId: "<gmail-outgoing@example.test>",
+      providerConversationId: "new-thread",
       accepted: ["recipient@example.test"],
       rejected: [],
       submittedAt: "2026-09-05T10:00:00.000Z",
@@ -1097,11 +1098,12 @@ describe("canonical message persistence", () => {
       sourceSubject: "Original subject",
       inReplyTo: "<gmail-source@example.test>",
       references: ["<gmail-source@example.test>"],
+      providerConversationId: "source-thread",
     });
 
     expect(await store.getProviderConversationId(
       "tenant-a", recorded.id, "gmail-account", "gmail",
-    )).toBeNull();
+    )).toBe("new-thread");
     const [observed] = await store.reconcileMailbox({
       tenantId: "tenant-a",
       accountId: "gmail-account",

@@ -38,6 +38,7 @@ import {
   MailProviderRegistry,
   toCanonicalObservation,
   type MailProvider,
+  type ProviderMessageDetail,
   type ProviderLocationMove,
   type ProviderMessageSummary,
 } from "../mail/provider";
@@ -360,19 +361,17 @@ export class PostreeveService {
       ...(parentReferences.length > 0 ? parentReferences : parentInReplyTo.length === 1 ? parentInReplyTo : []),
       inReplyTo,
     ]);
-    const sourceLocation = accountLocations[0]!;
-    const sourceReference: MessageRef = {
-      accountId: sourceLocation.accountId,
-      mailbox: sourceLocation.mailbox,
-      uidValidity: sourceLocation.uidValidity,
-      uid: sourceLocation.uid,
-      modseq: sourceLocation.modseq,
-      ...(sourceLocation.providerId ? { providerId: sourceLocation.providerId } : {}),
-    };
-    const [sourceDetail] = await this.#providers.forAccount(input.accountId)
-      .readMessages(input.accountId, [sourceReference]);
-    if (!sourceDetail) throw new Error("Conversation send source could not be read");
-    const sourceProviderConversationId = inReplyTo
+    const sourceDetail = account.kind === "gmail"
+      ? await this.#readFirstAvailableMessage(input.accountId, accountLocations.map((location) => ({
+        accountId: location.accountId,
+        mailbox: location.mailbox,
+        uidValidity: location.uidValidity,
+        uid: location.uid,
+        modseq: location.modseq,
+        ...(location.providerId ? { providerId: location.providerId } : {}),
+      })))
+      : null;
+    const sourceProviderConversationId = account.kind === "gmail" && inReplyTo
       ? await this.#store.getProviderConversationId(
         this.#context.tenantId,
         source.id,
@@ -382,6 +381,7 @@ export class PostreeveService {
       )
       : null;
     const providerConversationId = sourceProviderConversationId
+      && sourceDetail
       && input.subject === replySubject(sourceDetail.subject)
       ? sourceProviderConversationId
       : null;
@@ -389,7 +389,7 @@ export class PostreeveService {
       type: intent.type,
       sourceMessageId: source.id,
       conversationId: source.conversationId,
-      sourceSubject: sourceDetail.subject,
+      ...(sourceDetail ? { sourceSubject: sourceDetail.subject } : {}),
       ...(inReplyTo ? { inReplyTo } : {}),
       references,
       ...(providerConversationId ? { providerConversationId } : {}),
@@ -616,6 +616,22 @@ export class PostreeveService {
         warning: `Message was accepted for delivery, but its local conversation could not be updated: ${errorMessage(error)}`,
       });
     }
+  }
+
+  async #readFirstAvailableMessage(
+    accountId: string,
+    references: readonly MessageRef[],
+  ): Promise<ProviderMessageDetail> {
+    const provider = this.#providers.forAccount(accountId);
+    for (const reference of references) {
+      try {
+        const [detail] = await provider.readMessages(accountId, [reference]);
+        if (detail) return detail;
+      } catch {
+        continue;
+      }
+    }
+    throw new Error("Conversation send source could not be read from any current account location");
   }
 
   #registerStoredAccount(account: StoredAccount): void {

@@ -485,7 +485,6 @@ describe("Postreeve core workflow", () => {
       type: "reply",
       sourceMessageId: source.canonicalId,
       conversationId: source.conversationId,
-      sourceSubject: source.subject,
       inReplyTo: "<message-103@example.test>",
       references: ["<message-103@example.test>"],
     });
@@ -506,6 +505,57 @@ describe("Postreeve core workflow", () => {
         source: { canonicalMessageId: source.canonicalId, conversationId: source.conversationId },
       },
     })).rejects.toThrow("does not belong to the selected account");
+    store.close();
+  });
+
+  test("sends an SMTP reply when an earlier same-account source location is stale", async () => {
+    const { store, service, account, messages, sent, sendContexts } = await createTestHarness();
+    const source = messages[0]!;
+    await store.reconcileMailbox({
+      tenantId: "test-tenant",
+      accountId: account.id,
+      provider: "imap",
+      mailbox: "Archive",
+      observations: [{
+        tenantId: "test-tenant",
+        messageId: source.messageId,
+        inReplyTo: source.inReplyTo ?? null,
+        references: source.references ?? [],
+        location: {
+          accountId: account.id,
+          provider: "imap",
+          mailbox: "Archive",
+          uidValidity: "stale-validity",
+          uid: 1,
+          modseq: "1",
+          providerId: null,
+          read: true,
+          flagged: false,
+        },
+      }],
+      authoritative: false,
+    });
+
+    await service.sendMessage({
+      accountId: account.id,
+      to: source.from,
+      cc: [],
+      bcc: [],
+      subject: `Re: ${source.subject}`,
+      text: "Reply using canonical threading metadata.",
+      intent: {
+        type: "reply",
+        source: { canonicalMessageId: source.canonicalId, conversationId: source.conversationId },
+      },
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sendContexts[0]).toMatchObject({
+      type: "reply",
+      sourceMessageId: source.canonicalId,
+      inReplyTo: "<message-103@example.test>",
+    });
+    expect(sendContexts[0]).not.toHaveProperty("sourceSubject");
     store.close();
   });
 
@@ -536,7 +586,7 @@ describe("Postreeve core workflow", () => {
     store.close();
   });
 
-  test("does not retain a provider thread assignment when the reply subject is edited", async () => {
+  test("does not request provider threading for SMTP replies", async () => {
     const { store, service, account, messages, sendContexts } = await createTestHarness({
       readOverrides: { providerConversationId: "source-thread" },
     });
@@ -558,9 +608,9 @@ describe("Postreeve core workflow", () => {
 
     expect(sendContexts[0]).toMatchObject({
       type: "reply",
-      sourceSubject: source.subject,
       inReplyTo: "<message-103@example.test>",
     });
+    expect(sendContexts[0]).not.toHaveProperty("sourceSubject");
     expect(sendContexts[0]).not.toHaveProperty("providerConversationId");
     store.close();
   });
@@ -594,7 +644,6 @@ describe("Postreeve core workflow", () => {
       type: "reply",
       sourceMessageId: source.canonicalId,
       conversationId: source.conversationId,
-      sourceSubject: source.subject,
       references: ["<root@example.test>", "<parent@example.test>"],
     });
     expect((await service.getConversation(source.conversationId)).messages).toHaveLength(2);

@@ -613,12 +613,12 @@ export class Store {
         }
         associateThreadEdges(this.#sqlite, tenantId, row.id, [context.inReplyTo ?? null, ...context.references]);
         associateReferenceSequences(this.#sqlite, tenantId, row.id, [context.references]);
-        if (provider === "gmail" && context.providerConversationId) {
+        if (provider === "gmail" && receipt.providerConversationId) {
           this.#sqlite.query(`
             INSERT OR IGNORE INTO message_provider_conversations
               (tenant_id, account_id, provider, provider_conversation_id, message_id)
             VALUES (?, ?, ?, ?, ?)
-          `).run(tenantId, accountId, provider, context.providerConversationId, row.id);
+          `).run(tenantId, accountId, provider, receipt.providerConversationId, row.id);
         }
         this.#repairConversations(
           tenantId,

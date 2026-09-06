@@ -7,7 +7,7 @@ interface ConversationSourceContext {
 
 export type ConversationSendContext = ConversationSourceContext & ({
   readonly type: "reply" | "reply_all";
-  readonly sourceSubject: string;
+  readonly sourceSubject?: string;
   readonly inReplyTo?: string;
   readonly references: readonly string[];
   readonly providerConversationId?: string;

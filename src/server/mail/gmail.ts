@@ -56,7 +56,7 @@ const gmailMessageSchema = z.object({
   }).optional(),
   raw: z.string().optional(),
 });
-const sentMessageSchema = z.object({ id: z.string().min(1), threadId: z.string().optional() });
+const sentMessageSchema = z.object({ id: z.string().min(1), threadId: z.string().min(1).optional() });
 
 export type HttpFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -263,6 +263,7 @@ export class GmailMailClient implements MailProvider, MailSender {
         raw: toBase64Url(Buffer.from(raw, "utf8")),
         ...(reply?.inReplyTo
           && reply.providerConversationId
+          && reply.sourceSubject !== undefined
           && input.subject === replySubject(reply.sourceSubject)
           ? { threadId: reply.providerConversationId }
           : {}),
@@ -272,6 +273,7 @@ export class GmailMailClient implements MailProvider, MailSender {
       id: sent.id,
       accountId: this.#account.id,
       messageId,
+      ...(sent.threadId ? { providerConversationId: sent.threadId } : {}),
       accepted: [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address),
       rejected: [],
       submittedAt,
