@@ -699,7 +699,8 @@ async function retireDraftUids(client: ImapClient, uids: readonly number[]): Pro
     const deleted = await client.messageFlagsAdd(uid, [DELETED_FLAG], { uid: true });
     if (!deleted) {
       const current = await client.fetchOne(uid, { uid: true, flags: true }, { uid: true });
-      if (current && !hasFlag(current.flags, DELETED_FLAG)) {
+      if ((!current && await exactUidExists(client, uid))
+        || (current && !hasFlag(current.flags, DELETED_FLAG))) {
         throw new Error(`IMAP server did not confirm marking draft UID ${uid} deleted`);
       }
     }
@@ -825,7 +826,7 @@ function newestUids(uids: number[], limit: number): number[] {
 
 async function searchUids(client: ImapClient, query: SearchObject, limit: number): Promise<number[]> {
   const result = await client.search(query, { uid: true, returnOptions: ["ALL"] });
-  if (!result) return [];
+  if (result === false) throw new Error("IMAP server could not complete the UID search");
   if (Array.isArray(result)) return newestUids(result, limit);
   return newestUidsFromSequenceSet(result.all, limit);
 }

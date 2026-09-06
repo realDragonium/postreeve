@@ -13,7 +13,7 @@ import type {
 } from "../src/shared/contracts";
 import { AccountConflictError, DraftDeletedError } from "../src/server/core/errors";
 import { Store } from "../src/server/db/store";
-import type { ProviderDraft } from "../src/server/mail/provider";
+import type { MailProvider, ProviderDraft } from "../src/server/mail/provider";
 import { MailSendPreDispatchError } from "../src/server/mail/sender";
 import { DraftRecoveryConflictError, DraftSaveQueue, migrationDraftId } from "../src/web/draft-state";
 import { createEmptyTestHarness, createTestHarness, testAccountInput } from "./support/test-mail";
@@ -1534,6 +1534,183 @@ describe("server-authoritative drafts", () => {
     reopened.store.close();
   });
 
+  test("does not let an older failed repair overwrite a newer completed provider ref", async () => {
+    let releaseCreate: (() => void) | undefined;
+    let markStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const gate = new Promise<void>((resolve) => { releaseCreate = resolve; });
+    let nestedCompletion = false;
+    let provider: MailProvider | undefined;
+    let harness: Awaited<ReturnType<typeof createEmptyTestHarness>>;
+    harness = await createEmptyTestHarness({
+      rotateDraftRefOnUpdate: true,
+      onDraftUpdate: async (draft, ref) => {
+        if (draft.version !== 2 || nestedCompletion) return;
+        nestedCompletion = true;
+        if (!provider) throw new Error("Expected provider during nested completion");
+        const newerRef = await provider.updateDraft({ tenantId: "test-tenant", accountId: draft.accountId }, draft, ref);
+        await harness.store.completeDraftMirror("test-tenant", draft.accountId, draft.id, draft.version, newerRef);
+        throw new Error("older repair failed after newer completion");
+      },
+      onDraftMirror: async (draft) => {
+        if (draft.version !== 1) return;
+        markStarted?.();
+        await gate;
+      },
+    });
+    const account = await harness.service.createAccount(testAccountInput());
+    provider = harness.providerForAccount(account.id);
+    const creating = harness.service.createDraft({ ...draftInput(account), clientId: "newer-completion-wins" });
+    await started;
+    const versionOne = await harness.store.getDraft("test-tenant", account.id, "newer-completion-wins");
+    if (!versionOne) throw new Error("Expected authoritative draft before provider completion");
+    await harness.store.updateDraft(
+      "test-tenant",
+      account.id,
+      versionOne.id,
+      versionOne.version,
+      { ...contentOf(versionOne), body: "Backend version two" },
+      new Date().toISOString(),
+    );
+    releaseCreate?.();
+    const completed = await creating;
+
+    expect(completed).toMatchObject({
+      version: 2,
+      body: "Backend version two",
+      mirror: { status: "synced", mirroredVersion: 2, ref: { kind: "imap", uid: 2 } },
+    });
+    expect(await harness.providerDrafts(account.id)).toEqual([{
+      tenantId: "test-tenant",
+      accountId: account.id,
+      postreeveId: completed.id,
+      version: 2,
+      ref: expect.objectContaining({ kind: "imap", uid: 2 }),
+    }]);
+    harness.store.close();
+  });
+
+  for (const transition of ["active", "sent", "deleted"] as const) {
+    test(`retains a completed replacement after a second ${transition} backend transition`, async () => {
+      let releaseVersionTwo: (() => void) | undefined;
+      let markStarted: (() => void) | undefined;
+      const started = new Promise<void>((resolve) => { markStarted = resolve; });
+      const gate = new Promise<void>((resolve) => { releaseVersionTwo = resolve; });
+      let blockVersionTwo = false;
+      let transitionVersionThree = true;
+      let harness: Awaited<ReturnType<typeof createEmptyTestHarness>>;
+      harness = await createEmptyTestHarness({
+        rotateDraftRefOnUpdate: true,
+        onDraftUpdate: async (draft) => {
+          if (draft.version !== 3 || !transitionVersionThree) return;
+          transitionVersionThree = false;
+          if (transition === "active") {
+            await harness.store.updateDraft(
+              "test-tenant",
+              draft.accountId,
+              draft.id,
+              draft.version,
+              { ...contentOf(draft), body: "Backend version four" },
+              new Date().toISOString(),
+            );
+            return;
+          }
+          if (transition === "deleted") {
+            await harness.store.deleteDraft("test-tenant", draft.accountId, draft.id, draft.version);
+            return;
+          }
+          const claimedAt = new Date().toISOString();
+          const claim = await harness.store.claimDraftSend(
+            "test-tenant",
+            draft.accountId,
+            draft.id,
+            draft.version,
+            claimedAt,
+            "second-transition-send",
+          );
+          if (claim.kind !== "claimed") throw new Error("Expected a fresh send claim");
+          await harness.store.settleDraftSend(
+            "test-tenant",
+            draft.accountId,
+            draft.id,
+            claim.draft.version,
+            {
+              id: "second-transition-receipt",
+              accountId: draft.accountId,
+              messageId: "<second-transition@example.test>",
+              accepted: ["recipient@example.test"],
+              rejected: [],
+              submittedAt: claimedAt,
+            },
+            "second-transition-send",
+          );
+        },
+        onDraftMirror: async (draft) => {
+          if (!blockVersionTwo || draft.version !== 2) return;
+          blockVersionTwo = false;
+          markStarted?.();
+          await gate;
+        },
+      });
+      const account = await harness.service.createAccount(testAccountInput());
+      const created = await harness.service.createDraft({
+        ...(transition === "sent" ? deliverableDraftInput(account) : draftInput(account)),
+        clientId: `second-transition-${transition}`,
+      });
+      blockVersionTwo = true;
+      const replacing = harness.service.updateDraft(
+        account.id,
+        created.id,
+        updateInput(created, { body: "Provider version two" }),
+      );
+      await started;
+      const versionTwo = await harness.store.getDraft("test-tenant", account.id, created.id);
+      if (!versionTwo) throw new Error("Expected version two before provider completion");
+      await harness.store.updateDraft(
+        "test-tenant",
+        account.id,
+        created.id,
+        versionTwo.version,
+        { ...contentOf(versionTwo), body: "Backend version three" },
+        new Date().toISOString(),
+      );
+      releaseVersionTwo?.();
+
+      if (transition === "deleted") {
+        await expect(replacing).rejects.toBeInstanceOf(DraftDeletedError);
+        expect(await harness.store.getDraftCleanupArtifact("test-tenant", account.id, created.id)).toMatchObject({
+          mirroredVersion: 3,
+          ref: { kind: "imap", uid: 3 },
+        });
+        await harness.service.listDrafts(account.id);
+        expect(await harness.providerDrafts(account.id)).toEqual([]);
+        expect(await harness.store.getDraftCleanupArtifact("test-tenant", account.id, created.id)).toBeNull();
+      } else if (transition === "sent") {
+        const completed = await replacing;
+        expect(completed).toMatchObject({
+          version: 5,
+          delivery: { status: "sent" },
+          mirror: { status: "failed", mirroredVersion: 3, ref: { kind: "imap", uid: 3 } },
+        });
+        await harness.service.sendDraft(account.id, created.id, { version: completed.version });
+        expect(await harness.providerDrafts(account.id)).toEqual([]);
+      } else {
+        const completed = await replacing;
+        expect(completed).toMatchObject({
+          version: 4,
+          body: "Backend version four",
+          mirror: { status: "failed", mirroredVersion: 3, ref: { kind: "imap", uid: 3 } },
+        });
+        expect(await harness.service.getDraft(account.id, created.id)).toMatchObject({
+          version: 4,
+          body: "Backend version four",
+          mirror: { status: "synced", mirroredVersion: 4, ref: { kind: "imap", uid: 4 } },
+        });
+      }
+      harness.store.close();
+    });
+  }
+
   test("retains a completed create ref when stale sent cleanup fails", async () => {
     const path = temporaryStore();
     let releaseCreate: (() => void) | undefined;
@@ -1598,6 +1775,65 @@ describe("server-authoritative drafts", () => {
     expect(receipt.id).toBe("stale-cleanup-receipt");
     expect(await reopened.providerDrafts(account.id)).toEqual([]);
     reopened.store.close();
+  });
+
+  test("retains a sent cleanup ref when the backend row is concurrently deleted", async () => {
+    let removeStarted = false;
+    let harness: Awaited<ReturnType<typeof createEmptyTestHarness>>;
+    harness = await createEmptyTestHarness({
+      onDraftRemove: async (draftId) => {
+        if (!removeStarted) return;
+        const current = await harness.store.getDraft("test-tenant", account.id, draftId);
+        if (current) {
+          await harness.store.deleteDraft("test-tenant", account.id, draftId, current.version);
+        }
+      },
+      draftRemoveFailure: () => removeStarted ? new Error("provider cleanup unavailable") : undefined,
+    });
+    const account = await harness.service.createAccount(testAccountInput());
+    const created = await harness.service.createDraft(deliverableDraftInput(account));
+    if (!created.mirror.ref || !created.mirror.mirroredVersion) throw new Error("Expected a mirrored provider draft");
+    const claimedAt = new Date().toISOString();
+    const claim = await harness.store.claimDraftSend(
+      "test-tenant",
+      account.id,
+      created.id,
+      created.version,
+      claimedAt,
+      "deleted-sent-cleanup",
+    );
+    if (claim.kind !== "claimed") throw new Error("Expected a fresh send claim");
+    const sent = await harness.store.settleDraftSend(
+      "test-tenant",
+      account.id,
+      created.id,
+      claim.draft.version,
+      {
+        id: "deleted-sent-cleanup-receipt",
+        accountId: account.id,
+        messageId: "<deleted-sent-cleanup@example.test>",
+        accepted: ["recipient@example.test"],
+        rejected: [],
+        submittedAt: claimedAt,
+      },
+      "deleted-sent-cleanup",
+    );
+    removeStarted = true;
+
+    const receipt = await harness.service.sendDraft(account.id, created.id, { version: sent.version });
+    expect(receipt.warning).toContain("provider draft could not be removed");
+    expect(await harness.store.getDraft("test-tenant", account.id, created.id)).toBeNull();
+    expect(await harness.store.getDraftCleanupArtifact("test-tenant", account.id, created.id)).toEqual({
+      id: created.id,
+      ref: created.mirror.ref,
+      mirroredVersion: created.mirror.mirroredVersion,
+    });
+
+    removeStarted = false;
+    await harness.service.listDrafts(account.id);
+    expect(await harness.providerDrafts(account.id)).toEqual([]);
+    expect(await harness.store.getDraftCleanupArtifact("test-tenant", account.id, created.id)).toBeNull();
+    harness.store.close();
   });
 
   for (const recovery of ["reconciliation", "deleted create replay"] as const) {

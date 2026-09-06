@@ -51,6 +51,11 @@ export interface DraftCleanupArtifact {
   readonly mirroredVersion: number;
 }
 
+export type DraftMirrorArtifactRetention =
+  | { readonly kind: "draft"; readonly draft: Draft }
+  | { readonly kind: "deleted" }
+  | { readonly kind: "missing" };
+
 export type StoredMessageLocation = CanonicalMessageObservation["location"] & {
   id: string;
   messageId: string;
@@ -246,7 +251,10 @@ export class Store {
       UPDATE draft_tombstones
       SET cleanup_ref = ?, cleanup_version = ?, cleanup_error = ?
       WHERE tenant_id = ? AND account_id = ? AND id = ?
-        AND (cleanup_version IS NULL OR cleanup_version <= ?)
+        AND (
+          cleanup_version IS NULL OR cleanup_version < ?
+          OR (cleanup_version = ? AND cleanup_ref = ?)
+        )
     `).run(
       JSON.stringify(validatedRef),
       completed.mirroredVersion,
@@ -255,6 +263,8 @@ export class Store {
       accountId,
       id,
       completed.mirroredVersion,
+      completed.mirroredVersion,
+      JSON.stringify(validatedRef),
     );
     return result.changes === 1;
   }
@@ -361,6 +371,10 @@ export class Store {
       const result = this.#sqlite.query(`
         UPDATE drafts SET mirror_status = 'failed', mirror_ref = ?, mirrored_version = ?, mirror_error = ?
         WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+          AND (
+            mirror_ref IS NULL OR mirrored_version IS NULL OR mirrored_version < ?
+            OR (mirrored_version = ? AND mirror_ref = ?)
+          )
       `).run(
         JSON.stringify(validatedRef),
         completed.mirroredVersion,
@@ -369,6 +383,9 @@ export class Store {
         accountId,
         id,
         expectedVersion,
+        completed.mirroredVersion,
+        completed.mirroredVersion,
+        JSON.stringify(validatedRef),
       );
       return result.changes === 1;
     }
@@ -377,6 +394,80 @@ export class Store {
       WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
     `).run(message, tenantId, accountId, id, expectedVersion);
     return result.changes === 1;
+  }
+
+  async retainDraftMirrorArtifact(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    completed: { readonly ref: ProviderDraftRef; readonly mirroredVersion: number },
+    error: string,
+  ): Promise<DraftMirrorArtifactRetention> {
+    const validatedRef = providerDraftRefSchema.parse(completed.ref);
+    if (!Number.isInteger(completed.mirroredVersion) || completed.mirroredVersion < 1) {
+      throw new Error("Completed provider draft version is invalid");
+    }
+    const message = normalizeDeliveryError(error, "Provider draft mirroring failed");
+    const retain = this.#sqlite.transaction((): DraftMirrorArtifactRetention => {
+      const account = this.#sqlite.query("SELECT kind FROM accounts WHERE id = ?").get(accountId) as { kind: MailProviderKind } | null;
+      if (!account) return { kind: "missing" };
+      if (account.kind !== validatedRef.kind) {
+        throw new Error("Draft mirror reference does not match the account provider");
+      }
+      const row = this.#draftRow(tenantId, accountId, id);
+      if (row) {
+        if (completed.mirroredVersion > row.version) {
+          throw new Error("Completed provider draft version is newer than the backend draft");
+        }
+        this.#sqlite.query(`
+          UPDATE drafts SET mirror_status = 'failed', mirror_ref = ?, mirrored_version = ?, mirror_error = ?
+          WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+            AND (
+              mirror_ref IS NULL OR mirrored_version IS NULL OR mirrored_version < ?
+              OR (mirrored_version = ? AND mirror_ref = ?)
+            )
+        `).run(
+          JSON.stringify(validatedRef),
+          completed.mirroredVersion,
+          message,
+          tenantId,
+          accountId,
+          id,
+          row.version,
+          completed.mirroredVersion,
+          completed.mirroredVersion,
+          JSON.stringify(validatedRef),
+        );
+        const retained = this.#draftRow(tenantId, accountId, id);
+        if (!retained) throw new Error("Draft disappeared while retaining its provider artifact");
+        return { kind: "draft", draft: toDraft(retained) };
+      }
+      const tombstone = this.#sqlite.query(`
+        SELECT 1 FROM draft_tombstones WHERE tenant_id = ? AND account_id = ? AND id = ?
+      `).get(tenantId, accountId, id);
+      if (!tombstone) return { kind: "missing" };
+      this.#sqlite.query(`
+        UPDATE draft_tombstones
+        SET cleanup_ref = ?, cleanup_version = ?, cleanup_error = ?
+        WHERE tenant_id = ? AND account_id = ? AND id = ?
+          AND (
+            cleanup_version IS NULL OR cleanup_version < ?
+            OR (cleanup_version = ? AND cleanup_ref = ?)
+          )
+      `).run(
+        JSON.stringify(validatedRef),
+        completed.mirroredVersion,
+        message,
+        tenantId,
+        accountId,
+        id,
+        completed.mirroredVersion,
+        completed.mirroredVersion,
+        JSON.stringify(validatedRef),
+      );
+      return { kind: "deleted" };
+    });
+    return retain.immediate();
   }
 
   async deleteDraft(tenantId: string, accountId: string, id: string, expectedVersion: number): Promise<void> {

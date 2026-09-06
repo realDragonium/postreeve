@@ -62,6 +62,8 @@ interface FakeState {
   readonly fetchOneFailures: Map<number, Error>;
   readonly fetchOneFalse: Set<number>;
   readonly exactUidSearchFailures: Set<number>;
+  broadSearchFailures: number;
+  readonly messageFlagAddFalseWithUnreadableUid: Set<number>;
 }
 
 const config = {
@@ -630,6 +632,45 @@ describe("Bun IMAP compatibility", () => {
     expect(drafts.messages.get(ref.uid)?.flags).toContain("\\Deleted");
   });
 
+  test("rejects failed broad draft discovery without acknowledging provider removal", async () => {
+    const state = fakeState();
+    const drafts = state.mailboxes.get("Drafts");
+    if (!drafts) throw new Error("Expected special-use Drafts mailbox");
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const draft = providerDraft(1);
+    const ref = await provider.createDraft(draftScope, draft);
+    state.broadSearchFailures = 1;
+
+    await expect(provider.removeDraft(draftScope, draft.id, ref))
+      .rejects.toThrow("could not complete the UID search");
+    expect(drafts.messages.size).toBe(1);
+    expect(state.messageDeletes).toEqual([]);
+    expect(state.flagAdds).toEqual([]);
+  });
+
+  test("rejects an unreadable non-UIDPLUS flag failure while the exact UID still exists", async () => {
+    const state = fakeState();
+    const drafts = state.mailboxes.get("Drafts");
+    if (!drafts) throw new Error("Expected special-use Drafts mailbox");
+    const factory: ImapClientFactory = (options) => {
+      state.options.push(options);
+      const client = new FakeImapClient(state);
+      client.capabilities.delete("UIDPLUS");
+      return client;
+    };
+    const provider = new ImapMailProvider(config, factory);
+    const draft = providerDraft(1);
+    const ref = await provider.createDraft(draftScope, draft);
+    if (ref.kind !== "imap") throw new Error("Expected IMAP ref");
+    state.messageFlagAddFalseWithUnreadableUid.add(ref.uid);
+
+    await expect(provider.removeDraft(draftScope, draft.id, ref))
+      .rejects.toThrow(`did not confirm marking draft UID ${ref.uid} deleted`);
+    expect(drafts.messages.has(ref.uid)).toBe(true);
+    expect(drafts.messages.get(ref.uid)?.flags).not.toContain("\\Deleted");
+    expect(state.messageDeletes).toEqual([]);
+  });
+
   test("reconciles drafts without UIDPLUS by marking only managed UIDs deleted", async () => {
     const state = fakeState();
     const draftsMailbox = state.mailboxes.get("Drafts");
@@ -1110,6 +1151,10 @@ class FakeImapClient implements ImapClient {
     this.#state.searchOptions.push(options);
     const mailbox = this.#requireSelected();
     const messages = [...mailbox.messages.values()];
+    if (query.uid === undefined && this.#state.broadSearchFailures > 0) {
+      this.#state.broadSearchFailures -= 1;
+      return false;
+    }
     if (query.all) return { all: this.#state.eSearchAll ?? messages.map((message) => message.uid).join(",") };
     if (query.uid !== undefined) {
       const uid = Number(query.uid);
@@ -1170,6 +1215,10 @@ class FakeImapClient implements ImapClient {
     options?: StoreOptions,
   ): Promise<boolean> {
     this.#state.flagAdds.push({ uid: range, flags: [...flags], options: options ?? {} });
+    if (this.#state.messageFlagAddFalseWithUnreadableUid.has(range)) {
+      this.#state.fetchOneFalse.add(range);
+      return false;
+    }
     return this.#changeFlags(range, flags, true, options);
   }
 
@@ -1323,6 +1372,8 @@ function fakeState(): FakeState {
     fetchOneFailures: new Map(),
     fetchOneFalse: new Set(),
     exactUidSearchFailures: new Set(),
+    broadSearchFailures: 0,
+    messageFlagAddFalseWithUnreadableUid: new Set(),
     mailboxes: new Map([
       [
         "INBOX",
