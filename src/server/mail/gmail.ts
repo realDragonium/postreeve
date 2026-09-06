@@ -1,13 +1,15 @@
 import { simpleParser, type EmailAddress, type ParsedMail } from "mailparser";
+import MailComposer from "nodemailer/lib/mail-composer";
 import { z, type ZodType } from "zod";
-import type {
-  Account,
-  Folder,
-  MessageRef,
-  OutboundAddress,
-  SendMessageInput,
-  SendReceipt,
-  TriageAction,
+import {
+  sendMessageInputSchema,
+  sendReceiptSchema,
+  type Account,
+  type Folder,
+  type MessageRef,
+  type SendMessageInput,
+  type SendReceipt,
+  type TriageAction,
 } from "../../shared/contracts";
 import type { GmailAccountCredentials } from "../security/credentials";
 import type {
@@ -19,7 +21,7 @@ import type {
   ProviderMessageSummary,
 } from "./provider";
 import { normalizeIdentificationFields, normalizeReferenceSequences } from "./message-id";
-import type { MailSender } from "./sender";
+import type { ConversationSendContext, MailSender } from "./sender";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -54,7 +56,7 @@ const gmailMessageSchema = z.object({
   }).optional(),
   raw: z.string().optional(),
 });
-const sentMessageSchema = z.object({ id: z.string().min(1), threadId: z.string().optional() });
+const sentMessageSchema = z.object({ id: z.string().min(1), threadId: z.string().min(1).optional() });
 
 export type HttpFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -248,23 +250,34 @@ export class GmailMailClient implements MailProvider, MailSender {
     }
   }
 
-  async send(input: SendMessageInput): Promise<SendReceipt> {
+  async send(rawInput: SendMessageInput, context?: ConversationSendContext): Promise<SendReceipt> {
+    const input = sendMessageInputSchema.parse(rawInput);
     this.#assertAccount(input.accountId);
+    const reply = context?.type === "reply" || context?.type === "reply_all" ? context : undefined;
     const submittedAt = new Date().toISOString();
     const messageId = `<${crypto.randomUUID()}@postreeve.local>`;
-    const raw = buildMessage(this.#account, input, messageId, submittedAt);
+    const raw = await buildMessage(this.#account, input, messageId, submittedAt, reply);
     const sent = await this.#request("/messages/send", sentMessageSchema, {
       method: "POST",
-      body: JSON.stringify({ raw: toBase64Url(Buffer.from(raw, "utf8")) }),
+      body: JSON.stringify({
+        raw: toBase64Url(Buffer.from(raw, "utf8")),
+        ...(reply?.inReplyTo
+          && reply.providerConversationId
+          && reply.sourceSubject !== undefined
+          && input.subject === replySubject(reply.sourceSubject)
+          ? { threadId: reply.providerConversationId }
+          : {}),
+      }),
     });
-    return {
+    return sendReceiptSchema.parse({
       id: sent.id,
       accountId: this.#account.id,
       messageId,
+      ...(sent.threadId ? { providerConversationId: sent.threadId } : {}),
       accepted: [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address),
       rejected: [],
       submittedAt,
-    };
+    });
   }
 
   async #listPage(mailbox: string, query: string, limit: number): Promise<MailboxPage> {
@@ -280,7 +293,7 @@ export class GmailMailClient implements MailProvider, MailSender {
     const listed = await this.#request(`/messages?${params.toString()}`, messageListSchema);
     const messages = await Promise.all(listed.messages.map(({ id }) => {
       const metadata = new URLSearchParams({ format: "metadata" });
-      for (const header of ["Subject", "From", "To", "Cc", "Delivered-To", "Message-ID", "In-Reply-To", "References", "Date"]) {
+      for (const header of ["Subject", "From", "Reply-To", "To", "Cc", "Delivered-To", "Message-ID", "In-Reply-To", "References", "Date"]) {
         metadata.append("metadataHeaders", header);
       }
       return this.#request(`/messages/${encodeURIComponent(id)}?${metadata.toString()}`, gmailMessageSchema);
@@ -413,12 +426,13 @@ function toSummary(accountId: string, mailbox: string, message: z.infer<typeof g
   return {
     ...(message.threadId ? { providerConversationId: message.threadId } : {}),
     ref: toReference(accountId, mailbox, message),
-    messageId: identification.messageId ?? (identification.messageIdPresent ? "" : message.id),
+    messageId: identification.messageId ?? "",
     inReplyTo: identification.inReplyTo,
     references: identification.references,
     referenceSequences: normalizeReferenceSequences(rawReferences),
     subject: headers.get("subject") ?? "(no subject)",
     from: parseAddresses(headers.get("from")),
+    replyTo: parseAddresses(headers.get("reply-to")),
     to: parseAddresses(headers.get("to")),
     cc: parseAddresses(headers.get("cc")),
     deliveredTo: parseAddresses(headers.get("delivered-to")).map(({ address }) => address).filter(isEmail),
@@ -442,6 +456,7 @@ function toDetail(
       headers: [
         ...optionalHeader("Subject", parsed.subject),
         ...optionalHeader("From", parsed.from?.text),
+        ...optionalHeader("Reply-To", addressText(parsed.replyTo)),
         ...optionalHeader("To", addressText(parsed.to)),
         ...optionalHeader("Cc", addressText(parsed.cc)),
         ...optionalHeader("Delivered-To", headerString(parsed, "delivered-to")),
@@ -453,6 +468,7 @@ function toDetail(
   return {
     ...summary,
     from: flattenAddresses(parsed.from).map(toAddress),
+    replyTo: flattenAddresses(parsed.replyTo).map(toAddress),
     to: flattenAddresses(parsed.to).map(toAddress),
     cc: flattenAddresses(parsed.cc).map(toAddress),
     text: parsed.text ?? "",
@@ -558,29 +574,36 @@ function isEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
-function buildMessage(account: Account, input: SendMessageInput, messageId: string, submittedAt: string): string {
-  const headers = [
-    `From: ${formatAddress({ name: account.name, address: account.email })}`,
-    `To: ${input.to.map(formatAddress).join(", ")}`,
-    ...(input.cc.length ? [`Cc: ${input.cc.map(formatAddress).join(", ")}`] : []),
-    ...(input.bcc.length ? [`Bcc: ${input.bcc.map(formatAddress).join(", ")}`] : []),
-    `Subject: ${encodeHeader(input.subject)}`,
-    `Message-ID: ${messageId}`,
-    `Date: ${new Date(submittedAt).toUTCString()}`,
-    "MIME-Version: 1.0",
-    "Content-Type: text/plain; charset=UTF-8",
-    "Content-Transfer-Encoding: base64",
-  ];
-  return `${headers.join("\r\n")}\r\n\r\n${Buffer.from(input.text, "utf8").toString("base64").replace(/.{1,76}/g, "$&\r\n")}`;
+function replySubject(subject: string): string {
+  return /^re:/i.test(subject) ? subject : `Re: ${subject}`;
 }
 
-function formatAddress(address: OutboundAddress): string {
-  const name = address.name.trim();
-  return name ? `${encodeHeader(name)} <${address.address}>` : address.address;
-}
-
-function encodeHeader(value: string): string {
-  return /^[\x20-\x7E]*$/.test(value) ? value.replace(/[\r\n]/g, " ") : `=?UTF-8?B?${Buffer.from(value.replace(/[\r\n]/g, " "), "utf8").toString("base64")}?=`;
+async function buildMessage(
+  account: Account,
+  input: SendMessageInput,
+  messageId: string,
+  submittedAt: string,
+  context?: Extract<ConversationSendContext, { type: "reply" | "reply_all" }>,
+): Promise<string> {
+  const recipients = [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address);
+  const message = new MailComposer({
+    from: { name: account.name, address: account.email },
+    to: input.to,
+    cc: input.cc,
+    bcc: input.bcc,
+    envelope: { from: account.email, to: recipients },
+    subject: input.subject.replace(/[\r\n]/g, " "),
+    text: input.text,
+    textEncoding: "base64",
+    messageId,
+    date: new Date(submittedAt),
+    ...(context?.inReplyTo ? { inReplyTo: context.inReplyTo } : {}),
+    ...(context && context.references.length > 0 ? { references: [...context.references] } : {}),
+    disableFileAccess: true,
+    disableUrlAccess: true,
+  }).compile();
+  message.keepBcc = true;
+  return (await message.build()).toString("utf8");
 }
 
 function toBase64Url(value: Buffer): string {

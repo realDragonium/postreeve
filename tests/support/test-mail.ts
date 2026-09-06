@@ -17,9 +17,14 @@ import {
   type AppliedMailAction,
   type MailboxPage,
   type MailProvider,
+  type ProviderMessageDetail,
   type ProviderLocationMove,
 } from "../../src/server/mail/provider";
-import { MailSenderRegistry, type MailSender } from "../../src/server/mail/sender";
+import {
+  MailSenderRegistry,
+  type ConversationSendContext,
+  type MailSender,
+} from "../../src/server/mail/sender";
 import { CredentialVault } from "../../src/server/security/credentials";
 import type { ImapAccountCredentials } from "../../src/server/security/credentials";
 
@@ -54,7 +59,12 @@ interface TestHarnessOptions {
   duplicateDelivery?: boolean;
   archiveDelivery?: boolean;
   missingMessageId?: boolean;
-  readOverrides?: Partial<MessageDetail>;
+  sourceThreading?: {
+    messageId: string;
+    inReplyTo: string | null;
+    references: string[];
+  };
+  readOverrides?: Partial<ProviderMessageDetail>;
 }
 
 export async function createTestHarness(options: TestHarnessOptions = {}) {
@@ -68,6 +78,7 @@ export async function createTestHarness(options: TestHarnessOptions = {}) {
 export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
   const store = new Store(":memory:");
   const sent: SendMessageInput[] = [];
+  const sendContexts: Array<ConversationSendContext | undefined> = [];
   const connections: ImapAccountCredentials[] = [];
   const providers = new Map<string, TestMailProvider>();
   const service = new PostreeveService(
@@ -83,6 +94,7 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
         options.duplicateDelivery ?? false,
         options.archiveDelivery ?? false,
         options.missingMessageId ?? false,
+        options.sourceThreading,
         options.readOverrides ?? {},
       );
       providers.set(accountId, provider);
@@ -90,14 +102,15 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
     },
     (account, credentials) => {
       connections.push(structuredClone(credentials));
-      return new TestMailSender(account.id, async (input, receipt) => {
+      return new TestMailSender(account.id, async (input, receipt, context) => {
         sent.push(structuredClone(input));
-        providers.get(account.id)?.appendSent(input, receipt.messageId, receipt.submittedAt);
+        sendContexts.push(context ? structuredClone(context) : undefined);
+        providers.get(account.id)?.appendSent(input, receipt.messageId, receipt.submittedAt, context);
       }, options.smtpFailure);
     },
   );
   await service.initialize();
-  return { store, service, sent, connections };
+  return { store, service, sent, sendContexts, connections };
 }
 
 class TestMailProvider implements MailProvider {
@@ -111,7 +124,7 @@ class TestMailProvider implements MailProvider {
   ]);
   readonly #verificationFailure: Error | undefined;
   readonly #moveChangesUid: boolean;
-  readonly #readOverrides: Partial<MessageDetail>;
+  readonly #readOverrides: Partial<ProviderMessageDetail>;
 
   constructor(
     accountId: string,
@@ -119,7 +132,8 @@ class TestMailProvider implements MailProvider {
     duplicateDelivery: boolean,
     archiveDelivery: boolean,
     missingMessageId: boolean,
-    readOverrides: Partial<MessageDetail>,
+    sourceThreading: TestHarnessOptions["sourceThreading"],
+    readOverrides: Partial<ProviderMessageDetail>,
   ) {
     this.#accountId = accountId;
     this.#messages = testMessages(accountId, duplicateDelivery, archiveDelivery);
@@ -129,6 +143,11 @@ class TestMailProvider implements MailProvider {
       this.#messages[0]!.messageId = "missing-message-id";
       this.#messages[0]!.inReplyTo = "<parent@example.test>";
       this.#messages[0]!.references = ["<root@example.test>", "<parent@example.test>"];
+    }
+    if (sourceThreading) {
+      this.#messages[0]!.messageId = sourceThreading.messageId;
+      this.#messages[0]!.inReplyTo = sourceThreading.inReplyTo;
+      this.#messages[0]!.references = [...sourceThreading.references];
     }
     this.#verificationFailure = verificationFailure;
   }
@@ -250,13 +269,17 @@ class TestMailProvider implements MailProvider {
       : null;
   }
 
-  appendSent(input: SendMessageInput, messageId: string, sentAt: string): void {
+  appendSent(input: SendMessageInput, messageId: string, sentAt: string, context?: ConversationSendContext): void {
     const uid = Math.max(0, ...this.#messages.map((message) => message.ref.uid)) + 1;
     const ref: MessageRef = { accountId: this.#accountId, mailbox: "Sent", uidValidity, uid, modseq: "1" };
     this.#messages.push({
       ref,
       mailbox: "Sent",
       messageId,
+      ...(context?.type === "reply" || context?.type === "reply_all" ? {
+        inReplyTo: context.inReplyTo,
+        references: [...context.references],
+      } : {}),
       subject: input.subject,
       from: [{ name: "Test user", address: "person@example.test" }],
       to: input.to,
@@ -288,12 +311,16 @@ class TestMailProvider implements MailProvider {
 
 class TestMailSender implements MailSender {
   readonly #accountId: string;
-  readonly #onSent: (input: SendMessageInput, receipt: SendReceipt) => void | Promise<void>;
+  readonly #onSent: (
+    input: SendMessageInput,
+    receipt: SendReceipt,
+    context?: ConversationSendContext,
+  ) => void | Promise<void>;
   readonly #verificationFailure: Error | undefined;
 
   constructor(
     accountId: string,
-    onSent: (input: SendMessageInput, receipt: SendReceipt) => void | Promise<void>,
+    onSent: (input: SendMessageInput, receipt: SendReceipt, context?: ConversationSendContext) => void | Promise<void>,
     verificationFailure?: Error,
   ) {
     this.#accountId = accountId;
@@ -305,7 +332,7 @@ class TestMailSender implements MailSender {
     if (this.#verificationFailure) throw this.#verificationFailure;
   }
 
-  async send(rawInput: SendMessageInput): Promise<SendReceipt> {
+  async send(rawInput: SendMessageInput, context?: ConversationSendContext): Promise<SendReceipt> {
     const input = sendMessageInputSchema.parse(rawInput);
     if (input.accountId !== this.#accountId) throw new Error("Account isolation violation");
     const id = crypto.randomUUID();
@@ -317,7 +344,7 @@ class TestMailSender implements MailSender {
       rejected: [],
       submittedAt: new Date().toISOString(),
     });
-    await this.#onSent(input, receipt);
+    await this.#onSent(input, receipt, context);
     return receipt;
   }
 }

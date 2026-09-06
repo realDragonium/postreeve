@@ -1,10 +1,10 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   Account,
+  CanonicalMessageDetail,
   CreateAccountInput,
   Folder,
-  MessageDetail,
   OutboundAddress,
   SendReceipt,
   UpdateAccountInput,
@@ -22,7 +22,7 @@ import type { ComposeMode, LocalAttachment, LocalDraft, LocalIdentity } from "./
 export interface ComposeIntent {
   readonly mode: ComposeMode;
   readonly draft?: LocalDraft;
-  readonly message?: MessageDetail;
+  readonly message?: CanonicalMessageDetail;
 }
 
 export function Sheet({ title, meta, onClose, children, footer, onSubmit }: {
@@ -227,11 +227,28 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   const queryClient = useQueryClient();
   const source = intent.message;
   const saved = intent.draft;
-  const effectiveMode = saved?.mode ?? intent.mode;
+  const [effectiveMode, setEffectiveMode] = useState<ComposeMode>(saved?.mode ?? intent.mode);
+  const conversationMode = effectiveMode === "reply" || effectiveMode === "reply_all" || effectiveMode === "forward";
+  const conversationSource = saved?.source ?? (source ? {
+    canonicalMessageId: source.canonicalId,
+    conversationId: source.conversationId,
+    ...(source.providerConversationId ? { providerConversationId: source.providerConversationId } : {}),
+  } : undefined);
+  const ownAddresses = new Set([account.email.toLowerCase()]);
+  const replyRecipients = source
+    ? (source.replyTo?.length ? source.replyTo : source.from)
+      .filter(({ address }) => !ownAddresses.has(address.toLowerCase()))
+    : [];
+  if (source && replyRecipients.length === 0) {
+    replyRecipients.push(...source.to.filter(({ address }) => !ownAddresses.has(address.toLowerCase())));
+  }
+  const replyRecipientAddresses = new Set(replyRecipients.map(({ address }) => address.toLowerCase()));
   const replyAllCc = source
     ? [...source.to, ...(source.cc ?? [])]
       .map(({ address }) => address)
-      .filter((address, index, all) => address.toLowerCase() !== account.email.toLowerCase() && all.indexOf(address) === index)
+      .filter((address, index, all) => !ownAddresses.has(address.toLowerCase())
+        && !replyRecipientAddresses.has(address.toLowerCase())
+        && all.findIndex((candidate) => candidate.toLowerCase() === address.toLowerCase()) === index)
       .join(", ")
     : "";
   const initialBody = source
@@ -241,7 +258,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     : "";
   const [draftId] = useState(() => saved?.id ?? crypto.randomUUID());
   const [from, setFrom] = useState(saved?.from ?? account.email);
-  const [to, setTo] = useState(saved?.to ?? (source && effectiveMode !== "forward" ? addressList(source.from) : ""));
+  const [to, setTo] = useState(saved?.to ?? (source && effectiveMode !== "forward" ? addressList(replyRecipients) : ""));
   const [cc, setCc] = useState(saved?.cc ?? (effectiveMode === "reply_all" ? replyAllCc : ""));
   const [bcc, setBcc] = useState(saved?.bcc ?? "");
   const [subject, setSubject] = useState(saved?.subject ?? (source ? effectiveMode === "forward" ? forwardSubject(source.subject) : replySubject(source.subject) : ""));
@@ -250,27 +267,35 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   const [validationError, setValidationError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<SendReceipt | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(saved?.updatedAt ?? null);
-  const backendPending = effectiveMode === "reply" || effectiveMode === "reply_all" || effectiveMode === "forward" || from !== account.email || attachments.length > 0;
+  const autosaveTimeout = useRef<number | null>(null);
+  const autosaveSuppressed = useRef(false);
+  const backendPending = from !== account.email || attachments.length > 0 || (conversationMode && !conversationSource);
 
   function currentDraft(): LocalDraft {
     return {
       id: draftId,
       accountId: account.id,
       mode: effectiveMode === "draft" ? "new" : effectiveMode,
+      ...(conversationSource ? { source: conversationSource } : {}),
       from, to, cc, bcc, subject, body, attachments,
       updatedAt: new Date().toISOString(),
     };
   }
 
   useEffect(() => {
+    if (autosaveSuppressed.current) return;
     if (![to, cc, bcc, subject, body].some((value) => value.trim()) && attachments.length === 0) return;
     const timeout = window.setTimeout(() => {
       const draft = currentDraft();
       onSaveDraft(draft);
       setSavedAt(draft.updatedAt);
     }, 700);
-    return () => window.clearTimeout(timeout);
-  }, [attachments, bcc, body, cc, from, subject, to]);
+    autosaveTimeout.current = timeout;
+    return () => {
+      window.clearTimeout(timeout);
+      if (autosaveTimeout.current === timeout) autosaveTimeout.current = null;
+    };
+  }, [attachments, bcc, body, cc, effectiveMode, from, subject, to]);
 
   const mutation = useMutation({
     mutationFn: (input: Parameters<typeof api.sendMessage>[0]) => api.sendMessage(input),
@@ -279,8 +304,18 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       onSent(draftId);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["messages"] }),
+        queryClient.invalidateQueries({ queryKey: ["message"] }),
+        ...(conversationSource
+          ? [queryClient.invalidateQueries({ queryKey: ["conversation", conversationSource.conversationId] })]
+          : []),
         queryClient.invalidateQueries({ queryKey: ["folders", account.id] }),
       ]);
+    },
+    onError: () => {
+      autosaveSuppressed.current = false;
+      const draft = currentDraft();
+      onSaveDraft(draft);
+      setSavedAt(draft.updatedAt);
     },
   });
 
@@ -299,7 +334,22 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       return;
     }
     setValidationError(null);
-    mutation.mutate({ accountId: account.id, to: toAddresses, cc: ccAddresses, bcc: bccAddresses, subject, text: body });
+    autosaveSuppressed.current = true;
+    if (autosaveTimeout.current !== null) {
+      window.clearTimeout(autosaveTimeout.current);
+      autosaveTimeout.current = null;
+    }
+    mutation.mutate({
+      accountId: account.id,
+      to: toAddresses,
+      cc: ccAddresses,
+      bcc: bccAddresses,
+      subject,
+      text: body,
+      intent: conversationMode && conversationSource
+        ? { type: effectiveMode, source: conversationSource }
+        : { type: "new" },
+    });
   }
 
   const modeLabel = effectiveMode === "reply_all" ? "Reply all"
@@ -311,6 +361,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     return <Sheet title="Message sent" meta={account.email} onClose={onClose} footer={<button className="btn push" onClick={onClose}>Done</button>}>
       <p className="t-body" style={{ margin: 0 }}>Accepted for delivery to {receipt.accepted.length} recipient{receipt.accepted.length === 1 ? "" : "s"}.</p>
       {receipt.rejected.length ? <div className="alert error">Rejected: {receipt.rejected.join(", ")}</div> : null}
+      {receipt.warning ? <div className="alert">{receipt.warning}</div> : null}
     </Sheet>;
   }
 
@@ -348,7 +399,9 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       <span className="t-body">{attachment.name}</span><span className="t-dim">{Math.max(1, Math.round(attachment.size / 1024))} KB</span>
       <button type="button" className="btn-danger" style={{ marginLeft: "auto" }} aria-label={`Remove ${attachment.name}`} onClick={() => setAttachments((current) => current.filter((_, candidate) => candidate !== index))}>Remove</button>
     </div>)}
-    {backendPending ? <div className="alert"><strong>Frontend ready, backend pending.</strong> Thread headers, alternate From identities, and attachment delivery are blocked until the mail layer supports them.</div> : null}
+    {backendPending ? <div className="alert"><strong>Sending is unavailable.</strong>{conversationMode && !conversationSource
+      ? <> This local draft no longer has its source conversation. <button type="button" className="btn-underline" onClick={() => setEffectiveMode("new")}>Convert to a new message</button></>
+      : null}{from !== account.email ? " Alternate From identities are not supported yet." : ""}{attachments.length > 0 ? " Attachment delivery is not supported yet." : ""}</div> : null}
     {validationError ? <div className="alert error">{validationError}</div> : null}
     {mutation.isError ? <div className="alert error">{mutation.error.message}</div> : null}
   </Sheet>;

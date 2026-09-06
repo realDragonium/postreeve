@@ -69,6 +69,7 @@ export const messageSummarySchema = z.object({
   references: z.array(z.string()).optional(),
   subject: z.string(),
   from: z.array(messageAddressSchema),
+  replyTo: z.array(messageAddressSchema).optional(),
   to: z.array(messageAddressSchema),
   cc: z.array(messageAddressSchema).optional(),
   deliveredTo: z.array(z.email()).optional(),
@@ -125,6 +126,7 @@ export const messageDetailSchema = messageSummarySchema.extend({
 export const canonicalMessageDetailSchema = messageDetailSchema.required({ canonicalId: true }).extend({
   canonicalAliases: z.array(z.string().min(1)).default([]),
   conversationId: z.string().min(1),
+  providerConversationId: z.string().min(1).optional(),
 });
 
 export const canonicalConversationSchema = z.object({
@@ -232,6 +234,19 @@ export const updateAccountInputSchema = accountSettingsSchema.omit({ id: true, k
 
 export const connectionTestResultSchema = z.object({ ok: z.literal(true) });
 
+export const conversationSendSourceSchema = z.object({
+  canonicalMessageId: z.string().min(1),
+  conversationId: z.string().min(1),
+  providerConversationId: z.string().min(1).optional(),
+});
+
+export const sendMessageIntentSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("new") }),
+  z.object({ type: z.literal("reply"), source: conversationSendSourceSchema }),
+  z.object({ type: z.literal("reply_all"), source: conversationSendSourceSchema }),
+  z.object({ type: z.literal("forward"), source: conversationSendSourceSchema }),
+]);
+
 export const sendMessageInputSchema = z.object({
   accountId: accountIdSchema,
   to: z.array(outboundAddressSchema).min(1).max(100),
@@ -239,15 +254,18 @@ export const sendMessageInputSchema = z.object({
   bcc: z.array(outboundAddressSchema).max(100).default([]),
   subject: z.string().max(998),
   text: z.string().min(1).max(2_000_000),
+  intent: sendMessageIntentSchema.optional(),
 });
 
 export const sendReceiptSchema = z.object({
   id: z.string().min(1),
   accountId: accountIdSchema,
   messageId: z.string(),
+  providerConversationId: z.string().min(1).optional(),
   accepted: z.array(z.string()),
   rejected: z.array(z.string()),
   submittedAt: z.iso.datetime(),
+  warning: z.string().min(1).optional(),
 });
 
 export const directActionInputSchema = z.object({
@@ -303,6 +321,8 @@ export type AccountSettings = z.infer<typeof accountSettingsSchema>;
 export type UpdateAccountInput = z.infer<typeof updateAccountInputSchema>;
 export type ConnectionTestResult = z.infer<typeof connectionTestResultSchema>;
 export type OutboundAddress = z.infer<typeof outboundAddressSchema>;
+export type ConversationSendSource = z.infer<typeof conversationSendSourceSchema>;
+export type SendMessageIntent = z.infer<typeof sendMessageIntentSchema>;
 export type SendMessageInput = z.infer<typeof sendMessageInputSchema>;
 export type SendReceipt = z.infer<typeof sendReceiptSchema>;
 export type DirectActionInput = z.infer<typeof directActionInputSchema>;

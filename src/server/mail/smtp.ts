@@ -9,7 +9,7 @@ import {
   type SendMessageInput,
   type SendReceipt,
 } from "../../shared/contracts";
-import type { MailSender } from "./sender";
+import type { ConversationSendContext, MailSender } from "./sender";
 
 const smtpAccountConfigSchema = z.object({
   accountId: z.string().min(1),
@@ -75,9 +75,10 @@ export class SmtpMailSender implements MailSender {
     if (!verified) throw new Error("SMTP server rejected the connection");
   }
 
-  async send(rawInput: SendMessageInput): Promise<SendReceipt> {
+  async send(rawInput: SendMessageInput, context?: ConversationSendContext): Promise<SendReceipt> {
     const input = sendMessageInputSchema.parse(rawInput);
     this.#assertAccount(input.accountId);
+    const reply = context?.type === "reply" || context?.type === "reply_all" ? context : undefined;
 
     const result = await this.#transport.sendMail({
       from: { name: this.#config.fromName, address: this.#config.fromAddress },
@@ -86,6 +87,8 @@ export class SmtpMailSender implements MailSender {
       bcc: input.bcc,
       subject: input.subject,
       text: input.text,
+      ...(reply?.inReplyTo ? { inReplyTo: reply.inReplyTo } : {}),
+      ...(reply && reply.references.length > 0 ? { references: [...reply.references] } : {}),
       disableFileAccess: true,
       disableUrlAccess: true,
     });

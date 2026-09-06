@@ -621,6 +621,7 @@ function toSummary(
     referenceSequences: normalizeReferenceSequences(rawReferences),
     subject: message.envelope?.subject ?? parsed?.subject ?? "(no subject)",
     from: message.envelope?.from?.map(toEnvelopeAddress) ?? parsedAddresses(parsed?.from?.value),
+    replyTo: message.envelope?.replyTo?.map(toEnvelopeAddress) ?? parsedAddresses(flattenAddresses(parsed?.replyTo)),
     to: message.envelope?.to?.map(toEnvelopeAddress) ?? parsedAddresses(flattenAddresses(parsed?.to)),
     cc: message.envelope?.cc?.map(toEnvelopeAddress) ?? parsedAddresses(flattenAddresses(parsed?.cc)),
     ...(deliveredTo.length === 0 ? {} : { deliveredTo }),

@@ -1,8 +1,23 @@
 import type { SendMessageInput, SendReceipt } from "../../shared/contracts";
 
+interface ConversationSourceContext {
+  readonly sourceMessageId: string;
+  readonly conversationId: string;
+}
+
+export type ConversationSendContext = ConversationSourceContext & ({
+  readonly type: "reply" | "reply_all";
+  readonly sourceSubject?: string;
+  readonly inReplyTo?: string;
+  readonly references: readonly string[];
+  readonly providerConversationId?: string;
+} | {
+  readonly type: "forward";
+});
+
 export interface MailSender {
   verifyConnection(): Promise<void>;
-  send(input: SendMessageInput): Promise<SendReceipt>;
+  send(input: SendMessageInput, context?: ConversationSendContext): Promise<SendReceipt>;
 }
 
 export class MailSenderRegistry {

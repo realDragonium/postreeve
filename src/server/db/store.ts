@@ -13,10 +13,12 @@ import type {
   MessageRef,
   OperationBatch,
   Proposal,
+  SendReceipt,
 } from "../../shared/contracts";
 import { accounts, batches, proposals, type StoredOperation } from "./schema";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
 import type { ProviderMessageObservation } from "../mail/provider";
+import type { ConversationSendContext } from "../mail/sender";
 import {
   mergeThreadingMetadata,
   orderConversationMessages,
@@ -551,6 +553,102 @@ export class Store {
     const rows = this.#sqlite.query("SELECT * FROM message_locations WHERE tenant_id = ? AND message_id = ? ORDER BY account_id, mailbox, id")
       .all(tenantId, message.id) as LocationRow[];
     return rows.map(toStoredLocation);
+  }
+
+  async hasMessageProviderAssociation(
+    tenantId: string,
+    messageId: string,
+    accountId: string,
+    provider: MailProviderKind,
+  ): Promise<boolean> {
+    const message = this.#getMessage(tenantId, messageId);
+    if (!message) return false;
+    const association = this.#sqlite.query(`
+      SELECT 1 FROM message_provider_associations
+      WHERE tenant_id = ? AND message_id = ? AND account_id = ? AND provider = ?
+      LIMIT 1
+    `).get(tenantId, message.id, accountId, provider);
+    return association !== null;
+  }
+
+  async getProviderConversationId(
+    tenantId: string,
+    messageId: string,
+    accountId: string,
+    provider: MailProviderKind,
+    preferredId?: string,
+  ): Promise<string | null> {
+    const message = this.#getMessage(tenantId, messageId);
+    if (!message) return null;
+    const rows = this.#sqlite.query(`
+      SELECT provider_conversation_id FROM message_provider_conversations
+      WHERE tenant_id = ? AND message_id = ? AND account_id = ? AND provider = ?
+      ORDER BY provider_conversation_id
+    `).all(tenantId, message.id, accountId, provider) as Array<{ provider_conversation_id: string }>;
+    if (preferredId) {
+      if (rows.some(({ provider_conversation_id }) => provider_conversation_id === preferredId)) return preferredId;
+      throw new Error("The selected provider conversation no longer belongs to the source message");
+    }
+    if (rows.length > 1) throw new Error("The source message has multiple provider conversations; select a specific source location");
+    return rows[0]?.provider_conversation_id ?? null;
+  }
+
+  async recordConversationSend(
+    tenantId: string,
+    accountId: string,
+    provider: MailProviderKind,
+    receipt: SendReceipt,
+    context: ConversationSendContext,
+  ): Promise<CanonicalMessage> {
+    const record = this.#sqlite.transaction(() => {
+      const now = receipt.submittedAt;
+      const identityKey = `message-id:${receipt.messageId}`;
+      let row = this.#sqlite.query("SELECT * FROM messages WHERE tenant_id = ? AND identity_key = ?")
+        .get(tenantId, identityKey) as MessageRow | null;
+      const created = row === null;
+      if (!row) {
+        const id = crypto.randomUUID();
+        const reply = context.type === "reply" || context.type === "reply_all" ? context : undefined;
+        this.#sqlite.query(`
+          INSERT INTO messages
+            (id, tenant_id, identity_key, message_id, in_reply_to, "references", received_at, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(id, tenantId, identityKey, receipt.messageId, reply?.inReplyTo ?? null,
+          JSON.stringify(reply?.references ?? []), now, now, now);
+        row = this.#sqlite.query("SELECT * FROM messages WHERE tenant_id = ? AND id = ?")
+          .get(tenantId, id) as MessageRow;
+      }
+
+      if (context.type === "reply" || context.type === "reply_all") {
+        if (created) {
+          this.#sqlite.query(`
+            INSERT INTO conversation_messages (tenant_id, conversation_id, message_id) VALUES (?, ?, ?)
+          `).run(tenantId, context.conversationId, row.id);
+        } else {
+          ensureMessageConversation(this.#sqlite, row);
+        }
+        associateThreadEdges(this.#sqlite, tenantId, row.id, [context.inReplyTo ?? null, ...context.references]);
+        associateReferenceSequences(this.#sqlite, tenantId, row.id, [context.references]);
+        if (provider === "gmail" && receipt.providerConversationId) {
+          this.#sqlite.query(`
+            INSERT OR IGNORE INTO message_provider_conversations
+              (tenant_id, account_id, provider, provider_conversation_id, message_id)
+            VALUES (?, ?, ?, ?, ?)
+          `).run(tenantId, accountId, provider, receipt.providerConversationId, row.id);
+        }
+        this.#repairConversations(
+          tenantId,
+          created ? new Set([row.id]) : new Set(),
+          new Set([context.sourceMessageId, row.id]),
+        );
+      } else {
+        ensureMessageConversation(this.#sqlite, row);
+      }
+      const stored = this.#getMessage(tenantId, row.id);
+      if (!stored) throw new Error("Sent canonical message was not recorded");
+      return stored;
+    });
+    return record();
   }
 
   #getMessage(tenantId: string, id: string): CanonicalMessage | null {

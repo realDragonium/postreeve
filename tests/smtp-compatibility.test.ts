@@ -81,6 +81,46 @@ describe("Bun Nodemailer compatibility", () => {
     expect(transport.messages).toHaveLength(0);
   });
 
+  test("maps resolved reply headers to SMTP without changing delivery receipts", async () => {
+    const transport = new FakeSmtpTransport(deliveredResult());
+    const sender = new SmtpMailSender(smtpConfig, () => transport);
+
+    const receipt = await sender.send(messageInput(), {
+      type: "reply_all",
+      sourceMessageId: "canonical-parent",
+      conversationId: "conversation-parent",
+      sourceSubject: "A typed outgoing message",
+      inReplyTo: "<parent@example.test>",
+      references: ["<root@example.test>", "<parent@example.test>"],
+    });
+
+    expect(transport.messages[0]).toMatchObject({
+      inReplyTo: "<parent@example.test>",
+      references: ["<root@example.test>", "<parent@example.test>"],
+    });
+    expect(receipt).toMatchObject({
+      accountId: smtpConfig.accountId,
+      accepted: ["to@example.test", "copy@example.test", "hidden@example.test"],
+      rejected: [],
+    });
+  });
+
+  test("omits reply headers when the source has no RFC threading identifiers", async () => {
+    const transport = new FakeSmtpTransport(deliveredResult());
+    const sender = new SmtpMailSender(smtpConfig, () => transport);
+
+    await sender.send(messageInput(), {
+      type: "reply",
+      sourceMessageId: "canonical-fallback",
+      conversationId: "conversation-fallback",
+      sourceSubject: "A typed outgoing message",
+      references: [],
+    });
+
+    expect(transport.messages[0]).not.toHaveProperty("inReplyTo");
+    expect(transport.messages[0]).not.toHaveProperty("references");
+  });
+
   test("rejects cross-account sends before SMTP delivery", async () => {
     const transport = new FakeSmtpTransport(deliveredResult());
     const sender = new SmtpMailSender(smtpConfig, () => transport);
