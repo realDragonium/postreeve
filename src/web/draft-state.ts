@@ -88,6 +88,29 @@ export class DraftSaveQueue {
     return operation;
   }
 
+  async uploadFile(
+    content: DraftContent, id: string, file: File,
+    upload: (accountId: string, draftId: string, version: number, id: string, file: File) => Promise<Draft>,
+  ): Promise<Draft> {
+    await this.save(content);
+    const operation = this.#tail.then(async () => {
+      const current = this.#draft;
+      if (!current) throw new Error("Save the draft before attaching files");
+      const stored = await upload(this.#accountId, current.id, current.version, id, file);
+      this.#assertBoundary(stored);
+      const attached = stored.attachments.find((attachment) => attachment.id === id);
+      if (!attached || attached.size !== file.size || !sameDraftContent(stored, {
+        ...current, attachments: [...current.attachments.filter((attachment) => attachment.id !== id), attached],
+      })) {
+        throw new DraftRecoveryConflictError("Draft changed in another client while the file was uploading");
+      }
+      this.#draft = stored;
+      return stored;
+    });
+    this.#tail = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
   refreshAfterSend(load: (accountId: string, draftId: string) => Promise<Draft>): Promise<Draft | null> {
     const operation = this.#tail.then(async () => {
       if (!this.#draft) return null;
@@ -126,7 +149,7 @@ function draftContentKey(content: DraftContent): string {
     content.source
       ? [content.source.canonicalMessageId, content.source.conversationId, content.source.providerConversationId ?? null]
       : null,
-    content.attachments.map(({ name, size, type }) => [name, size, type]),
+    content.attachments.map(({ id, name, size, type }) => [id ?? null, name, size, type]),
   ]);
 }
 

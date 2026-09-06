@@ -1,3 +1,4 @@
+import type { OutgoingContent } from "../../src/server/mail/outgoing-content";
 import {
   sendMessageInputSchema,
   sendReceiptSchema,
@@ -62,6 +63,8 @@ export function testAccountInput(name = "Work", email = "person@example.test"): 
 interface TestHarnessOptions {
   tenantId?: string;
   maxAttachmentBytes?: number;
+  maxUploadBytes?: number;
+  maxMessageBytes?: number;
   storePath?: string;
   imapFailure?: Error;
   smtpFailure?: Error;
@@ -106,13 +109,16 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
   const store = new Store(options.storePath ?? ":memory:");
   const sent: SendMessageInput[] = [];
   const sendAttempts: SendMessageInput[] = [];
+  const sendContents: Array<OutgoingContent | undefined> = [];
   const sendContexts: Array<ConversationSendContext | undefined> = [];
   const connections: ImapAccountCredentials[] = [];
   const draftMirrorAttempts: Draft[] = [];
   const providers = new Map<string, MailProvider>();
   const service = new PostreeveService(
     store,
-    { tenantId, ...(options.maxAttachmentBytes === undefined ? {} : { maxAttachmentBytes: options.maxAttachmentBytes }) },
+    { tenantId, ...(options.maxAttachmentBytes === undefined ? {} : { maxAttachmentBytes: options.maxAttachmentBytes }),
+      ...(options.maxUploadBytes === undefined ? {} : { maxUploadBytes: options.maxUploadBytes }),
+      ...(options.maxMessageBytes === undefined ? {} : { maxMessageBytes: options.maxMessageBytes }) },
     new MailProviderRegistry(),
     new MailSenderRegistry(),
     new CredentialVault(testMasterKey),
@@ -149,7 +155,8 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
           provider.appendSent(input, receipt.messageId, receipt.submittedAt, context);
         }
       }, options.smtpFailure, {
-        onAttempt: (input) => {
+        onAttempt: (input, content) => {
+          sendContents.push(content ? structuredClone(content) : undefined);
           sendAttempts.push(structuredClone(input));
           options.onSendAttempt?.();
         },
@@ -167,6 +174,7 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
     sent,
     sendAttempts,
     sendContexts,
+    sendContents,
     connections,
     draftMirrorAttempts,
     providerForAccount: (accountId: string): MailProvider | undefined => providers.get(accountId),
@@ -484,7 +492,7 @@ class TestMailSender implements MailSender {
   ) => void | Promise<void>;
   readonly #verificationFailure: Error | undefined;
   readonly #behavior: {
-    readonly onAttempt: (input: SendMessageInput) => void;
+    readonly onAttempt: (input: SendMessageInput, content?: OutgoingContent) => void;
     readonly wait: Promise<void> | undefined;
     readonly failure: Error | (() => Error | undefined) | undefined;
     readonly rejectRecipients: readonly string[];
@@ -496,7 +504,7 @@ class TestMailSender implements MailSender {
     onSent: (input: SendMessageInput, receipt: SendReceipt, context?: ConversationSendContext) => void | Promise<void>,
     verificationFailure?: Error,
     behavior: {
-      readonly onAttempt: (input: SendMessageInput) => void;
+      readonly onAttempt: (input: SendMessageInput, content?: OutgoingContent) => void;
       readonly wait: Promise<void> | undefined;
       readonly failure: Error | (() => Error | undefined) | undefined;
       readonly rejectRecipients: readonly string[];
@@ -519,10 +527,10 @@ class TestMailSender implements MailSender {
     if (this.#verificationFailure) throw this.#verificationFailure;
   }
 
-  async send(rawInput: SendMessageInput, context?: ConversationSendContext): Promise<SendReceipt> {
+  async send(rawInput: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SendReceipt> {
     const input = sendMessageInputSchema.parse(rawInput);
     if (input.accountId !== this.#accountId) throw new Error("Account isolation violation");
-    this.#behavior.onAttempt(input);
+    this.#behavior.onAttempt(input, content);
     await this.#behavior.wait;
     const failure = typeof this.#behavior.failure === "function"
       ? this.#behavior.failure()

@@ -1,3 +1,4 @@
+import { simpleParser } from "mailparser";
 import { describe, expect, spyOn, test } from "bun:test";
 import type { SendMailOptions } from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
@@ -53,16 +54,18 @@ describe("Bun Nodemailer compatibility", () => {
       logger: false,
       debug: false,
     });
-    expect(transport.messages).toEqual([{
-      from: { name: smtpConfig.fromName, address: smtpConfig.fromAddress },
-      to: [{ name: "Recipient", address: "to@example.test" }],
-      cc: [{ name: "Copy", address: "copy@example.test" }],
-      bcc: [{ name: "", address: "hidden@example.test" }],
-      subject: "A typed outgoing message",
-      text: "The plain-text body.",
-      disableFileAccess: true,
-      disableUrlAccess: true,
-    }]);
+    const submitted = transport.messages[0];
+    expect(submitted?.envelope).toEqual({
+      from: smtpConfig.fromAddress, to: ["to@example.test", "copy@example.test", "hidden@example.test"],
+    });
+    if (!Buffer.isBuffer(submitted?.raw)) throw new Error("Expected composed MIME bytes");
+    const parsed = await simpleParser(submitted.raw);
+    expect(parsed.subject).toBe("A typed outgoing message");
+    expect(parsed.text).toBe("The plain-text body.");
+    expect(parsed.bcc).toBeUndefined();
+    expect(parsed.from?.value[0]?.address).toBe(smtpConfig.fromAddress);
+    expect(submitted.disableFileAccess).toBe(true);
+    expect(submitted.disableUrlAccess).toBe(true);
     expect(receipt).toMatchObject({
       accountId: smtpConfig.accountId,
       messageId: "<server-id@example.test>",
@@ -94,10 +97,11 @@ describe("Bun Nodemailer compatibility", () => {
       references: ["<root@example.test>", "<parent@example.test>"],
     });
 
-    expect(transport.messages[0]).toMatchObject({
-      inReplyTo: "<parent@example.test>",
-      references: ["<root@example.test>", "<parent@example.test>"],
-    });
+    const raw = transport.messages[0]?.raw;
+    if (!Buffer.isBuffer(raw)) throw new Error("Expected composed MIME bytes");
+    const parsed = await simpleParser(raw);
+    expect(parsed.inReplyTo).toBe("<parent@example.test>");
+    expect(parsed.references).toEqual(["<root@example.test>", "<parent@example.test>"]);
     expect(receipt).toMatchObject({
       accountId: smtpConfig.accountId,
       accepted: ["to@example.test", "copy@example.test", "hidden@example.test"],
@@ -117,8 +121,11 @@ describe("Bun Nodemailer compatibility", () => {
       references: [],
     });
 
-    expect(transport.messages[0]).not.toHaveProperty("inReplyTo");
-    expect(transport.messages[0]).not.toHaveProperty("references");
+    const raw = transport.messages[0]?.raw;
+    if (!Buffer.isBuffer(raw)) throw new Error("Expected composed MIME bytes");
+    const parsed = await simpleParser(raw);
+    expect(parsed.inReplyTo).toBeUndefined();
+    expect(parsed.references).toBeUndefined();
   });
 
   test("rejects cross-account sends before SMTP delivery", async () => {

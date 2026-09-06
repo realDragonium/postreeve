@@ -1,3 +1,4 @@
+import type { OutgoingContent } from "./outgoing-content";
 import type {
   Draft,
   Folder,
@@ -111,14 +112,16 @@ export interface ProviderDraftScope {
   readonly accountId: string;
 }
 
+export type ProviderDraftInput = Draft & OutgoingContent;
+
 export interface MailProvider {
   verifyConnection(): Promise<void>;
   listFolders(accountId: string): Promise<Folder[]>;
   createFolder(accountId: string, name: string): Promise<void>;
   renameFolder(accountId: string, path: string, name: string): Promise<void>;
   deleteFolder(accountId: string, path: string): Promise<void>;
-  createDraft(scope: ProviderDraftScope, draft: Draft): Promise<ProviderDraftRef>;
-  updateDraft(scope: ProviderDraftScope, draft: Draft, ref: ProviderDraftRef): Promise<ProviderDraftRef>;
+  createDraft(scope: ProviderDraftScope, draft: ProviderDraftInput): Promise<ProviderDraftRef>;
+  updateDraft(scope: ProviderDraftScope, draft: ProviderDraftInput, ref: ProviderDraftRef): Promise<ProviderDraftRef>;
   listDrafts(scope: ProviderDraftScope): Promise<ProviderDraft[]>;
   removeDraft(scope: ProviderDraftScope, postreeveId: string, ref?: ProviderDraftRef): Promise<void>;
   listMessagePage(accountId: string, mailbox: string, limit: number): Promise<MailboxPage>;

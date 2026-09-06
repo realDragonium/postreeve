@@ -284,7 +284,19 @@ export const draftRecipientFieldSchema = z.union([
   z.string(),
   z.array(outboundAddressSchema).max(100),
 ]);
+export const outgoingMailLimitsSchema = z.object({
+  maxUploadBytes: z.number().int().positive(),
+  maxMessageBytes: z.number().int().positive(),
+});
+export const draftFileUploadSchema = z.object({
+  id: z.uuid(),
+  version: z.number().int().positive(),
+  name: z.string().min(1).max(1000),
+  type: z.string().max(255),
+});
+
 export const draftAttachmentSchema = z.object({
+  id: z.uuid().optional(),
   name: z.string(),
   size: z.number().finite().nonnegative(),
   type: z.string(),

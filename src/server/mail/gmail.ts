@@ -1,4 +1,5 @@
-import MailComposer from "nodemailer/lib/mail-composer";
+import { composeMime, type OutgoingContent } from "./outgoing-content";
+import type { ProviderDraftInput } from "./provider";
 import { simpleParser, type AddressObject, type EmailAddress, type ParsedMail } from "mailparser";
 import { z, type ZodType } from "zod";
 import {
@@ -180,7 +181,7 @@ export class GmailMailClient implements MailProvider, MailSender {
     await this.#request(`/labels/${encodeURIComponent(path)}`, z.null(), { method: "DELETE" });
   }
 
-  async createDraft(scope: ProviderDraftScope, draft: Draft): Promise<ProviderDraftRef> {
+  async createDraft(scope: ProviderDraftScope, draft: ProviderDraftInput): Promise<ProviderDraftRef> {
     this.#assertDraftScope(scope, draft);
     const matches = (await this.listDrafts(scope)).filter(({ postreeveId }) => postreeveId === draft.id);
     if (matches.length > 0) return this.#putDraft(scope, draft, matches[0]!.ref, matches);
@@ -189,7 +190,7 @@ export class GmailMailClient implements MailProvider, MailSender {
 
   async #postDraft(
     scope: ProviderDraftScope,
-    draft: Draft,
+    draft: ProviderDraftInput,
     duplicateCandidates: readonly ProviderDraft[],
     excludedRecoveryIds: ReadonlySet<string>,
   ): Promise<ProviderDraftRef> {
@@ -213,7 +214,7 @@ export class GmailMailClient implements MailProvider, MailSender {
     }
   }
 
-  async updateDraft(scope: ProviderDraftScope, draft: Draft, ref: ProviderDraftRef): Promise<ProviderDraftRef> {
+  async updateDraft(scope: ProviderDraftScope, draft: ProviderDraftInput, ref: ProviderDraftRef): Promise<ProviderDraftRef> {
     this.#assertDraftScope(scope, draft);
     if (ref.kind !== "gmail") throw new Error("Gmail cannot update a draft reference from another provider");
     const discovered = (await this.listDrafts(scope)).filter(({ postreeveId }) => postreeveId === draft.id);
@@ -415,7 +416,7 @@ export class GmailMailClient implements MailProvider, MailSender {
     }
   }
 
-  async send(rawInput: SendMessageInput, context?: ConversationSendContext): Promise<SendReceipt> {
+  async send(rawInput: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SendReceipt> {
     const input = sendMessageInputSchema.parse(rawInput);
     this.#assertAccount(input.accountId);
     const reply = context?.type === "reply" || context?.type === "reply_all" ? context : undefined;
@@ -423,7 +424,7 @@ export class GmailMailClient implements MailProvider, MailSender {
     const messageId = `<${crypto.randomUUID()}@postreeve.local>`;
     let raw: string;
     try {
-      raw = await buildMessage(this.#account, input, messageId, submittedAt, reply);
+      raw = await buildMessage(this.#account, input, messageId, submittedAt, reply, content);
     } catch (error) {
       throw preDispatchError(error);
     }
@@ -458,7 +459,7 @@ export class GmailMailClient implements MailProvider, MailSender {
 
   async #putDraft(
     scope: ProviderDraftScope,
-    draft: Draft,
+    draft: ProviderDraftInput,
     requestedRef: ProviderDraftRef,
     matches: readonly ProviderDraft[],
   ): Promise<ProviderDraftRef> {
@@ -982,7 +983,7 @@ function preDispatchError(error: unknown): MailSendPreDispatchError {
     : new MailSendPreDispatchError(error instanceof Error ? error.message : "Mail preparation failed", { cause: error });
 }
 
-async function gmailDraftMessage(scope: ProviderDraftScope, draft: Draft): Promise<{ raw: string }> {
+async function gmailDraftMessage(scope: ProviderDraftScope, draft: ProviderDraftInput): Promise<{ raw: string }> {
   return { raw: toBase64Url(await buildProviderDraftMessage(scope, draft)) };
 }
 
@@ -992,16 +993,16 @@ async function buildMessage(
   messageId: string,
   submittedAt: string,
   context?: Extract<ConversationSendContext, { type: "reply" | "reply_all" }>,
+  content?: OutgoingContent,
 ): Promise<string> {
   const recipients = [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address);
-  const message = new MailComposer({
+  const raw = await composeMime({
     from: { name: account.name, address: account.email },
     to: input.to,
     cc: input.cc,
     bcc: input.bcc,
     envelope: { from: account.email, to: recipients },
     subject: input.subject.replace(/[\r\n]/g, " "),
-    text: input.text,
     textEncoding: "base64",
     messageId,
     date: new Date(submittedAt),
@@ -1009,9 +1010,8 @@ async function buildMessage(
     ...(context && context.references.length > 0 ? { references: [...context.references] } : {}),
     disableFileAccess: true,
     disableUrlAccess: true,
-  }).compile();
-  message.keepBcc = true;
-  return (await message.build()).toString("utf8");
+  }, input.text, content, true);
+  return raw.toString("utf8");
 }
 
 function toBase64Url(value: Buffer): string {

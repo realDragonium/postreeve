@@ -1,14 +1,13 @@
 import { createHash } from "node:crypto";
-import MailComposer from "nodemailer/lib/mail-composer";
+import { composeMime } from "./outgoing-content";
 import {
   accountIdSchema,
   conversationSendSourceSchema,
   draftIdSchema,
   type ConversationSendSource,
-  type Draft,
   type DraftRecipientField,
 } from "../../shared/contracts";
-import type { ProviderDraftScope } from "./provider";
+import type { ProviderDraftInput, ProviderDraftScope } from "./provider";
 
 export interface ProviderDraftMarkers {
   readonly tenantId: string;
@@ -17,14 +16,13 @@ export interface ProviderDraftMarkers {
   readonly version: number;
 }
 
-export async function buildProviderDraftMessage(scope: ProviderDraftScope, draft: Draft): Promise<Buffer> {
-  const message = new MailComposer({
+export async function buildProviderDraftMessage(scope: ProviderDraftScope, draft: ProviderDraftInput): Promise<Buffer> {
+  return composeMime({
     from: draft.identity,
     ...recipientOption("to", draft.to),
     ...recipientOption("cc", draft.cc),
     ...recipientOption("bcc", draft.bcc),
     subject: sanitizeHeader(draft.subject),
-    text: "Postreeve draft body",
     date: new Date(draft.updatedAt),
     messageId: `<postreeve-draft-${boundedId(`${scope.tenantId}\0${scope.accountId}\0${draft.id}`)}-${draft.version}@postreeve.local>`,
     headers: [
@@ -39,16 +37,7 @@ export async function buildProviderDraftMessage(scope: ProviderDraftScope, draft
     ],
     disableFileAccess: true,
     disableUrlAccess: true,
-  }).compile();
-  message.keepBcc = true;
-  const composed = (await message.build()).toString("utf8");
-  const separator = composed.indexOf("\r\n\r\n");
-  if (separator < 0) throw new Error("Draft composer did not produce an RFC header block");
-  const headers = composed.slice(0, separator).replace(
-    /^Content-Transfer-Encoding:.*$/im,
-    "Content-Transfer-Encoding: base64",
-  );
-  return Buffer.from(`${headers}\r\n\r\n${wrapBase64(Buffer.from(draft.body, "utf8").toString("base64"))}\r\n`, "utf8");
+  }, draft.body, draft, true);
 }
 
 export function parseProviderDraftMarkers(source: Buffer | string): ProviderDraftMarkers | null {
@@ -126,8 +115,4 @@ function foldableEncoded(value: string): string {
 
 function boundedId(value: string): string {
   return createHash("sha256").update(value).digest("hex").slice(0, 32);
-}
-
-function wrapBase64(value: string): string {
-  return value.match(/.{1,76}/g)?.join("\r\n") ?? "";
 }

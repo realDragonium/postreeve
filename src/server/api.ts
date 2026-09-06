@@ -11,6 +11,7 @@ import {
   deleteFolderInputSchema,
   directActionInputSchema,
   draftIdSchema,
+  draftFileUploadSchema,
   draftVersionInputSchema,
   listMessagesInputSchema,
   messageRefSchema,
@@ -131,6 +132,47 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         ...context.req.valid("json"),
       })),
     )
+    .get("/outgoing-mail-limits", (context) => context.json(service.outgoingMailLimits))
+    .post("/accounts/:accountId/drafts/:draftId/files", zValidator("param", draftParamsSchema), async (context) => {
+      const { accountId, draftId } = context.req.valid("param");
+      const metadata = draftFileUploadSchema.parse(JSON.parse(decodeURIComponent(context.req.header("X-Postreeve-File") ?? "")));
+      const limit = service.outgoingMailLimits.maxUploadBytes;
+      const declaredSize = Number(context.req.header("Content-Length"));
+      if (Number.isFinite(declaredSize) && declaredSize > limit) {
+        return context.json({ error: `File exceeds the ${limit}-byte upload limit` }, 413);
+      }
+      const reader = context.req.raw.body?.getReader();
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      if (reader) {
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            length += value.byteLength;
+            if (length > limit) {
+              await reader.cancel();
+              return context.json({ error: `File exceeds the ${limit}-byte upload limit` }, 413);
+            }
+            chunks.push(value);
+          }
+        } finally {
+          reader.releaseLock();
+        }
+      }
+      return context.json(await service.uploadDraftFile(accountId, draftId, metadata.version, {
+        id: metadata.id, name: metadata.name, type: metadata.type, content: Buffer.concat(chunks, length),
+      }));
+    })
+    .get("/accounts/:accountId/drafts/:draftId/files/:fileId", zValidator("param", draftParamsSchema.extend({ fileId: z.uuid() })), async (context) => {
+      const { accountId, draftId, fileId } = context.req.valid("param");
+      const file = await service.downloadDraftFile(accountId, draftId, fileId);
+      return new Response(Buffer.from(file.content), { headers: {
+        "Content-Type": file.type, "Content-Disposition": attachmentDisposition(file.name),
+        "Content-Length": String(file.content.byteLength), "Cache-Control": "no-store",
+        "X-Content-Type-Options": "nosniff",
+      } });
+    })
     .get("/accounts/:accountId/drafts", zValidator("param", accountParamsSchema), async (context) =>
       context.json(await service.listDrafts(context.req.valid("param").accountId)))
     .post(

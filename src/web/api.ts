@@ -9,6 +9,7 @@ import {
   canonicalMessageSummarySchema,
   canonicalConversationSchema,
   draftSchema,
+  outgoingMailLimitsSchema,
   operationBatchSchema,
   proposalSchema,
   sendReceiptSchema,
@@ -118,6 +119,16 @@ async function requestAttachment(
 }
 
 export const api = {
+  outgoingMailLimits: () => request("/outgoing-mail-limits", outgoingMailLimitsSchema),
+  uploadDraftFile: (accountId: string, draftId: string, version: number, id: string, file: File): Promise<Draft> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/drafts/${encodeURIComponent(draftId)}/files`, draftSchema, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/octet-stream",
+        "X-Postreeve-File": encodeURIComponent(JSON.stringify({ id, version, name: file.name, type: file.type })),
+      },
+      body: file,
+    }),
   googleOAuthStatus: (signal?: AbortSignal): Promise<{ configured: boolean }> =>
     request("/oauth/google/status", z.object({ configured: z.boolean() }), withSignal(signal)),
   accounts: (signal?: AbortSignal): Promise<Account[]> => request("/accounts", accountSchema.array(), withSignal(signal)),

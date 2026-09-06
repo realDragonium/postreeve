@@ -295,6 +295,11 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   const [subject, setSubject] = useState(saved?.subject ?? (source ? effectiveMode === "forward" ? forwardSubject(source.subject) : replySubject(source.subject) : ""));
   const [body, setBody] = useState(saved?.body ?? initialBody);
   const [attachments, setAttachments] = useState<DraftAttachment[]>(saved?.attachments ?? []);
+  const [pendingFiles, setPendingFiles] = useState<{ id: string; file: File }[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const uploadingNow = useRef(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const limits = useQuery({ queryKey: ["outgoing-mail-limits"], queryFn: api.outgoingMailLimits });
   const savedIdentityOption: LocalIdentity | undefined = saved
     && saved.identity.address !== account.email
     && !identities.some(({ email }) => email === saved.identity.address)
@@ -322,7 +327,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   const edited = useRef({ from: false, to: false, cc: false, bcc: false });
   const saver = useRef<DraftSaveQueue | null>(null);
   if (!saver.current) saver.current = new DraftSaveQueue(account.id, saved, api.createDraft, api.updateDraft);
-  const backendPending = from !== account.email || attachments.length > 0 || (conversationMode && !conversationSource);
+  const backendPending = from !== account.email || attachments.some((attachment) => !attachment.id) || pendingFiles.length > 0 || uploading || (conversationMode && !conversationSource);
 
   function currentDraft(): DraftContent {
     const selectedIdentity = identityOptions.find((identity) => identity.email === from);
@@ -455,8 +460,46 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     },
   });
 
+  async function uploadFiles(selected: { id: string; file: File }[]): Promise<void> {
+    if (uploadingNow.current || mutation.isPending) return;
+    uploadingNow.current = true;
+    setUploading(true);
+    setUploadError(null);
+    autosaveSuppressed.current = true;
+    if (autosaveTimeout.current !== null) {
+      window.clearTimeout(autosaveTimeout.current);
+      autosaveTimeout.current = null;
+    }
+    let content = currentDraft();
+    try {
+      for (const selectedFile of selected) {
+        if (limits.data && selectedFile.file.size > limits.data.maxUploadBytes) {
+          throw new Error(`${selectedFile.file.name} exceeds the ${limits.data.maxUploadBytes}-byte upload limit`);
+        }
+        const draft = await saver.current!.uploadFile(content, selectedFile.id, selectedFile.file, api.uploadDraftFile);
+        content = draft;
+        setAttachments(draft.attachments);
+        setPendingFiles((files) => files.filter(({ id }) => id !== selectedFile.id));
+        onSaveDraft(draft);
+        setSavedAt(draft.updatedAt);
+        setSaveError(null);
+        setMirrorError(draft.mirror.status === "failed" ? draft.mirror.error : null);
+      }
+    } catch (cause) {
+      setUploadError(cause instanceof Error ? cause.message : "File upload failed");
+    } finally {
+      uploadingNow.current = false;
+      setUploading(false);
+      autosaveSuppressed.current = false;
+    }
+  }
+
   async function closeCurrent(): Promise<void> {
-    if (mutation.isPending || closing.current) return;
+    if (mutation.isPending || uploadingNow.current || closing.current) return;
+    if (pendingFiles.length > 0) {
+      setUploadError("Retry or remove the files that have not uploaded before closing this draft");
+      return;
+    }
     if (!saver.current!.isDirty(currentDraft())) {
       onClose();
       return;
@@ -478,7 +521,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
 
   function submit(event: FormEvent): void {
     event.preventDefault();
-    if (backendPending) return;
+    if (backendPending || uploadingNow.current) return;
     const toAddresses = parseRecipientList(to);
     const ccAddresses = parseRecipientList(cc);
     const bccAddresses = parseRecipientList(bcc);
@@ -516,7 +559,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     title={modeLabel}
     meta={account.email}
     onClose={() => void closeCurrent()}
-    closeDisabled={mutation.isPending}
+    closeDisabled={mutation.isPending || uploading}
     onSubmit={submit}
     footer={<>
       <span className="t-dim">{saving
@@ -526,36 +569,52 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
           : savedAt
             ? `Draft saved ${formatDate(savedAt, true)}`
             : "Drafts autosave to the backend"}</span>
-      <button type="button" className="chip push" disabled={saving || mutation.isPending} onClick={() => void saveCurrent(true).catch(() => undefined)}>Save draft</button>
+      <button type="button" className="chip push" disabled={saving || mutation.isPending || uploading} onClick={() => void saveCurrent(true).catch(() => undefined)}>Save draft</button>
       <button className="btn" disabled={mutation.isPending || !body.trim() || backendPending} title={backendPending ? "Backend support is required before this message can be sent" : undefined}>
         {mutation.isPending ? "Sending…" : "Send message"}
       </button>
     </>}
   >
     <label className="field"><span className="field-label">From</span>
-      <select className="input" aria-label="From identity" value={from} disabled={mutation.isPending} onChange={(event) => { edited.current.from = true; setFrom(event.target.value); }}>
+      <select className="input" aria-label="From identity" value={from} disabled={mutation.isPending || uploading} onChange={(event) => { edited.current.from = true; setFrom(event.target.value); }}>
         <option value={account.email}>{account.email}</option>
         {identityOptions.map((identity) => <option value={identity.email} key={identity.id}>{identity.name} · {identity.email}</option>)}
       </select>
     </label>
-    <label className="field"><span className="field-label">To</span><input className="input" autoFocus required aria-label="To" placeholder="person@example.com, team@example.com" value={to} disabled={mutation.isPending} onChange={(event) => { edited.current.to = true; setTo(event.target.value); }} /></label>
+    <label className="field"><span className="field-label">To</span><input className="input" autoFocus required aria-label="To" placeholder="person@example.com, team@example.com" value={to} disabled={mutation.isPending || uploading} onChange={(event) => { edited.current.to = true; setTo(event.target.value); }} /></label>
     <div className="field-grid">
-      <label className="field"><span className="field-label">Cc</span><input className="input" aria-label="Cc" value={cc} disabled={mutation.isPending} onChange={(event) => { edited.current.cc = true; setCc(event.target.value); }} /></label>
-      <label className="field"><span className="field-label">Bcc</span><input className="input" aria-label="Bcc" value={bcc} disabled={mutation.isPending} onChange={(event) => { edited.current.bcc = true; setBcc(event.target.value); }} /></label>
+      <label className="field"><span className="field-label">Cc</span><input className="input" aria-label="Cc" value={cc} disabled={mutation.isPending || uploading} onChange={(event) => { edited.current.cc = true; setCc(event.target.value); }} /></label>
+      <label className="field"><span className="field-label">Bcc</span><input className="input" aria-label="Bcc" value={bcc} disabled={mutation.isPending || uploading} onChange={(event) => { edited.current.bcc = true; setBcc(event.target.value); }} /></label>
     </div>
-    <label className="field"><span className="field-label">Subject</span><input className="input" maxLength={998} aria-label="Subject" value={subject} disabled={mutation.isPending} onChange={(event) => setSubject(event.target.value)} /></label>
-    <label className="field"><span className="field-label">Message</span><textarea className="input" required rows={12} maxLength={2_000_000} aria-label="Message" value={body} disabled={mutation.isPending} onChange={(event) => setBody(event.target.value)} /></label>
+    <label className="field"><span className="field-label">Subject</span><input className="input" maxLength={998} aria-label="Subject" value={subject} disabled={mutation.isPending || uploading} onChange={(event) => setSubject(event.target.value)} /></label>
+    <label className="field"><span className="field-label">Message</span><textarea className="input" required rows={12} maxLength={2_000_000} aria-label="Message" value={body} disabled={mutation.isPending || uploading} onChange={(event) => setBody(event.target.value)} /></label>
     <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-      <label className="chip" aria-disabled={mutation.isPending}>Add attachments<input type="file" multiple disabled={mutation.isPending} style={{ display: "none" }} onChange={(event) => setAttachments((current) => [...current, ...[...(event.target.files ?? [])].map((file) => ({ name: file.name, size: file.size, type: file.type }))])} /></label>
-      <span className="t-dim">File bytes are not stored yet.</span>
+      <label className="chip" aria-disabled={mutation.isPending || uploading}>Add attachments<input type="file" multiple disabled={mutation.isPending || uploading} style={{ display: "none" }} onChange={(event) => {
+        const selected = [...(event.target.files ?? [])].map((file) => ({ id: crypto.randomUUID(), file }));
+        event.target.value = "";
+        setPendingFiles((files) => [...files, ...selected]);
+        void uploadFiles(selected);
+      }} /></label>
+      <span className="t-dim">{uploading ? "Uploading files…" : limits.data
+        ? `Up to ${Math.round(limits.data.maxUploadBytes / 1024 / 1024)} MiB per file; ${Math.round(limits.data.maxMessageBytes / 1024 / 1024)} MiB per encoded message.`
+        : "Files are saved with this draft."}</span>
     </div>
-    {attachments.map((attachment, index) => <div key={`${attachment.name}:${index}`} style={{ display: "flex", alignItems: "center", gap: 12 }}>
-      <span className="t-body">{attachment.name}</span><span className="t-dim">{Math.max(1, Math.round(attachment.size / 1024))} KB</span>
-      <button type="button" className="btn-danger" style={{ marginLeft: "auto" }} aria-label={`Remove ${attachment.name}`} disabled={mutation.isPending} onClick={() => setAttachments((current) => current.filter((_, candidate) => candidate !== index))}>Remove</button>
+    {attachments.map((attachment, index) => <div key={attachment.id ?? `${attachment.name}:${index}`} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <span className="t-body">{attachment.name}</span>{!attachment.id ? <span className="t-dim">Content missing; attach again</span> : null}<span className="t-dim">{Math.max(1, Math.round(attachment.size / 1024))} KB</span>
+      <button type="button" className="btn-danger" style={{ marginLeft: "auto" }} aria-label={`Remove ${attachment.name}`} disabled={mutation.isPending || uploading} onClick={() => setAttachments((current) => current.filter((_, candidate) => candidate !== index))}>Remove</button>
     </div>)}
+    {pendingFiles.map(({ id, file }) => <div key={id} className="alert">
+      {file.name} · {uploading ? "Uploading" : "Not uploaded"}
+      <button type="button" className="chip" disabled={uploading || mutation.isPending} onClick={() => void uploadFiles([{ id, file }])}>Retry upload</button>
+      <button type="button" className="btn-danger" disabled={uploading || mutation.isPending} onClick={() => {
+        setPendingFiles((files) => files.filter((candidate) => candidate.id !== id));
+        setUploadError(null);
+      }}>Remove pending file</button>
+    </div>)}
+    {uploadError ? <div className="alert error">{uploadError}. Your selected files remain available here.</div> : null}
     {backendPending ? <div className="alert"><strong>Sending is unavailable.</strong>{conversationMode && !conversationSource
-      ? <> This draft no longer has its source conversation. <button type="button" className="btn-underline" disabled={mutation.isPending} onClick={() => setEffectiveMode("new")}>Convert to a new message</button></>
-      : null}{from !== account.email ? " Alternate From identities are not supported yet." : ""}{attachments.length > 0 ? " Attachment delivery is not supported yet." : ""}</div> : null}
+      ? <> This draft no longer has its source conversation. <button type="button" className="btn-underline" disabled={mutation.isPending || uploading} onClick={() => setEffectiveMode("new")}>Convert to a new message</button></>
+      : null}{from !== account.email ? " Alternate From identities are not supported yet." : ""}{attachments.some((attachment) => !attachment.id) ? " Some files need to be attached again." : ""}</div> : null}
     {validationError ? <div className="alert error">{validationError}</div> : null}
     {saveError ? <div className="alert error">Draft not saved: {saveError}. Your form content was kept.</div> : null}
     {!saveError && mirrorError ? <div className="alert">Saved in Postreeve. Provider mirror needs repair: {mirrorError}</div> : null}

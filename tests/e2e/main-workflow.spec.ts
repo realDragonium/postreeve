@@ -3,6 +3,7 @@ import {
   createFolderInputSchema,
   createAccountInputSchema,
   createDraftInputSchema,
+  draftFileUploadSchema,
   canonicalMessageSummarySchema,
   deleteFolderInputSchema,
   directActionInputSchema,
@@ -719,7 +720,7 @@ test("refetches backend drafts on reopen and leaves unchanged structured drafts 
     .toHaveText("Saved Alternate · alternate@example.com");
   await page.clock.fastForward(800);
   expect(fixture.updates).toEqual([]);
-  await expect(page.getByText("Attachment delivery is not supported yet.")).toBeVisible();
+  await expect(page.getByText(/Some files need to be attached again/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
   await page.getByRole("button", { name: "Close Edit draft" }).click();
   expect(fixture.updates).toEqual([]);
@@ -1269,4 +1270,82 @@ test("starts with real account onboarding when no mailbox is connected", async (
   await page.getByRole("button", { name: "Connect account" }).click();
   await expect(page.getByRole("heading", { name: "Connect a mailbox" })).toBeVisible();
   await expect(page.getByText(/demo/i)).toHaveCount(0);
+});
+
+
+test("uploads binary files, retries failures, and reopens them in another client before retrying send", async ({ page, browser }) => {
+  const fixture = new BrowserDraftFixture();
+  const uploaded = new Map<string, Buffer>();
+  let failUpload = true;
+  let failSend = true;
+  const bytes = Buffer.from([0, 255, 128, 42, 13, 10]);
+  async function wire(client: Page) {
+    await client.route("**/api/**", async (route) => {
+      const request = route.request();
+      const path = new URL(request.url()).pathname;
+      if (path === "/api/accounts") return json(route, [account]);
+      if (path === "/api/outgoing-mail-limits") return json(route, { maxUploadBytes: 20 * 1024 * 1024, maxMessageBytes: 25 * 1024 * 1024 });
+      if (path === "/api/oauth/google/status") return json(route, { configured: false });
+      if (path.endsWith("/folders")) return json(route, folders);
+      if (path.endsWith("/messages")) return json(route, []);
+      if (path === "/api/proposals" || path === "/api/batches") return json(route, []);
+      const upload = /\/drafts\/([^/]+)\/files$/.exec(path);
+      if (upload && request.method() === "POST") {
+        if (failUpload) return json(route, { error: "Upload temporarily unavailable" }, 503);
+        const metadata = draftFileUploadSchema.parse(JSON.parse(decodeURIComponent(request.headers()["x-postreeve-file"] ?? "")));
+        const draft = fixture.drafts.find(({ id }) => id === upload[1]);
+        if (!draft) return json(route, { error: "Draft not found" }, 404);
+        expect(metadata.version).toBe(draft.version);
+        const body = request.postDataBuffer();
+        expect(body).toEqual(bytes);
+        if (!body) throw new Error("Upload had no bytes");
+        uploaded.set(metadata.id, body);
+        draft.attachments.push({ id: metadata.id, name: metadata.name, type: metadata.type, size: body.length });
+        draft.version += 1;
+        return json(route, draft);
+      }
+      if (await fixture.handle(route, account.id, () => {
+        expect(fixture.drafts[0]?.attachments).toHaveLength(1);
+        const id = fixture.drafts[0]?.attachments[0]?.id;
+        expect(id ? uploaded.get(id) : undefined).toEqual(bytes);
+        return failSend ? { status: 503, value: { error: "Provider unavailable before send" } } : {
+          value: { id: "sent", accountId: account.id, messageId: "sent@example.test", accepted: ["recipient@example.test"], rejected: [], submittedAt: "2026-09-06T00:00:00.000Z" },
+        };
+      })) return;
+      return json(route, { error: `Unhandled test route: ${path}` }, 404);
+    });
+  }
+  await wire(page);
+  await page.goto("/");
+  await page.getByRole("button", { name: "New message", exact: true }).click();
+  await page.getByLabel("To", { exact: true }).fill("recipient@example.test");
+  await page.getByLabel("Subject", { exact: true }).fill("Durable binary attachment");
+  await page.getByLabel("Message", { exact: true }).fill("Keep these bytes with my draft.");
+  await page.locator('input[type="file"]').setInputFiles({ name: "résumé.bin", mimeType: "application/octet-stream", buffer: bytes });
+  await expect(page.getByText(/Upload temporarily unavailable/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Send message" })).toBeDisabled();
+  await page.getByRole("button", { name: "Close New message" }).click();
+  await expect(page.getByRole("heading", { name: "New message" })).toBeVisible();
+  failUpload = false;
+  await page.getByRole("button", { name: "Retry upload" }).click();
+  await expect(page.getByText("résumé.bin", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry upload" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Close New message" }).click();
+  expect(fixture.drafts[0]?.attachments).toHaveLength(1);
+  const second = await browser.newPage();
+  try {
+    await wire(second);
+    await second.goto("/");
+    await second.getByRole("button", { name: /Drafts/ }).click();
+    await second.getByText("Durable binary attachment", { exact: true }).click();
+    await expect(second.getByText("résumé.bin", { exact: true })).toBeVisible();
+    await second.getByRole("button", { name: "Send message" }).click();
+    await expect(second.getByText("Provider unavailable before send", { exact: true })).toBeVisible();
+    await expect(second.getByText("résumé.bin", { exact: true })).toBeVisible();
+    await second.getByText("résumé.bin", { exact: true }).scrollIntoViewIfNeeded();
+    await second.screenshot({ path: "/tmp/dra482-compose-retry.png", fullPage: true });
+    failSend = false;
+    await second.getByRole("button", { name: "Send message" }).click();
+    await expect(second.getByRole("heading", { name: "Message sent" })).toBeVisible();
+  } finally { await second.close(); }
 });
