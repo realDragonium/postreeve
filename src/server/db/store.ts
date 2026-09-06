@@ -9,13 +9,17 @@ import type {
   CanonicalConversation,
   CanonicalMessage,
   CanonicalMessageObservation,
+  Draft,
+  DraftContent,
   MailProviderKind,
   MessageRef,
   OperationBatch,
   Proposal,
   SendReceipt,
 } from "../../shared/contracts";
-import { accounts, batches, proposals, type StoredOperation } from "./schema";
+import { draftSchema, sendReceiptSchema } from "../../shared/contracts";
+import { AccountConflictError, DraftConflictError, DraftNotFoundError } from "../core/errors";
+import { accounts, batches, drafts, proposals, type StoredOperation } from "./schema";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
 import type { ProviderMessageObservation } from "../mail/provider";
 import type { ConversationSendContext } from "../mail/sender";
@@ -46,6 +50,10 @@ export type StoredMessageLocation = CanonicalMessageObservation["location"] & {
   tenantId: string;
   observedAt: string;
 };
+
+export type DraftSendClaim =
+  | { kind: "claimed"; draft: Draft }
+  | { kind: "sent"; receipt: SendReceipt };
 
 export class Store {
   readonly #sqlite: Database;
@@ -104,18 +112,275 @@ export class Store {
   }
 
   async deleteAccount(id: string): Promise<boolean> {
-    const account = await this.getAccount(id);
-    if (!account) return false;
-    const remove = this.#sqlite.transaction((accountId: string) => {
+    const remove = this.#sqlite.transaction((accountId: string): boolean => {
+      const account = this.#sqlite.query("SELECT 1 FROM accounts WHERE id = ?").get(accountId);
+      if (!account) return false;
+      const sending = this.#sqlite.query(`
+        SELECT 1 FROM drafts WHERE account_id = ? AND delivery_status = 'sending' LIMIT 1
+      `).get(accountId);
+      if (sending) throw new AccountConflictError();
+      this.#sqlite.query("DELETE FROM drafts WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_provider_conversations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_locations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_provider_associations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM operation_batches WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM proposals WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM accounts WHERE id = ?").run(accountId);
+      return true;
     });
-    remove(id);
-    return true;
+    return remove.immediate(id);
+  }
+
+  async insertDraft(tenantId: string, draft: Draft): Promise<void> {
+    await this.#db.insert(drafts).values({
+      id: draft.id,
+      tenantId,
+      accountId: draft.accountId,
+      mode: draft.mode,
+      recipientsTo: draft.to,
+      recipientsCc: draft.cc,
+      recipientsBcc: draft.bcc,
+      subject: draft.subject,
+      body: draft.body,
+      identity: draft.identity,
+      source: draft.source ?? null,
+      deliveryStatus: "editable",
+      deliveryReceipt: null,
+      deliveryError: null,
+      claimedAt: null,
+      claimOwner: null,
+      settledAt: null,
+      createdAt: draft.createdAt,
+      updatedAt: draft.updatedAt,
+      version: draft.version,
+    });
+  }
+
+  async listDrafts(tenantId: string, accountId: string): Promise<Draft[]> {
+    const rows = this.#sqlite.query(`
+      SELECT * FROM drafts
+      WHERE tenant_id = ? AND account_id = ? AND delivery_status <> 'sent'
+      ORDER BY updated_at DESC, id
+    `).all(tenantId, accountId) as DraftRow[];
+    return rows.map(toDraft);
+  }
+
+  async getDraft(tenantId: string, accountId: string, id: string): Promise<Draft | null> {
+    const row = this.#draftRow(tenantId, accountId, id);
+    return row ? toDraft(row) : null;
+  }
+
+  async updateDraft(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    expectedVersion: number,
+    content: DraftContent,
+    updatedAt: string,
+  ): Promise<Draft> {
+    const row = this.#sqlite.query(`
+      UPDATE drafts SET
+        mode = ?, recipients_to = ?, recipients_cc = ?, recipients_bcc = ?, subject = ?, body = ?,
+        identity = ?, source = ?, delivery_status = 'editable', delivery_receipt = NULL,
+        delivery_error = NULL, claimed_at = NULL, claim_owner = NULL, settled_at = NULL,
+        updated_at = ?, version = version + 1
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+        AND delivery_status IN ('editable', 'failed')
+      RETURNING *
+    `).get(
+      content.mode,
+      JSON.stringify(content.to),
+      JSON.stringify(content.cc),
+      JSON.stringify(content.bcc),
+      content.subject,
+      content.body,
+      JSON.stringify(content.identity),
+      content.source ? JSON.stringify(content.source) : null,
+      updatedAt,
+      tenantId,
+      accountId,
+      id,
+      expectedVersion,
+    ) as DraftRow | null;
+    if (row) return toDraft(row);
+    this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "updated");
+  }
+
+  async deleteDraft(tenantId: string, accountId: string, id: string, expectedVersion: number): Promise<void> {
+    const deleted = this.#sqlite.query(`
+      DELETE FROM drafts
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ? AND delivery_status <> 'sending'
+      RETURNING id
+    `).get(tenantId, accountId, id, expectedVersion) as { id: string } | null;
+    if (deleted) return;
+    this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "removed");
+  }
+
+  async claimDraftSend(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    expectedVersion: number,
+    claimedAt: string,
+    claimOwner: string,
+  ): Promise<DraftSendClaim> {
+    const claim = this.#sqlite.transaction((): DraftSendClaim => {
+      const current = this.#draftRow(tenantId, accountId, id);
+      if (!current) throw new DraftNotFoundError();
+      if (current.delivery_status === "sent") {
+        const receipt = parseStoredReceipt(current.delivery_receipt);
+        if (!receipt) throw new Error("Settled draft is missing its delivery receipt");
+        return { kind: "sent", receipt };
+      }
+      if (current.version !== expectedVersion) throw new DraftConflictError();
+      if (current.delivery_status === "sending") {
+        throw new DraftConflictError("Draft delivery is already in progress");
+      }
+      if (current.delivery_status === "uncertain") {
+        throw new DraftConflictError("Draft delivery is uncertain and cannot be retried automatically");
+      }
+      const row = this.#sqlite.query(`
+        UPDATE drafts SET delivery_status = 'sending', delivery_receipt = NULL, delivery_error = NULL,
+          claimed_at = ?, claim_owner = ?, settled_at = NULL, updated_at = ?, version = version + 1
+        WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+          AND delivery_status IN ('editable', 'failed')
+        RETURNING *
+      `).get(claimedAt, claimOwner, claimedAt, tenantId, accountId, id, expectedVersion) as DraftRow | null;
+      if (!row) throw new DraftConflictError();
+      return { kind: "claimed", draft: toDraft(row) };
+    });
+    return claim();
+  }
+
+  async settleDraftSend(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    expectedVersion: number,
+    receipt: SendReceipt,
+    claimOwner: string,
+  ): Promise<Draft> {
+    const validatedReceipt = sendReceiptSchema.parse(receipt);
+    if (validatedReceipt.accountId !== accountId) {
+      throw new Error("Draft delivery receipt belongs to another account");
+    }
+    const delivered = validatedReceipt.accepted.length > 0;
+    const settledAt = validatedReceipt.submittedAt;
+    const error = delivered ? null : "No recipients were accepted for delivery";
+    const row = this.#sqlite.query(`
+      UPDATE drafts SET delivery_status = ?, delivery_receipt = ?, delivery_error = ?,
+        settled_at = ?, updated_at = ?, version = version + 1
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+        AND delivery_status = 'sending' AND claim_owner = ?
+      RETURNING *
+    `).get(delivered ? "sent" : "failed", JSON.stringify(validatedReceipt), error, settledAt, settledAt,
+      tenantId, accountId, id, expectedVersion, claimOwner) as DraftRow | null;
+    if (!row) this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "settled");
+    return toDraft(row);
+  }
+
+  async markDraftSendUncertain(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    expectedVersion: number,
+    error: string,
+    failedAt: string,
+    claimOwner: string,
+  ): Promise<Draft> {
+    const deliveryError = normalizeDeliveryError(error, "Delivery outcome is uncertain");
+    const row = this.#sqlite.query(`
+      UPDATE drafts SET delivery_status = 'uncertain', delivery_error = ?, settled_at = ?,
+        updated_at = ?, version = version + 1
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+        AND delivery_status = 'sending' AND claim_owner = ?
+      RETURNING *
+    `).get(deliveryError, failedAt, failedAt, tenantId, accountId, id, expectedVersion, claimOwner) as DraftRow | null;
+    if (!row) this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "marked uncertain");
+    return toDraft(row);
+  }
+
+  async markDraftSendFailed(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    expectedVersion: number,
+    error: string,
+    failedAt: string,
+    claimOwner: string,
+  ): Promise<Draft> {
+    const deliveryError = normalizeDeliveryError(error, "Delivery failed before provider submission");
+    const row = this.#sqlite.query(`
+      UPDATE drafts SET delivery_status = 'failed', delivery_receipt = NULL, delivery_error = ?,
+        settled_at = ?, updated_at = ?, version = version + 1
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+        AND delivery_status = 'sending' AND claim_owner = ?
+      RETURNING *
+    `).get(deliveryError, failedAt, failedAt, tenantId, accountId, id, expectedVersion, claimOwner) as DraftRow | null;
+    if (!row) this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "marked failed");
+    return toDraft(row);
+  }
+
+  async recoverInterruptedDraftSends(
+    tenantId: string,
+    activeClaimOwner: string,
+    recoveredAt: string,
+  ): Promise<Draft[]> {
+    const rows = this.#sqlite.query(`
+      UPDATE drafts SET delivery_status = 'uncertain', delivery_receipt = NULL,
+        delivery_error = 'Delivery was interrupted before its outcome could be recorded',
+        settled_at = ?, updated_at = ?, version = version + 1
+      WHERE tenant_id = ? AND delivery_status = 'sending'
+        AND (claim_owner IS NULL OR claim_owner <> ?)
+      RETURNING *
+    `).all(recoveredAt, recoveredAt, tenantId, activeClaimOwner) as DraftRow[];
+    return rows.map(toDraft);
+  }
+
+  async copyUncertainDraft(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    expectedVersion: number,
+    copyId: string,
+    copiedAt: string,
+  ): Promise<Draft> {
+    const copy = this.#sqlite.transaction((): Draft => {
+      const source = this.#sqlite.query(`
+        UPDATE drafts SET updated_at = ?, version = version + 1
+        WHERE tenant_id = ? AND account_id = ? AND id = ? AND version = ?
+          AND delivery_status = 'uncertain'
+        RETURNING *
+      `).get(copiedAt, tenantId, accountId, id, expectedVersion) as DraftRow | null;
+      if (!source) {
+        this.#throwDraftMutationFailure(tenantId, accountId, id, expectedVersion, "copied for recovery");
+      }
+      this.#sqlite.query(`
+        INSERT INTO drafts (
+          id, tenant_id, account_id, mode, recipients_to, recipients_cc, recipients_bcc,
+          subject, body, identity, source, delivery_status, delivery_receipt, delivery_error,
+          claimed_at, claim_owner, settled_at, created_at, updated_at, version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL, ?, ?, 1)
+      `).run(
+        copyId,
+        source.tenant_id,
+        source.account_id,
+        source.mode,
+        source.recipients_to,
+        source.recipients_cc,
+        source.recipients_bcc,
+        source.subject,
+        source.body,
+        source.identity,
+        source.source,
+        copiedAt,
+        copiedAt,
+      );
+      const row = this.#draftRow(tenantId, accountId, copyId);
+      if (!row) throw new Error("Recovery draft copy was not stored");
+      return toDraft(row);
+    });
+    return copy();
   }
 
   async insertProposal(proposal: Proposal): Promise<void> {
@@ -673,6 +938,24 @@ export class Store {
       : null;
   }
 
+  #draftRow(tenantId: string, accountId: string, id: string): DraftRow | null {
+    return this.#sqlite.query("SELECT * FROM drafts WHERE tenant_id = ? AND account_id = ? AND id = ?")
+      .get(tenantId, accountId, id) as DraftRow | null;
+  }
+
+  #throwDraftMutationFailure(
+    tenantId: string,
+    accountId: string,
+    id: string,
+    expectedVersion: number,
+    operation: string,
+  ): never {
+    const row = this.#draftRow(tenantId, accountId, id);
+    if (!row) throw new DraftNotFoundError();
+    if (row.version !== expectedVersion) throw new DraftConflictError();
+    throw new DraftConflictError(`Draft cannot be ${operation} while delivery is ${row.delivery_status}`);
+  }
+
   #toStoredBatch(row: typeof batches.$inferSelect): StoredBatch {
     return {
       id: row.id,
@@ -777,6 +1060,7 @@ export class Store {
     this.#migrateConversations();
     this.#migrateReferenceSequences();
     this.#migrateSemanticMessageIds();
+    this.#migrateDrafts();
     const accountsTable = this.#sqlite.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
       .get() as { sql: string } | null;
     if (accountsTable && !accountsTable.sql.includes("'gmail'")) {
@@ -814,6 +1098,59 @@ export class Store {
       WHERE account_id IN (SELECT id FROM accounts WHERE kind = 'fixture');
       DELETE FROM accounts WHERE kind = 'fixture';
     `);
+  }
+
+  #migrateDrafts(): void {
+    if (this.#sqlite.query("SELECT 1 FROM schema_migrations WHERE version = 479").get()) return;
+    const migrate = this.#sqlite.transaction(() => {
+      this.#sqlite.exec(`
+        CREATE TABLE drafts (
+          id TEXT NOT NULL,
+          tenant_id TEXT NOT NULL,
+          account_id TEXT NOT NULL REFERENCES accounts(id),
+          mode TEXT NOT NULL CHECK (mode IN ('new', 'reply', 'reply_all', 'forward')),
+          recipients_to TEXT NOT NULL,
+          recipients_cc TEXT NOT NULL,
+          recipients_bcc TEXT NOT NULL,
+          subject TEXT NOT NULL,
+          body TEXT NOT NULL,
+          identity TEXT NOT NULL,
+          source TEXT,
+          delivery_status TEXT NOT NULL CHECK (delivery_status IN ('editable', 'sending', 'failed', 'uncertain', 'sent')),
+          delivery_receipt TEXT,
+          delivery_error TEXT,
+          claimed_at TEXT,
+          claim_owner TEXT,
+          settled_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          version INTEGER NOT NULL CHECK (version > 0),
+          PRIMARY KEY (tenant_id, id),
+          CHECK (
+            (delivery_status = 'editable' AND delivery_receipt IS NULL
+              AND delivery_error IS NULL AND claimed_at IS NULL
+              AND claim_owner IS NULL AND settled_at IS NULL)
+            OR (delivery_status = 'sending' AND delivery_receipt IS NULL
+              AND delivery_error IS NULL AND claimed_at IS NOT NULL
+              AND claim_owner IS NOT NULL AND settled_at IS NULL)
+            OR (delivery_status = 'failed'
+              AND length(trim(delivery_error)) > 0 AND claimed_at IS NOT NULL
+              AND claim_owner IS NOT NULL AND settled_at IS NOT NULL)
+            OR (delivery_status = 'uncertain' AND delivery_receipt IS NULL
+              AND length(trim(delivery_error)) > 0 AND claimed_at IS NOT NULL
+              AND claim_owner IS NOT NULL AND settled_at IS NOT NULL)
+            OR (delivery_status = 'sent' AND delivery_receipt IS NOT NULL
+              AND delivery_error IS NULL AND claimed_at IS NOT NULL
+              AND claim_owner IS NOT NULL AND settled_at IS NOT NULL)
+          )
+        );
+        CREATE INDEX drafts_tenant_account_updated_idx ON drafts(tenant_id, account_id, updated_at);
+        INSERT INTO schema_migrations (version, applied_at) VALUES (479, CURRENT_TIMESTAMP);
+      `);
+      const violations = this.#sqlite.query("PRAGMA foreign_key_check('drafts')").all();
+      if (violations.length > 0) throw new Error("Draft migration left invalid foreign keys");
+    });
+    migrate();
   }
 
   #migrateMessageLocationTenantForeignKey(): void {
@@ -1195,6 +1532,91 @@ export class Store {
 interface MessageRow { id: string; tenant_id: string; identity_key: string; message_id: string | null; in_reply_to: string | null; references: string; received_at: string | null; created_at: string; updated_at: string }
 interface LocationRow { id: string; message_id: string; tenant_id: string; account_id: string; provider: MailProviderKind; mailbox: string; uid_validity: string; uid: number; modseq: string | null; provider_id: string | null; read: number; flagged: number; observed_at: string }
 interface ConversationRow { id: string; tenant_id: string; created_at: string; updated_at: string }
+interface DraftRow {
+  id: string;
+  tenant_id: string;
+  account_id: string;
+  mode: Draft["mode"];
+  recipients_to: string;
+  recipients_cc: string;
+  recipients_bcc: string;
+  subject: string;
+  body: string;
+  identity: string;
+  source: string | null;
+  delivery_status: Draft["delivery"]["status"];
+  delivery_receipt: string | null;
+  delivery_error: string | null;
+  claimed_at: string | null;
+  claim_owner: string | null;
+  settled_at: string | null;
+  created_at: string;
+  updated_at: string;
+  version: number;
+}
+
+function normalizeDeliveryError(error: string, fallback: string): string {
+  return error.trim() || fallback;
+}
+
+function toDraft(row: DraftRow): Draft {
+  const receipt = parseStoredReceipt(row.delivery_receipt);
+  if (receipt && receipt.accountId !== row.account_id) {
+    throw new Error("Draft delivery receipt belongs to another account");
+  }
+  const delivery: Draft["delivery"] = (() => {
+    switch (row.delivery_status) {
+      case "editable":
+        return { status: "editable" };
+      case "sending":
+        if (!row.claimed_at) throw new Error("Sending draft is missing its claim timestamp");
+        return { status: "sending", claimedAt: row.claimed_at };
+      case "failed":
+        if (!row.settled_at || !row.delivery_error?.trim()) {
+          throw new Error("Failed draft is missing its delivery result");
+        }
+        return {
+          status: "failed",
+          failedAt: row.settled_at,
+          error: row.delivery_error.trim(),
+          ...(receipt ? { receipt } : {}),
+        };
+      case "uncertain":
+        if (!row.settled_at || !row.delivery_error?.trim()) {
+          throw new Error("Uncertain draft is missing its delivery failure");
+        }
+        return { status: "uncertain", failedAt: row.settled_at, error: row.delivery_error.trim() };
+      case "sent":
+        if (!row.settled_at || !receipt) throw new Error("Sent draft is missing its delivery result");
+        return { status: "sent", settledAt: row.settled_at, receipt };
+    }
+  })();
+  return draftSchema.parse({
+    id: row.id,
+    accountId: row.account_id,
+    mode: row.mode,
+    to: parseJson(row.recipients_to),
+    cc: parseJson(row.recipients_cc),
+    bcc: parseJson(row.recipients_bcc),
+    subject: row.subject,
+    body: row.body,
+    identity: parseJson(row.identity),
+    ...(row.source ? { source: parseJson(row.source) } : {}),
+    delivery,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    version: row.version,
+  });
+}
+
+function parseStoredReceipt(value: string | null): SendReceipt | null {
+  return value === null ? null : sendReceiptSchema.parse(parseJson(value));
+}
+
+function parseJson(value: string): unknown {
+  const parsed: unknown = JSON.parse(value);
+  return parsed;
+}
 
 function toCanonicalMessage(
   row: MessageRow,

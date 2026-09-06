@@ -15,6 +15,13 @@ export type ConversationSendContext = ConversationSourceContext & ({
   readonly type: "forward";
 });
 
+export class MailSendPreDispatchError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message.trim() || "Mail could not be submitted", options);
+    this.name = "MailSendPreDispatchError";
+  }
+}
+
 export interface MailSender {
   verifyConnection(): Promise<void>;
   send(input: SendMessageInput, context?: ConversationSendContext): Promise<SendReceipt>;

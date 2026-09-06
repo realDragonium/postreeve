@@ -8,6 +8,7 @@ import {
   canonicalMessageDetailSchema,
   canonicalMessageSummarySchema,
   canonicalConversationSchema,
+  draftSchema,
   operationBatchSchema,
   proposalSchema,
   sendReceiptSchema,
@@ -22,24 +23,48 @@ import {
   type CanonicalMessageDetail,
   type CanonicalMessageSummary,
   type CanonicalConversation,
+  type CreateDraftInput,
+  type Draft,
+  type DraftVersionInput,
   type MessageRef,
   type OperationBatch,
   type Proposal,
   type RenameFolderInput,
   type SendMessageInput,
   type SendReceipt,
+  type UpdateDraftInput,
   type UpdateProposalInput,
   type UpdateAccountInput,
 } from "../shared/contracts";
 
-const errorSchema = {
-  parse(value: unknown): string | null {
-    if (typeof value !== "object" || value === null) return null;
-    if ("error" in value && typeof value.error === "string") return value.error;
-    if ("message" in value && typeof value.message === "string") return value.message;
-    return null;
-  },
-};
+export type ApiErrorCode = "account_conflict" | "draft_conflict" | "draft_not_found";
+
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly code: ApiErrorCode | null;
+
+  constructor(message: string, status: number, code: ApiErrorCode | null) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function apiError(value: unknown): { message: string | null; code: ApiErrorCode | null } {
+  if (typeof value !== "object" || value === null) return { message: null, code: null };
+  const message = "error" in value && typeof value.error === "string"
+    ? value.error
+    : "message" in value && typeof value.message === "string"
+      ? value.message
+      : null;
+  const code = "code" in value && (
+    value.code === "account_conflict" || value.code === "draft_conflict" || value.code === "draft_not_found"
+  )
+    ? value.code
+    : null;
+  return { message, code };
+}
 
 async function request<T>(path: string, schema: ZodType<T>, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, {
@@ -52,7 +77,8 @@ async function request<T>(path: string, schema: ZodType<T>, init?: RequestInit):
   });
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
-    throw new Error(errorSchema.parse(body) ?? `Request failed (${response.status})`);
+    const error = apiError(body);
+    throw new ApiRequestError(error.message ?? `Request failed (${response.status})`, response.status, error.code);
   }
 
   const direct = schema.safeParse(body);
@@ -122,6 +148,62 @@ export const api = {
       ...jsonBody({ path: input.path }),
       ...withSignal(signal),
     }),
+  drafts: (accountId: string, signal?: AbortSignal): Promise<Draft[]> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/drafts`, draftSchema.array(), withSignal(signal)),
+  draft: (accountId: string, draftId: string, signal?: AbortSignal): Promise<Draft> =>
+    request(
+      `/accounts/${encodeURIComponent(accountId)}/drafts/${encodeURIComponent(draftId)}`,
+      draftSchema,
+      withSignal(signal),
+    ),
+  createDraft: (input: CreateDraftInput, signal?: AbortSignal): Promise<Draft> => {
+    const { accountId, ...content } = input;
+    return request(`/accounts/${encodeURIComponent(accountId)}/drafts`, draftSchema, {
+      method: "POST",
+      ...jsonBody(content),
+      ...withSignal(signal),
+    });
+  },
+  updateDraft: (
+    accountId: string,
+    draftId: string,
+    input: UpdateDraftInput,
+    signal?: AbortSignal,
+  ): Promise<Draft> => request(
+    `/accounts/${encodeURIComponent(accountId)}/drafts/${encodeURIComponent(draftId)}`,
+    draftSchema,
+    { method: "PUT", ...jsonBody(input), ...withSignal(signal) },
+  ),
+  removeDraft: (
+    accountId: string,
+    draftId: string,
+    input: DraftVersionInput,
+    signal?: AbortSignal,
+  ) => request(
+    `/accounts/${encodeURIComponent(accountId)}/drafts/${encodeURIComponent(draftId)}`,
+    connectionTestResultSchema,
+    { method: "DELETE", ...jsonBody(input), ...withSignal(signal) },
+  ),
+  copyDraft: (
+    accountId: string,
+    draftId: string,
+    input: DraftVersionInput,
+    signal?: AbortSignal,
+  ): Promise<Draft> => request(
+    `/accounts/${encodeURIComponent(accountId)}/drafts/${encodeURIComponent(draftId)}/copy`,
+    draftSchema,
+    { method: "POST", ...jsonBody(input), ...withSignal(signal) },
+  ),
+  sendDraft: (
+    accountId: string,
+    draftId: string,
+    input: DraftVersionInput,
+    signal?: AbortSignal,
+  ): Promise<SendReceipt> => request(
+    `/accounts/${encodeURIComponent(accountId)}/drafts/${encodeURIComponent(draftId)}/send`,
+    sendReceiptSchema,
+    { method: "POST", ...jsonBody(input), ...withSignal(signal) },
+  ),
   messages: (accountId: string, mailbox: string, query: string, limit = 50, signal?: AbortSignal): Promise<CanonicalMessageSummary[]> => {
     const params = new URLSearchParams({ mailbox });
     if (query.trim()) params.set("query", query.trim());

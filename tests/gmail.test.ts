@@ -7,7 +7,7 @@ import {
   toCanonicalObservation,
   type ProviderMessageObservation,
 } from "../src/server/mail/provider";
-import { MailSenderRegistry } from "../src/server/mail/sender";
+import { MailSendPreDispatchError, MailSenderRegistry } from "../src/server/mail/sender";
 import { Store } from "../src/server/db/store";
 import { GoogleOAuth, type OAuthFetch } from "../src/server/google/oauth";
 import { PostreeveService } from "../src/server/core/postreeve";
@@ -109,6 +109,46 @@ function rawThreadingSource(input: {
 }
 
 describe("Gmail compatibility", () => {
+  test("classifies token acquisition failure as proven pre-dispatch", async () => {
+    const requests: string[] = [];
+    const { store, service } = await createConversationService(async (input) => {
+      requests.push(String(input));
+      return Response.json({ error: "invalid_grant", error_description: "" }, { status: 401 });
+    });
+    const healthy = await service.createDraft({
+      accountId: account.id,
+      mode: "new",
+      to: [],
+      cc: [],
+      bcc: [],
+      subject: "Healthy sibling",
+      body: "",
+      identity: { name: account.name, address: account.email },
+    });
+    const failedDraft = await service.createDraft({
+      accountId: account.id,
+      mode: "new",
+      to: [{ name: "Recipient", address: "recipient@example.test" }],
+      cc: [],
+      bcc: [],
+      subject: "Pre-dispatch",
+      body: "No provider submission should occur.",
+      identity: { name: account.name, address: account.email },
+    });
+
+    const error = await service.sendDraft(account.id, failedDraft.id, { version: failedDraft.version })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(MailSendPreDispatchError);
+    expect(error).toHaveProperty("message", "invalid_grant");
+    expect(requests).toEqual(["https://oauth2.googleapis.com/token"]);
+    const failed = await service.getDraft(account.id, failedDraft.id);
+    expect(failed.delivery).toMatchObject({ status: "failed", error: "invalid_grant" });
+    expect((await service.listDrafts(account.id)).map(({ id }) => id).sort())
+      .toEqual([healthy.id, failed.id].sort());
+    store.close();
+  });
+
   test("refreshes OAuth, lists Gmail labels and messages, reads source, applies actions, and sends", async () => {
     const requests: Array<{ url: string; method: string; body: string }> = [];
     let historyId = 10;
