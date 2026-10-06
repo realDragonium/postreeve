@@ -16,7 +16,7 @@ export class SynchronizationRunner {
   readonly #leaseMs: number;
   readonly #pageLimit: number;
   readonly #maxScopes: number;
-  readonly #active = new Map<string, AbortController>();
+  readonly #active = new Map<string, { claim: SyncClaim; controller: AbortController }>();
   #timer: ReturnType<typeof setTimeout> | undefined;
   #stopped = true;
   #running: Promise<boolean> | undefined;
@@ -31,15 +31,15 @@ export class SynchronizationRunner {
   }
 
   schedule(accountId: string, replace = false): void {
-    if (replace) this.#active.get(accountId)?.abort();
+    if (replace) this.#active.get(accountId)?.controller.abort();
     this.store.schedule(this.tenantId, accountId, this.#now(), replace);
   }
   cancel(accountId: string): void {
     this.store.cancel(this.tenantId, accountId, this.#now());
-    this.#active.get(accountId)?.abort();
+    this.#active.get(accountId)?.controller.abort();
   }
   retry(accountId: string): void {
-    this.#active.get(accountId)?.abort();
+    this.#active.get(accountId)?.controller.abort();
     this.store.retry(this.tenantId, accountId, this.#now());
   }
   start(): void {
@@ -50,8 +50,8 @@ export class SynchronizationRunner {
   async stop(): Promise<void> {
     this.#stopped = true;
     clearTimeout(this.#timer);
-    for (const [accountId, controller] of this.#active) {
-      this.store.retry(this.tenantId, accountId, this.#now());
+    for (const { claim, controller } of this.#active.values()) {
+      this.store.release(claim, this.#now());
       controller.abort();
     }
     await this.#running;
@@ -76,7 +76,7 @@ export class SynchronizationRunner {
     const claim = this.store.claim(this.tenantId, this.#now(), this.#leaseMs);
     if (!claim) return false;
     const controller = new AbortController();
-    this.#active.set(claim.accountId, controller);
+    this.#active.set(claim.accountId, { claim, controller });
     const timeout = setTimeout(() => controller.abort(), this.#leaseMs);
     timeout.unref();
     try {
@@ -87,7 +87,7 @@ export class SynchronizationRunner {
       this.store.fail(claim, this.#now(), error instanceof SynchronizationError ? error.kind : "provider", retryMs);
     } finally {
       clearTimeout(timeout);
-      if (this.#active.get(claim.accountId) === controller) this.#active.delete(claim.accountId);
+      if (this.#active.get(claim.accountId)?.controller === controller) this.#active.delete(claim.accountId);
     }
     return true;
   }
