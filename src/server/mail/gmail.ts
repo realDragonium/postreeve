@@ -89,6 +89,14 @@ const gmailMessageSchema = z.object({
   payload: gmailPartSchema.optional(),
   raw: z.string().optional(),
 });
+const gmailSyncMessageSchema = gmailMessageSchema.extend({
+  threadId: z.string().min(1),
+  historyId: z.string().regex(/^\d+$/),
+  internalDate: z.string().regex(/^\d+$/).refine(value => validDate(Number(value)) !== null),
+  labelIds: z.array(z.string().min(1)),
+  // The live reader permits omitted MIME fields; synchronization needs explicit evidence.
+  payload: gmailPartSchema.and(z.object({ headers: z.array(z.object({ name: z.string(), value: z.string() })) })),
+});
 const sentMessageSchema = z.object({ id: z.string().min(1), threadId: z.string().min(1).optional() });
 const draftStubSchema = z.object({ id: z.string().min(1) });
 const draftListSchema = z.object({
@@ -130,7 +138,7 @@ export class GmailMailClient implements MailProvider, MailSender {
       observe: async (id, signal) => {
         const params = metadataParams();
         const message = await this.#request(`/messages/${encodeURIComponent(id)}?${params}`,
-          gmailMessageSchema.extend({ labelIds: z.array(z.string().min(1)), payload: gmailPartSchema }), { signal }, 2 * 1024 * 1024);
+          gmailSyncMessageSchema, { signal }, 2 * 1024 * 1024);
         if (message.id !== id) throw new Error("Gmail returned another message during synchronization");
         return { mailboxes: gmailLocationMailboxes(message.labelIds),
           message: mailbox => toSummary(this.#account.id, mailbox, message) };
