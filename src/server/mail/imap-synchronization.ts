@@ -3,13 +3,15 @@ import { z } from "zod";
 import type { MailboxObject, MailboxOpenOptions, SearchObject } from "imapflow";
 import type { ImapClient } from "./imap";
 import type { ProviderMessageSummary } from "./provider";
-import type { MailSynchronization, SyncAccount } from "./synchronization";
+import { SynchronizationError, type MailSynchronization, type SyncAccount, type SyncPage } from "./synchronization";
 
 // ImapFlow supports these SELECT options at runtime but omits them from its declarations.
 export interface ImapSyncOpenOptions extends MailboxOpenOptions {
   changedSince?: bigint;
   uidValidity?: bigint;
 }
+
+const MAX_SYNC_PAGE_BYTES = 2 * 1024 * 1024;
 
 const decimal = z.string().regex(/^[1-9]\d{0,19}$/);
 const uidBoundary = z.number().int().min(0).max(0xffff_ffff);
@@ -72,7 +74,6 @@ export function imapSynchronization(operations: ImapSyncOperations): MailSynchro
           ? await searchPage(client, { uid: `${scan.last + 1}:${scan.ceiling}` }, limit + 1, scan.last + 1, scan.ceiling)
           : [];
         const uids = selected.slice(0, limit);
-        const hasMore = selected.length > limit;
         let changed = uids;
         if (uids.length > 0 && modseq !== null && checkpoint.modseq !== null) {
           const modifications = await searchPage(client,
@@ -93,18 +94,38 @@ export function imapSynchronization(operations: ImapSyncOperations): MailSynchro
         }
         if (expected.size) throw new Error("IMAP FETCH did not cover every requested UID");
         signal.throwIfAborted();
-        const next: Cursor = hasMore
-          ? { ...checkpoint, scan: { ...scan, last: uids.at(-1)! } }
-          : { ...checkpoint, through: scan.ceiling, modseq: modseq === null ? null : scan.modseq, scan: null };
-        return {
-          messages, removed: [], cursor: JSON.stringify(next), hasMore,
-          coverage: hasMore ? "catching-up" : "complete",
-          snapshots: [{ scope, generation: scan.generation,
-            phase: starting ? (hasMore ? "start" : "start-and-complete") : (hasMore ? "continue" : "complete"),
-            seen: uids.map(uid => ({ accountId: account.accountId, mailbox: scope.mailbox,
-              uidValidity: checkpoint.uidValidity, uid, modseq: null })),
-          }],
+        const pageForPrefix = (length: number): SyncPage => {
+          const emitted = uids.slice(0, length);
+          const last = emitted.at(-1) ?? scan.last;
+          const hasMore = selected.length > length;
+          const next: Cursor = hasMore
+            ? { ...checkpoint, scan: { ...scan, last } }
+            : { ...checkpoint, through: scan.ceiling, modseq: modseq === null ? null : scan.modseq, scan: null };
+          return {
+            messages: messages.filter(message => message.ref.uid <= last),
+            removed: [], cursor: JSON.stringify(next), hasMore,
+            coverage: hasMore ? "catching-up" : "complete",
+            snapshots: [{ scope, generation: scan.generation,
+              phase: starting ? (hasMore ? "start" : "start-and-complete") : (hasMore ? "continue" : "complete"),
+              seen: emitted.map(uid => ({ accountId: account.accountId, mailbox: scope.mailbox,
+                uidValidity: checkpoint.uidValidity, uid, modseq: null })),
+            }],
+          };
         };
+        const full = pageForPrefix(uids.length);
+        if (pageFits(full)) return full;
+        let fitting: SyncPage | undefined;
+        let low = 1;
+        let high = uids.length - 1;
+        while (low <= high) {
+          const middle = Math.floor((low + high) / 2);
+          const candidate = pageForPrefix(middle);
+          if (pageFits(candidate)) { fitting = candidate; low = middle + 1; }
+          else high = middle - 1;
+        }
+        // Skipping or trimming an unrepresentable message would lose identity or falsely advance coverage.
+        if (!fitting) throw new SynchronizationError("invalid-data");
+        return fitting;
       }, signal);
     },
   };
@@ -121,16 +142,19 @@ function parseCursor(serialized: string | null, accountId: string, mailbox: stri
   } catch { return null; }
 }
 
+function pageFits(page: SyncPage): boolean {
+  return Buffer.byteLength(JSON.stringify(page), "utf8") <= MAX_SYNC_PAGE_BYTES;
+}
+
 async function searchPage(client: ImapClient, query: SearchObject, limit: number, minimum: number, maximum: number): Promise<number[]> {
-  const result = await client.search(query, { uid: true, returnOptions: ["ALL"] });
+  const result = await client.search(query, { uid: true, returnOptions: ["ALL", "COUNT"] });
   if (result === false) throw new Error("IMAP UID search failed");
-  if (!Array.isArray(result) && !result.all && ((result.count ?? 0) > 0 || result.min !== undefined || result.max !== undefined || result.partial)) {
-    throw new Error("IMAP SEARCH omitted requested UID coverage");
+  if (!Array.isArray(result) && (result.partial !== undefined || !Number.isSafeInteger(result.count) || result.count! < 0)) {
+    throw new Error("IMAP SEARCH omitted complete UID coverage");
   }
-  const ranges = Array.isArray(result) ? result.map(String) : (result.all ? result.all.split(",") : []);
-  const candidates = new Set<number>();
-  for (const range of ranges) {
-    const match = /^(\d+)(?::(\d+))?$/.exec(range);
+  const parts = Array.isArray(result) ? result.map(String) : (result.all ? result.all.split(",") : []);
+  const ranges = parts.map(part => {
+    const match = /^(\d+)(?::(\d+))?$/.exec(part);
     if (!match) throw new Error("IMAP returned invalid UID search coverage");
     const first = Number(match[1]);
     const second = Number(match[2] ?? match[1]);
@@ -139,7 +163,24 @@ async function searchPage(client: ImapClient, query: SearchObject, limit: number
     if (!Number.isSafeInteger(low) || !Number.isSafeInteger(high) || low < minimum || high > maximum) {
       throw new Error("IMAP UID search crossed the requested range");
     }
-    for (let uid = low; uid <= high && uid < low + limit; uid++) candidates.add(uid);
+    return { low, high };
+  }).sort((a, b) => a.low - b.low);
+  const merged: Array<{ low: number; high: number }> = [];
+  for (const range of ranges) {
+    const previous = merged.at(-1);
+    if (previous && range.low <= previous.high + 1) previous.high = Math.max(previous.high, range.high);
+    else merged.push({ ...range });
   }
-  return [...candidates].sort((a, b) => a - b).slice(0, limit);
+  const count = merged.reduce((total, range) => total + range.high - range.low + 1, 0);
+  if (!Array.isArray(result) && (result.count !== count
+    || (result.min !== undefined && result.min !== merged[0]?.low)
+    || (result.max !== undefined && result.max !== merged.at(-1)?.high))) {
+    throw new Error("IMAP SEARCH count disagrees with UID coverage");
+  }
+  const selected: number[] = [];
+  for (const range of merged) {
+    for (let uid = range.low; uid <= range.high && selected.length < limit; uid++) selected.push(uid);
+    if (selected.length === limit) break;
+  }
+  return selected;
 }
