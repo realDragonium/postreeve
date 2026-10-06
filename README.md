@@ -64,6 +64,8 @@ Start with a secondary mailbox and verify these actions manually before relying 
 
 Passwords are encrypted with AES-256-GCM before they are stored in the local SQLite database. They are never sent to OpenAI by Postreeve.
 
+The backend maintains a local summary index through durable account synchronization jobs, even with no mailbox view open. Jobs retain checkpoints across restart, back off after failures, and reject results from canceled or disconnected accounts. The compatibility ingestion path records partial coverage and preserves unseen locations; provider-specific repair and offline mailbox views are separate capabilities.
+
 ## Use WebMCP with Codex
 
 Keep Postreeve open in the built-in browser in the ChatGPT desktop app. Select **Site tools** in the address bar, then **Available site tools**, to inspect the tools exposed by the page.

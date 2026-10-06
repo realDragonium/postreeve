@@ -87,6 +87,7 @@ const service = new PostreeveService(
 );
 await service.recoverInterruptedDraftSends();
 await service.initialize();
+service.synchronization.start();
 
 const app = new Hono();
 app.use("*", postreeveSecureHeaders);
@@ -99,5 +100,11 @@ app.get("/*", serveStatic({ path: "./dist/index.html" }));
 
 const server = Bun.serve({ hostname: serverConfig.hostname, port: serverConfig.port, fetch: app.fetch });
 console.info(`Postreeve listening on http://${server.hostname}:${server.port}`);
+
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.once(signal, () => {
+    void service.synchronization.stop().finally(() => { server.stop(); store.close(); });
+  });
+}
 
 export default server;

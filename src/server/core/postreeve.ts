@@ -1,3 +1,4 @@
+import { SynchronizationRunner, type SynchronizationOptions } from "../sync/runner";
 import {
   DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_MAX_MESSAGE_BYTES, positiveByteLimit,
   type OutgoingAttachment,
@@ -96,6 +97,7 @@ export interface PostreeveContext {
   maxAttachmentBytes?: number;
   maxUploadBytes?: number;
   maxMessageBytes?: number;
+  synchronization?: SynchronizationOptions;
 }
 
 export const DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -112,6 +114,7 @@ const draftReconciliationLimit = 100;
 const draftLifecycleTurns = new Map<string, Promise<void>>();
 
 export class PostreeveService {
+  readonly synchronization: SynchronizationRunner;
   readonly #store: Store;
   readonly #context: PostreeveContext;
   readonly #providers: MailProviderRegistry;
@@ -141,6 +144,7 @@ export class PostreeveService {
       throw new Error("The attachment download limit must be a positive integer");
     }
     this.#store = store;
+    this.synchronization = new SynchronizationRunner(store.synchronization, context.tenantId, providers, context.synchronization);
     this.#context = context;
     this.#providers = providers;
     this.#senders = senders;
@@ -265,6 +269,7 @@ export class PostreeveService {
   async removeAccount(id: string): Promise<void> {
     await this.#withDraftLifecycle(id, "account-removal", async () => {
       if (!await this.#store.deleteAccount(id)) throw new Error("Account not found");
+      this.synchronization.cancel(id);
       this.#providers.remove(id);
       this.#senders.remove(id);
     });
@@ -1388,7 +1393,7 @@ export class PostreeveService {
 
   #registerStoredAccount(account: StoredAccount): void {
     const credentials = this.#credentialsFor(account);
-    this.#registerClients(account.id, this.#clientsFor(toPublicAccount(account), credentials));
+    this.#registerClients(account.id, this.#clientsFor(toPublicAccount(account), credentials), false);
   }
 
   async #persistObservedMessages(
@@ -1488,8 +1493,9 @@ export class PostreeveService {
     return clients;
   }
 
-  #registerClients(accountId: string, clients: { provider: MailProvider; sender: MailSender }): void {
+  #registerClients(accountId: string, clients: { provider: MailProvider; sender: MailSender }, replace = true): void {
     this.#providers.register(accountId, clients.provider);
+    this.synchronization.schedule(accountId, replace);
     this.#senders.register(accountId, clients.sender);
   }
 

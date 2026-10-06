@@ -1,3 +1,4 @@
+import { SynchronizationStore } from "../sync/store";
 import type { OutgoingAttachment } from "../mail/outgoing-content";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -74,6 +75,7 @@ export class Store {
   readonly #sqlite: Database;
   readonly #db: BunSQLiteDatabase;
   readonly coordinationIdentity: string;
+  readonly synchronization: SynchronizationStore;
 
   constructor(path = process.env.POSTREEVE_DB_PATH ?? "./data/postreeve.sqlite") {
     this.coordinationIdentity = path === ":memory:"
@@ -84,6 +86,10 @@ export class Store {
     this.#sqlite.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
     this.#migrate();
     this.#db = drizzle(this.#sqlite);
+    this.synchronization = new SynchronizationStore(this.#sqlite,
+      (snapshot) => this.#reconcileMailbox(snapshot),
+      (tenantId, provider, previous, current) => this.#recordProviderMove(tenantId, provider, previous, current),
+      (tenantId, id) => this.#getMessage(tenantId, id));
   }
 
   close(): void {
@@ -839,6 +845,10 @@ export class Store {
   }
 
   async reconcileMailbox(snapshot: MailboxSnapshot): Promise<CanonicalMessage[]> {
+    return this.#reconcileMailbox(snapshot);
+  }
+
+  #reconcileMailbox(snapshot: MailboxSnapshot): CanonicalMessage[] {
     for (const observation of snapshot.observations) {
       if (observation.location.providerId === "") throw new Error("Provider ID must be non-empty when present");
       if (observation.providerConversationId === "") {
@@ -1023,7 +1033,7 @@ export class Store {
           ? this.#sqlite.query(`
               UPDATE message_locations SET
                 message_id = ?, uid_validity = ?, uid = ?, modseq = ?, provider_id = ?,
-                read = ?, flagged = ?, observed_at = ?
+                read = ?, flagged = ?, observed_at = ?, sync_revision = sync_revision + 1
               WHERE id = ?
               RETURNING id
             `).get(canonicalId, observation.location.uidValidity, observation.location.uid,
@@ -1071,6 +1081,10 @@ export class Store {
     previous: MessageRef,
     current: MessageRef,
   ): Promise<boolean> {
+    return this.#recordProviderMove(tenantId, provider, previous, current);
+  }
+
+  #recordProviderMove(tenantId: string, provider: MailProviderKind, previous: MessageRef, current: MessageRef): boolean {
     if (!tenantId.trim()) throw new Error("A tenant ID is required");
     if (previous.accountId !== current.accountId) throw new Error("Provider moves cannot cross accounts");
     if (previous.providerId === "" || current.providerId === "") {
@@ -2300,6 +2314,15 @@ function mergeCanonicalMessages(
   now: string,
 ): void {
   mergeMessageConversationRelations(sqlite, tenantId, retainedMessageId, removedMessageId);
+  if (sqlite.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='indexed_messages'").get()) {
+    sqlite.query(`INSERT INTO indexed_messages(tenant_id,account_id,message_id,received_at,content,updated_at)
+      SELECT tenant_id,account_id,?,received_at,content,updated_at FROM indexed_messages WHERE tenant_id=? AND message_id=?
+      ON CONFLICT(tenant_id,account_id,message_id) DO UPDATE SET
+        content=CASE WHEN excluded.updated_at>indexed_messages.updated_at THEN excluded.content ELSE indexed_messages.content END,
+        received_at=CASE WHEN excluded.updated_at>indexed_messages.updated_at THEN excluded.received_at ELSE indexed_messages.received_at END,
+        updated_at=MAX(excluded.updated_at,indexed_messages.updated_at)`).run(retainedMessageId,tenantId,removedMessageId);
+    sqlite.query("DELETE FROM indexed_messages WHERE tenant_id=? AND message_id=?").run(tenantId,removedMessageId);
+  }
   sqlite.query("UPDATE message_locations SET message_id = ? WHERE tenant_id = ? AND message_id = ?")
     .run(retainedMessageId, tenantId, removedMessageId);
   sqlite.query("UPDATE message_aliases SET message_id = ? WHERE tenant_id = ? AND message_id = ?")
