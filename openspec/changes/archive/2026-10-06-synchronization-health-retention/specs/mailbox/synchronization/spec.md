@@ -15,6 +15,22 @@ The system SHALL expose healthy, catching-up, degraded, disconnected and reautho
 - **WHEN** one account cannot register its provider
 - **THEN** that account is disconnected and other accounts can synchronize
 
+#### Scenario: Global key unavailable
+- **WHEN** stored encrypted accounts exist but the server master key is missing
+- **THEN** initialization fails before per-account registration failures are handled
+
+#### Scenario: Stored secret cannot be authenticated
+- **WHEN** a syntactically valid master key cannot decrypt stored credentials or the stored ciphertext is corrupt
+- **THEN** initialization fails before provider registration rather than classifying the failure as a disconnected account
+
+#### Scenario: Credentials replaced
+- **WHEN** verified IMAP settings or Gmail authorization replace account credentials
+- **THEN** synchronization restarts while preserving the latest failure and last-success evidence until a new page commits
+
+#### Scenario: Startup configuration restored
+- **WHEN** provider registration succeeds after a previous startup configuration failure
+- **THEN** background synchronization resumes unless the job was intentionally canceled or paused for reauthorization
+
 ### Requirement: Bounded disposable content retention
 The system SHALL expire indexed preview content after a configurable age since refresh (30 days by default) and evict oldest content until each account fits its configurable UTF-8 content budget (100 MiB by default). It SHALL enforce retention after indexing and during background maintenance even when no provider work succeeds.
 

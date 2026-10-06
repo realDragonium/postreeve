@@ -10,7 +10,7 @@ const failureMessages = {
 
 export function accountHealth(account: Account, job: SyncJob | undefined, connected: boolean,
   now: number, staleAfterMs: number, retainedContentBytes: number): AccountHealth {
-  const disconnected = !connected || !job || job.state === "canceled";
+  const disconnected = !connected || !job || job.provider_unavailable === 1 || job.state === "canceled";
   const state: AccountHealth["state"] = disconnected ? "disconnected"
     : job.error === "reauthorization" ? "reauthorization-required"
     : job.error || (job.last_success_at !== null && now - job.last_success_at > staleAfterMs) ? "degraded"

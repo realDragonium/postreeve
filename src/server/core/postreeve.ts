@@ -165,11 +165,15 @@ export class PostreeveService {
 
   async initialize(): Promise<void> {
     const accounts = await this.#store.listAccounts();
-    for (const account of accounts) {
-      try { this.#registerStoredAccount(account); }
+    const registrations = accounts.map(account => ({ account, credentials: account.encryptedCredentials === null
+      ? null : this.#vault.decrypt(account.encryptedCredentials) }));
+    for (const { account, credentials } of registrations) {
+      try { this.#registerStoredAccount(account, credentials ?? undefined); }
       catch {
+        this.#providers.remove(account.id);
+        this.#senders.remove(account.id);
         this.synchronization.schedule(account.id);
-        this.synchronization.cancel(account.id);
+        this.synchronization.setProviderAvailable(account.id, false);
       }
     }
   }
@@ -197,7 +201,7 @@ export class PostreeveService {
       try { this.#registerStoredAccount(account); }
       catch {
         this.synchronization.schedule(accountId);
-        this.synchronization.cancel(accountId);
+        this.synchronization.setProviderAvailable(accountId, false);
         return (await this.synchronizationStatus()).accounts.find(item => item.account.id === accountId)!;
       }
     }
@@ -1470,9 +1474,9 @@ export class PostreeveService {
     return null;
   }
 
-  #registerStoredAccount(account: StoredAccount): void {
-    const credentials = this.#credentialsFor(account);
+  #registerStoredAccount(account: StoredAccount, credentials = this.#credentialsFor(account)): void {
     this.#registerClients(account.id, this.#clientsFor(toPublicAccount(account), credentials), false);
+    this.synchronization.setProviderAvailable(account.id, true);
   }
 
   async #persistObservedMessages(

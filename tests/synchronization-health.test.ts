@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createApi } from "../src/server/api";
+import { PostreeveService } from "../src/server/core/postreeve";
+import { CredentialVault } from "../src/server/security/credentials";
+import { MailProviderRegistry } from "../src/server/mail/provider";
+import { MailSenderRegistry } from "../src/server/mail/sender";
 import { Store } from "../src/server/db/store";
 import type { MailSynchronization, SyncPage } from "../src/server/mail/synchronization";
 import { SynchronizationError } from "../src/server/mail/synchronization";
@@ -79,6 +83,71 @@ describe("synchronization health and recovery", () => {
     await h.service.synchronization.runOnce();
     expect(await h.health()).toMatchObject({ state: "degraded", lastSuccessAt: 0, failure: { kind: "invalid-data" } });
   });
+
+  test("missing global master key fails initialization before accounts are paused", async () => {
+    const h = await harness();
+    const service = new PostreeveService(h.store, { tenantId: tenant }, new MailProviderRegistry(), new MailSenderRegistry(),
+      new CredentialVault(""), () => { throw new Error("Must validate the key first"); }, () => { throw new Error("Unused"); });
+    await expect(service.initialize()).rejects.toThrow("POSTREEVE_MASTER_KEY");
+    expect(h.store.synchronization.jobs(tenant)[0]).toMatchObject({ state: "queued", provider_unavailable: 0 });
+  });
+
+  for (const invalid of ["wrong-key", "corrupt-secret"] as const) {
+    test(`authenticated stored credential failures stop startup before provider registration: ${invalid}`, async () => {
+      const h = await harness();
+      if (invalid === "corrupt-secret") {
+        const account = (await h.store.getAccount(h.account.id))!;
+        await h.store.updateAccount({ ...account, encryptedCredentials: "corrupt synthetic ciphertext" });
+      }
+      let registered = false;
+      const service = new PostreeveService(h.store, { tenantId: tenant }, new MailProviderRegistry(), new MailSenderRegistry(),
+        new CredentialVault(Buffer.alloc(32, invalid === "wrong-key" ? 8 : 7).toString("base64")),
+        () => { registered = true; return h.providerForAccount(h.account.id)!; }, () => { throw new Error("Unused"); });
+      await expect(service.initialize()).rejects.toThrow();
+      expect(registered).toBe(false);
+      expect(h.store.synchronization.jobs(tenant)[0]).toMatchObject({ state: "queued", provider_unavailable: 0 });
+    });
+  }
+
+  test("saving verified replacement settings preserves failure and last-success evidence until a page commits", async () => {
+    const h = await harness();
+    await h.service.synchronization.runOnce();
+    h.clock(10); h.fail(new SynchronizationError("reauthorization"));
+    await h.service.synchronization.runOnce();
+    h.clock(20);
+    await h.service.updateAccount(h.account.id, testAccountInput());
+    expect(await h.health()).toMatchObject({ state: "reauthorization-required", lastSuccessAt: 0,
+      failure: { kind: "reauthorization", at: 10 } });
+    expect(h.store.synchronization.scopes({ tenantId: tenant, accountId: h.account.id })).toEqual([]);
+    await h.service.synchronization.runOnce();
+    expect(await h.health()).toMatchObject({ lastSuccessAt: 20, failure: null });
+  });
+
+  for (const previous of ["active", "canceled", "reauthorization"] as const) {
+    test(`restored startup configuration preserves intentional ${previous} scheduling state`, async () => {
+      const h = await harness();
+      if (previous === "canceled") h.service.synchronization.cancel(h.account.id);
+      if (previous === "reauthorization") {
+        h.fail(new SynchronizationError("reauthorization"));
+        await h.service.synchronization.runOnce();
+      }
+      let available = false;
+      const restart = () => new PostreeveService(h.store, { tenantId: tenant, synchronization: { now: () => 100 } },
+        new MailProviderRegistry(), new MailSenderRegistry(), new CredentialVault(Buffer.alloc(32, 7).toString("base64")),
+        () => { if (!available) throw new Error("Provider configuration unavailable"); return h.providerForAccount(h.account.id)!; },
+        () => ({ async verifyConnection() {}, async send() { throw new Error("Sending is not part of synchronization"); } }));
+      const failedStartup = restart();
+      await failedStartup.initialize();
+      expect((await failedStartup.synchronizationStatus()).accounts[0]!.state).toBe("disconnected");
+      expect(await failedStartup.synchronization.runOnce()).toBe(false);
+      available = true;
+      const restored = restart();
+      await restored.initialize();
+      const health = (await restored.synchronizationStatus()).accounts[0]!;
+      expect(health.state).toBe(previous === "active" ? "catching-up" : previous === "canceled" ? "disconnected" : "reauthorization-required");
+      expect(await restored.synchronization.runOnce()).toBe(previous === "active");
+    });
+  }
 
   test("unavailable stored account does not block other accounts and recovery exposes no credentials", async () => {
     const h = await harness();
