@@ -34,6 +34,14 @@ A missing, duplicate, unexpected or incomplete fetched summary SHALL NOT advance
 - **WHEN** SEARCH reports one UID with a count of three or includes PARTIAL evidence
 - **THEN** synchronization rejects the observation without changing the checkpoint or removing indexed locations
 
+#### Scenario: Client normalizes an uncertain plain SEARCH response
+- **WHEN** the client discards malformed SEARCH tokens, truncates results or receives no SEARCH response before command completion
+- **THEN** synchronization rejects the command using protocol-level evidence even if normalized ALL and COUNT agree
+
+#### Scenario: Confirmed empty plain SEARCH
+- **WHEN** a server without ESEARCH returns an explicit empty SEARCH response and successful completion
+- **THEN** synchronization may complete an empty snapshot and reconcile removals
+
 ### Requirement: Mailbox reset repair
 A changed UIDVALIDITY SHALL start a new snapshot for only the affected mailbox. Completing that snapshot SHALL replace obsolete locations while retaining canonical messages and provider-independent conversation state.
 
