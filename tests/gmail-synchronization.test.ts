@@ -210,3 +210,150 @@ test("Gmail adapter through durable runner preserves identity across repair, res
     expect(store.synchronization.indexed("other-tenant", account.id, "INBOX")).toHaveLength(2);
   } finally { store.close(); }
 });
+
+test("malformed synchronization metadata preserves indexed content, flags, locations and history", async () => {
+  let response: unknown = metadata("a", ["INBOX", "UNREAD", "STARRED"]);
+  let changing = false;
+  const { client } = fixture(url => {
+    if (url.pathname.endsWith("/profile")) return json({ historyId: "100" });
+    if (url.pathname.endsWith("/messages")) return json({ messages: [{ id: "a" }] });
+    if (url.pathname.endsWith("/history")) return changing
+      ? json({ historyId: "130", history: [{ id: "125", labelsRemoved: [{ message: { id: "a" } }] }] })
+      : json({ historyId: "120" });
+    return json(response);
+  });
+  const store = new Store(":memory:");
+  try {
+    await store.insertAccount({ ...account, encryptedCredentials: null });
+    const registry = new MailProviderRegistry(); registry.register(account.id, client);
+    let now = 0;
+    const runner = new SynchronizationRunner(store.synchronization, scope.tenantId, registry, { now: () => now, pollMs: 100 });
+    runner.schedule(account.id);
+    for (let i = 0; i < 3; i++) await runner.runOnce();
+    const before = store.synchronization.indexed(scope.tenantId, account.id, "INBOX");
+    expect(before).toHaveLength(1);
+    const checkpoint = store.synchronization.scopes(scope)[0]!.cursor;
+    changing = true; now = 100;
+    const full = metadata("a", []);
+    const malformed: unknown[] = [
+      { id: "a", labelIds: [], payload: {} },
+      { ...full, payload: {} },
+      { ...full, historyId: undefined },
+      { ...full, threadId: undefined },
+      { ...full, internalDate: undefined },
+      { ...full, internalDate: "invalid" },
+    ];
+    for (response of malformed) {
+      runner.retry(account.id);
+      await runner.runOnce();
+      expect(store.synchronization.jobs(scope.tenantId)[0]).toMatchObject({ state: "retry", error: "invalid-data" });
+      expect(store.synchronization.scopes(scope)[0]?.cursor).toBe(checkpoint);
+      expect(store.synchronization.indexed(scope.tenantId, account.id, "INBOX")).toEqual(before);
+      expect(store.synchronization.indexed(scope.tenantId, account.id, "__archive__")).toEqual([]);
+    }
+    // Empty RFC headers and an empty label set are valid when the transport metadata is complete.
+    response = { ...full, payload: { headers: [] } };
+    runner.retry(account.id); await runner.runOnce();
+    expect(store.synchronization.jobs(scope.tenantId)[0]).toMatchObject({ coverage: "complete", error: null });
+    expect(store.synchronization.indexed(scope.tenantId, account.id, "__archive__")[0]?.canonicalId).toBe(before[0]?.canonicalId);
+  } finally { store.close(); }
+});
+
+for (const rejection of [400, 404]) {
+  test(`repeated repair rejection ${rejection} reaches durable failure instead of restarting indefinitely`, async () => {
+    let profiles = 0;
+    let reject = true;
+    const { client } = fixture(url => {
+      if (url.pathname.endsWith("/profile")) { profiles++; return json({ historyId: "100" }); }
+      if (url.pathname.endsWith("/messages")) {
+        if (rejection === 400 && reject) return url.searchParams.has("pageToken")
+          ? json({ error: "invalid page token" }, 400) : json({ nextPageToken: "expired" });
+        return json({});
+      }
+      return reject ? json({ error: "history expired" }, 404) : json({ historyId: "200" });
+    });
+    const store = new Store(":memory:");
+    try {
+      await store.insertAccount({ ...account, encryptedCredentials: null });
+      const registry = new MailProviderRegistry(); registry.register(account.id, client);
+      let now = 0;
+      const createRunner = () => new SynchronizationRunner(store.synchronization, scope.tenantId, registry, { now: () => now, pollMs: 100 });
+      let runner = createRunner(); runner.schedule(account.id);
+      let iterations = 0;
+      while (iterations++ < 20 && await runner.runOnce()) {}
+      expect(iterations).toBeLessThan(20);
+      expect(profiles).toBe(4);
+      expect(store.synchronization.jobs(scope.tenantId)[0]).toMatchObject({ state: "retry", error: "provider", coverage: "catching-up" });
+      const checkpoint = store.synchronization.scopes(scope)[0]!.cursor;
+      runner = createRunner(); now = 100;
+      await runner.runOnce();
+      expect(profiles).toBe(4);
+      expect(store.synchronization.scopes(scope)[0]?.cursor).toBe(checkpoint);
+      reject = false;
+      runner.retry(account.id);
+      for (let i = 0; i < 3; i++) await runner.runOnce();
+      expect(store.synchronization.jobs(scope.tenantId)[0]).toMatchObject({ error: null, coverage: "complete" });
+      expect(JSON.parse(store.synchronization.scopes(scope)[0]!.cursor!).repairRestarts).toBe(0);
+    } finally { store.close(); }
+  });
+}
+
+test("resumes a multi-message history record after interrupted label fanout while newer history arrives", async () => {
+  let changing = false;
+  let recordReads = 0;
+  const handler = (url: URL) => {
+    if (url.pathname.endsWith("/profile")) return json({ historyId: "100" });
+    if (url.pathname.endsWith("/messages")) return json({});
+    if (url.pathname.endsWith("/history")) {
+      expect(url.searchParams.get("maxResults")).toBe("1");
+      if (!changing) return json({ historyId: "100" });
+      if (url.searchParams.has("pageToken")) return json({ historyId: "160", history: [{ id: "151", messagesAdded: [{ message: { id: "c" } }] }] });
+      recordReads++;
+      return json({ historyId: recordReads > 1 ? "160" : "150", nextPageToken: "newer",
+        history: [{ id: "101", labelsAdded: [{ message: { id: "b" } }, { message: { id: "a" } }] }] });
+    }
+    const id = url.pathname.split("/").at(-1)!;
+    return json(metadata(id, id === "a" ? ["Label_a", "Label_b"] : ["INBOX"]));
+  };
+  const firstClient = fixture(handler).client;
+  const initial = await finish(firstClient);
+  changing = true;
+  const first = await page(firstClient, initial.cursor, 1);
+  expect(first.messages[0]?.ref).toMatchObject({ providerId: "a", mailbox: "Label_a" });
+  const resumed = await finish(fixture(handler).client, first.cursor, 1);
+  const all = [first, ...resumed.pages];
+  expect(all.flatMap(value => value.messages).map(message => `${message.ref.providerId}/${message.ref.mailbox}`)).toEqual([
+    "a/Label_a", "a/Label_b", "a/__archive__", "b/INBOX", "c/INBOX",
+  ]);
+  expect(all.flatMap(value => value.locationSets ?? []).map(set => set.providerId)).toEqual(["a", "b", "c"]);
+  expect(recordReads).toBe(2);
+  expect(JSON.parse(resumed.cursor!).historyId).toBe("160");
+});
+
+test("bounds serialized pages when a large summary fans out to many Gmail labels", async () => {
+  const labels = Array.from({ length: 100 }, (_, index) => `Label_${String(index).padStart(3, "0")}`);
+  const subject = "s".repeat(30_000);
+  const { client } = fixture(url => {
+    if (url.pathname.endsWith("/profile")) return json({ historyId: "100" });
+    if (url.pathname.endsWith("/messages")) return json({ messages: [{ id: "a" }] });
+    if (url.pathname.endsWith("/history")) return json({ historyId: "120" });
+    return json({ ...metadata("a", labels), payload: { headers: [{ name: "Subject", value: subject }] } });
+  });
+  const result = await finish(client);
+  expect(result.pages.filter(value => value.messages.length > 0).length).toBeGreaterThan(1);
+  for (const value of result.pages) expect(Buffer.byteLength(JSON.stringify(value))).toBeLessThanOrEqual(2 * 1024 * 1024);
+  expect(result.pages.flatMap(value => value.messages).map(message => message.ref.mailbox)).toEqual([...labels, "__archive__"]);
+  expect(result.pages.flatMap(value => value.locationSets ?? [])).toEqual([{ providerId: "a", mailboxes: [...labels, "__archive__"] }]);
+  expect(result.pages.flatMap(value => value.messages).every(message => message.subject === subject)).toBe(true);
+});
+
+test("rejects a single summary that expands beyond the page bound without trimming identity headers", async () => {
+  const references = Array.from({ length: 45_000 }, (_, index) => `<reference-${index}@example.test>`).join(" ");
+  const { client } = fixture(url => {
+    if (url.pathname.endsWith("/profile")) return json({ historyId: "100" });
+    if (url.pathname.endsWith("/messages")) return json({ messages: [{ id: "a" }] });
+    return json({ ...metadata("a"), payload: { headers: [{ name: "References", value: references }] } });
+  });
+  const started = await page(client, null);
+  await expect(page(client, started.cursor)).rejects.toThrow("Synchronization failed: invalid-data");
+});

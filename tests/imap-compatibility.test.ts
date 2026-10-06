@@ -1535,6 +1535,125 @@ describe("IMAP synchronization", () => {
     }
   });
 
+  test("rejects partial and count-inconsistent SEARCH without removing indexed locations", async () => {
+    const state = fakeState();
+    for (const name of [...state.mailboxes.keys()]) if (name !== "INBOX") state.mailboxes.delete(name);
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const registry = new MailProviderRegistry();
+    registry.register(config.accountId, provider);
+    const store = new Store(":memory:");
+    let now = 0;
+    const runner = new SynchronizationRunner(store.synchronization, account.tenantId, registry, { now: () => now, pollMs: 10 });
+    try {
+      await store.insertAccount({ id: config.accountId, kind: "imap", name: "Fixture", email: "fixture@example.test", encryptedCredentials: null });
+      runner.schedule(config.accountId);
+      await runner.runOnce();
+      const checkpoint = store.synchronization.scopes(account)[0]!.cursor;
+      for (const uncertain of [
+        { all: "1", count: 3, partial: { range: "1:1", messages: "1" } },
+        { all: "1", count: 3 },
+        { all: "1", count: 1, partial: { range: "1:1", messages: "1" } },
+        { all: "1:3" },
+      ]) {
+        state.syncSearchResult = uncertain;
+        now += 10;
+        runner.retry(config.accountId);
+        await runner.runOnce();
+        expect(store.synchronization.jobs(account.tenantId)[0]?.state).toBe("retry");
+        expect(store.synchronization.scopes(account)[0]!.cursor).toBe(checkpoint);
+        expect(store.synchronization.indexed(account.tenantId, config.accountId, "INBOX")).toHaveLength(3);
+      }
+      delete state.syncSearchResult;
+      now += 10;
+      runner.retry(config.accountId);
+      await runner.runOnce();
+      expect(store.synchronization.jobs(account.tenantId)[0]?.coverage).toBe("complete");
+      expect(state.searchOptions.at(-1)?.returnOptions).toEqual(["ALL", "COUNT"]);
+    } finally { store.close(); }
+  });
+
+  test("counts unique SEARCH ranges without expanding the full UID namespace", async () => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    state.syncSearchResult = { all: "3:1,2:3", count: 3, min: 1, max: 3 };
+    expect((await page(provider)).messages.map(message => message.ref.uid)).toEqual([1, 2, 3]);
+    state.mailboxes.get("INBOX")!.nextUid = 0x1_0000_0000;
+    state.syncSearchResult = { all: "1:4294967295", count: 0xffff_ffff };
+    const bounded = await page(provider, null, 2);
+    expect(bounded.messages.map(message => message.ref.uid)).toEqual([1, 2]);
+    expect(bounded.hasMore).toBe(true);
+  });
+
+  test.each(["a".repeat(30_000), "📬".repeat(7_500)])("pages oversized batches by bytes without truncating identity or content", async subject => {
+    const state = fakeState();
+    const inbox = state.mailboxes.get("INBOX")!;
+    inbox.messages.clear();
+    for (let uid = 1; uid <= 100; uid++) {
+      const message = fakeMessage(uid, BigInt(uid), `Small source ${uid}`, "Body", new Set());
+      message.envelope = { ...message.envelope, subject };
+      inbox.messages.set(uid, message);
+    }
+    inbox.nextUid = 101;
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const store = new Store(":memory:");
+    try {
+      await store.insertAccount({ id: config.accountId, kind: "imap", name: "Fixture", email: "fixture@example.test", encryptedCredentials: null });
+      store.synchronization.schedule(account.tenantId, config.accountId, 0);
+      const claim = store.synchronization.claim(account.tenantId, 0, 100)!;
+      const scope = { kind: "mailbox" as const, mailbox: "INBOX" };
+      store.synchronization.discover(claim, [scope], 0, 10);
+      let previousUid = 0;
+      for (let count = 0; count < 5; count++) {
+        const checkpoint = store.synchronization.scopes(account)[0]!.cursor;
+        const value = await page(provider, checkpoint, 100);
+        expect(Buffer.byteLength(JSON.stringify(value))).toBeLessThanOrEqual(2 * 1024 * 1024);
+        expect(value.messages[0]!.ref.uid).toBe(previousUid + 1);
+        expect(value.messages.every(message => message.subject === subject && message.messageId === `<message-${message.ref.uid}@example.test>`)).toBe(true);
+        expect(value.snapshots?.[0]?.seen.map(ref => ref.uid)).toEqual(value.messages.map(message => message.ref.uid));
+        previousUid = value.messages.at(-1)!.ref.uid;
+        store.synchronization.commit(claim, scope, value, 0, 10, 100);
+        if (count === 0) {
+          expect(value.hasMore).toBe(true);
+          expect(value.snapshots?.[0]?.phase).toBe("start");
+          expect(value.messages.length).toBeLessThan(100);
+        }
+        if (!value.hasMore) break;
+      }
+      expect(previousUid).toBe(100);
+      expect(store.synchronization.indexed(account.tenantId, config.accountId, "INBOX", 100)).toHaveLength(100);
+      expect(store.synchronization.scopes(account)[0]?.coverage).toBe("complete");
+    } finally { store.close(); }
+  });
+
+  test("classifies an individually oversized summary without advancing or erasing cached identity", async () => {
+    const state = fakeState();
+    for (const name of [...state.mailboxes.keys()]) if (name !== "INBOX") state.mailboxes.delete(name);
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const registry = new MailProviderRegistry();
+    registry.register(config.accountId, provider);
+    const store = new Store(":memory:");
+    let now = 0;
+    const runner = new SynchronizationRunner(store.synchronization, account.tenantId, registry, { now: () => now, pollMs: 10 });
+    try {
+      await store.insertAccount({ id: config.accountId, kind: "imap", name: "Fixture", email: "fixture@example.test", encryptedCredentials: null });
+      runner.schedule(config.accountId);
+      await runner.runOnce();
+      const checkpoint = store.synchronization.scopes(account)[0]!.cursor;
+      const cached = store.synchronization.indexed(account.tenantId, config.accountId, "INBOX");
+      const first = state.mailboxes.get("INBOX")!.messages.get(1)!;
+      first.envelope = { ...first.envelope, subject: "x".repeat(2 * 1024 * 1024) };
+      now = 10;
+      await runner.runOnce();
+      expect(store.synchronization.jobs(account.tenantId)[0]).toMatchObject({ state: "retry", error: "invalid-data" });
+      expect(store.synchronization.scopes(account)[0]!.cursor).toBe(checkpoint);
+      expect(store.synchronization.indexed(account.tenantId, config.accountId, "INBOX")).toEqual(cached);
+      first.envelope.subject = "Representable again";
+      now = 20;
+      await runner.runOnce();
+      expect(store.synchronization.jobs(account.tenantId)[0]).toMatchObject({ state: "queued", error: null });
+    } finally { store.close(); }
+  });
+
   test("does not connect for aborted or cross-account requests", async () => {
     const state = fakeState();
     const provider = new ImapMailProvider(config, fakeFactory(state));
@@ -1646,8 +1765,9 @@ class FakeImapClient implements ImapClient {
       if (this.#state.syncSearchResult !== undefined) return this.#state.syncSearchResult;
       const [low, high] = query.uid.split(":").map(Number);
       if (query.modseq !== undefined && !this.enabled.has("CONDSTORE")) throw new Error("Unsupported MODSEQ search");
-      return { all: messages.filter(message => message.uid >= low! && message.uid <= high!
-        && (query.modseq === undefined || (message.modseq ?? 0n) >= query.modseq)).map(message => message.uid).join(",") };
+      const matching = messages.filter(message => message.uid >= low! && message.uid <= high!
+        && (query.modseq === undefined || (message.modseq ?? 0n) >= query.modseq));
+      return { all: matching.map(message => message.uid).join(","), count: matching.length };
     }
     if (query.uid !== undefined) {
       const uid = Number(query.uid);

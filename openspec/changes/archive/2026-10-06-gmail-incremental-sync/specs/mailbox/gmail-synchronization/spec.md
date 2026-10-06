@@ -12,6 +12,10 @@ The system SHALL consume Gmail history for the exact account from a durable curs
 - **WHEN** Gmail repeats an event for a message moved from Inbox to a custom label
 - **THEN** the existing canonical message retains its conversation, has the current labels and flags, and loses its former Inbox location
 
+#### Scenario: Metadata is incomplete
+- **WHEN** Gmail omits required synchronization metadata or explicit header evidence
+- **THEN** ingestion fails without changing indexed content, flags, locations or the committed cursor
+
 ### Requirement: Gmail repair remains bounded and resumable
 The system SHALL repair missing, invalid or expired cursors using bounded pages, report catching-up during repair, and resume committed progress after interruption. It SHALL catch up changes occurring during full listing before claiming complete coverage.
 
@@ -22,6 +26,18 @@ The system SHALL repair missing, invalid or expired cursors using bounded pages,
 #### Scenario: Changes during repair
 - **WHEN** Gmail changes a message while the full listing is in progress
 - **THEN** history catch-up reconciles that change before complete coverage is reported
+
+#### Scenario: Repair cursors repeatedly fail
+- **WHEN** an unfinished repair exhausts three restarts after Gmail rejects its cursor or page token
+- **THEN** synchronization reports a failure and retains its current cursor instead of silently starting another generation
+
+#### Scenario: Labels multiply a large summary
+- **WHEN** a message belongs to enough labels that its expanded observations exceed a page's byte limit
+- **THEN** observations continue over bounded pages without trimming message identity, and the exact location set is applied after all locations have been observed
+
+#### Scenario: One observation cannot fit
+- **WHEN** a single canonical observation exceeds the synchronization page byte limit
+- **THEN** synchronization reports invalid data without advancing its checkpoint or truncating identity headers
 
 ### Requirement: Gmail repair preserves local workflow state
 Repair SHALL retain canonical, conversation and attention identity while replacing provider facts. Unseen locations SHALL be removed only after a completed account snapshot; unrelated accounts and tenants SHALL remain untouched.
