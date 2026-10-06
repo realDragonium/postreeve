@@ -1,5 +1,6 @@
 import type { ProviderDraftInput } from "./provider";
 import { imapSynchronization } from "./imap-synchronization";
+import { ImapSearchEvidence } from "./imap-search-evidence";
 import {
   ImapFlow,
   type AppendResponseObject,
@@ -709,15 +710,24 @@ export class ImapMailProvider implements MailProvider {
 
   async #withClient<T>(operation: (client: ImapClient) => Promise<T>, signal?: AbortSignal): Promise<T> {
     signal?.throwIfAborted();
+    const searchEvidence = signal ? new ImapSearchEvidence() : undefined;
     const client = this.#createClient({
       host: this.#config.host,
       port: this.#config.port,
       secure: this.#config.secure,
       auth: { user: this.#config.username, pass: this.#config.password },
-      logger: false,
+      logger: searchEvidence?.logger ?? false,
       qresync: true,
     });
 
+    if (searchEvidence) {
+      const search = client.search.bind(client);
+      client.search = async (query, options) => {
+        const result = await search(query, options);
+        searchEvidence.assertComplete();
+        return result;
+      };
+    }
     const abort = () => client.close();
     signal?.addEventListener("abort", abort, { once: true });
     let connected = false;
@@ -725,7 +735,9 @@ export class ImapMailProvider implements MailProvider {
       await client.connect();
       connected = true;
       signal?.throwIfAborted();
-      return await operation(client);
+      const result = await operation(client);
+      searchEvidence?.assertComplete();
+      return result;
     } finally {
       signal?.removeEventListener("abort", abort);
       if (!connected) {
