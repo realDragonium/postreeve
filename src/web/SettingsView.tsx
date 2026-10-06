@@ -1,3 +1,4 @@
+import { SyncStorageView } from "./SyncStorageView";
 import type { Account, Folder } from "../shared/contracts";
 import { assistantTools } from "./assistant-tools";
 import { railFor, type ThemePreference } from "./theme";
@@ -222,8 +223,5 @@ export function SettingsView(props: SettingsViewProps) {
     />;
   }
 
-  return <NotBuilt
-    title="Sync & storage"
-    body="Sync runs on a fixed fifteen-second folder poll with no settings to change, and message bodies are fetched on demand rather than stored. There is nothing to configure here until Postreeve keeps a local cache worth managing."
-  />;
+  return <SyncStorageView googleConfigured={props.googleConfigured} onManageAccount={props.onManageAccount} />;
 }

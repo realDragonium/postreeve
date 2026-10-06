@@ -1,3 +1,4 @@
+import { accountHealthSchema, reauthorizationSchema, synchronizationStatusSchema } from "../shared/synchronization";
 import type { ZodType } from "zod";
 import { z } from "zod";
 import {
@@ -119,6 +120,11 @@ async function requestAttachment(
 }
 
 export const api = {
+  synchronization: (signal?: AbortSignal) => request("/synchronization", synchronizationStatusSchema, withSignal(signal)),
+  retrySynchronization: (accountId: string, signal?: AbortSignal) => request(
+    `/accounts/${encodeURIComponent(accountId)}/synchronization/retry`, accountHealthSchema, { method: "POST", ...withSignal(signal) }),
+  requestReauthorization: (accountId: string, signal?: AbortSignal) => request(
+    `/accounts/${encodeURIComponent(accountId)}/reauthorization`, reauthorizationSchema, { method: "POST", ...withSignal(signal) }),
   outgoingMailLimits: () => request("/outgoing-mail-limits", outgoingMailLimitsSchema),
   uploadDraftFile: (accountId: string, draftId: string, version: number, id: string, file: File): Promise<Draft> =>
     request(`/accounts/${encodeURIComponent(accountId)}/drafts/${encodeURIComponent(draftId)}/files`, draftSchema, {

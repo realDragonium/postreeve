@@ -1,3 +1,4 @@
+import { defaultRetentionPolicy, type AccountHealth, type SynchronizationStatus, type Reauthorization } from "../src/shared/synchronization";
 import { describe, expect, test } from "bun:test";
 
 import { canonicalMessageSummarySchema } from "../src/shared/contracts.ts";
@@ -139,7 +140,22 @@ const batch: OperationBatch = {
   updatedAt: "2026-08-29T12:01:00.000Z",
 };
 
+const health: AccountHealth = { account, state: "catching-up", coverage: "partial", lastSuccessAt: null,
+  failure: null, guidance: "Catching up", retryAvailable: true, nextAttemptAt: 0, retainedContentBytes: 0 };
+
 class FakeServices implements WebMcpServices {
+  async inspectSynchronization(signal: AbortSignal): Promise<SynchronizationStatus> {
+    this.lastSignal = signal;
+    return { accounts: [health], retention: defaultRetentionPolicy };
+  }
+  async retrySynchronization(_id: string, signal: AbortSignal): Promise<AccountHealth> {
+    this.lastSignal = signal;
+    return health;
+  }
+  async requestReauthorization(id: string, signal: AbortSignal): Promise<Reauthorization> {
+    this.lastSignal = signal;
+    return { accountId: id, method: "account-settings", instructions: "Manage this account in Settings." };
+  }
   readonly createFolderCalls: CreateFolderInput[] = [];
   readonly renameFolderCalls: RenameFolderInput[] = [];
   readonly deleteFolderCalls: DeleteFolderInput[] = [];
@@ -253,6 +269,7 @@ describe("Postreeve WebMCP", () => {
     const registration = await registerPostreeveWebMcp(services, modelContext);
 
     const expectedNames = [
+      "inspect_synchronization", "retry_synchronization", "request_reauthorization",
       "list_accounts",
       "list_folders",
       "create_folder",
@@ -301,6 +318,13 @@ describe("Postreeve WebMCP", () => {
 
     const controller = new AbortController();
     const options = { signal: controller.signal };
+    expect(await modelContext.tool("inspect_synchronization").execute({}, options)).toEqual({ accounts: [health], retention: defaultRetentionPolicy });
+    expect(services.lastSignal).toBe(controller.signal);
+    expect(await modelContext.tool("retry_synchronization").execute({ accountId: account.id }, options)).toEqual(health);
+    expect(services.lastSignal).toBe(controller.signal);
+    expect(await modelContext.tool("request_reauthorization").execute({ accountId: account.id }, options)).toMatchObject({ method: "account-settings" });
+    expect(services.lastSignal).toBe(controller.signal);
+    await expect(modelContext.tool("request_reauthorization").execute({ accountId: account.id, password: "not accepted" }, options)).rejects.toThrow();
     expect(await modelContext.tool("list_accounts").execute({}, options)).toEqual([account]);
     expect(services.lastSignal).toBe(controller.signal);
     expect(

@@ -70,6 +70,10 @@ The backend maintains a local summary index through durable account synchronizat
 
 IMAP synchronization resumes bounded mailbox scans after reconnect, uses negotiated QRESYNC and MODSEQ when available, and falls back to full summary observations otherwise. Incomplete fetches keep the prior checkpoint and cached locations. UIDVALIDITY resets rebuild only the affected mailbox while preserving canonical messages and conversation identity.
 
+Synchronization health is available in **Settings → Sync & storage**, including safe retry and human reauthorization instructions. Health distinguishes healthy, catching up, degraded, disconnected and reauthorization required. Authentication failures pause automatic retries; failures contain fixed actionable guidance, never raw provider responses.
+
+Preview content expires 30 days after refresh and is limited to 100 MiB per account by default. Set `POSTREEVE_CONTENT_RETENTION_DAYS` (1–3650) and `POSTREEVE_CONTENT_RETENTION_BYTES` (positive integer) to change these server-wide defaults. Retention clears the oldest eligible previews, preserving every indexed message's headers, identity, locations, conversation links and proposal history. It does not bound total database size or change provider mail. Bodies remain fetched on demand.
+
 ## Use WebMCP with Codex
 
 Keep Postreeve open in the built-in browser in the ChatGPT desktop app. Select **Site tools** in the address bar, then **Available site tools**, to inspect the tools exposed by the page.

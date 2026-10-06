@@ -127,6 +127,15 @@ These features are not provider-backed today. Whether and how they should be exp
 | Automatically forward or redirect mail | Not available | Not available | No forwarding implementation exists. |
 | Schedule mailbox work | Not available | Not available | Postreeve currently acts only while the page and user workflow are active. |
 
+## Synchronization and retention
+
+| Feature | Web UI | WebMCP | WebMCP tool or reason |
+| --- | --- | --- | --- |
+| Inspect account synchronization health and retention policy | Complete | Complete | `inspect_synchronization`; reads local evidence. |
+| Retry account synchronization safely | Complete | Complete | `retry_synchronization`; does not mutate provider mail. |
+| Request human reauthorization instructions | Complete | Complete | `request_reauthorization`; consent and credentials stay in the human authorization flow. |
+| Bounded preview retention | Complete | Complete | Defaults to 30 days since refresh and 100 MiB per account. Headers, locations, canonical identities and workflow history remain retained; this is not a total database-size limit. |
+
 ## Current WebMCP tool set
 
 The following tools are discoverable only while the Postreeve page is open:
@@ -147,3 +156,5 @@ The following tools are discoverable only while the Postreeve page is open:
 Calling `list_messages` or `search_messages` updates the open page to the same account, folder, query, filter, sort order, and message results returned to the AI. Calling a folder-management tool updates the open page's folder list and keeps the selected mailbox valid.
 
 The former proposal tools are absent because there is no matching completed user-facing proposal workflow in the current UI.
+
+Synchronization tools: `inspect_synchronization`, `retry_synchronization`, `request_reauthorization`.

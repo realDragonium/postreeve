@@ -1,3 +1,4 @@
+import { defaultRetentionPolicy, retentionPolicySchema, type RetentionPolicy } from "../../shared/synchronization";
 import type { Database } from "bun:sqlite";
 import { z } from "zod";
 import { messageSummarySchema, type CanonicalMessage, type CanonicalMessageSummary, type MailProviderKind, type MessageRef } from "../../shared/contracts";
@@ -11,6 +12,7 @@ const jobSchema = z.object({
   due_at: z.number(), lease_until: z.number().nullable(), attempts: z.number(),
   error: z.enum(["provider", "reauthorization", "invalid-data"]).nullable(),
   coverage: z.enum(["partial", "catching-up", "complete"]), updated_at: z.number(),
+  error_at: z.number().nullable(), last_success_at: z.number().nullable(),
 });
 export type SyncJob = z.infer<typeof jobSchema>;
 export interface SyncClaim extends SyncAccount { readonly generation: string }
@@ -18,6 +20,11 @@ interface ScopeRow { scope: string; cursor: string | null; due_at: number; cover
 const indexedContentSchema = messageSummarySchema.omit({ ref: true, canonicalId: true, canonicalAliases: true, read: true, flagged: true });
 
 export class SynchronizationStore {
+  #retention: RetentionPolicy = defaultRetentionPolicy;
+
+  get retention(): RetentionPolicy { return { ...this.#retention }; }
+  configureRetention(policy: RetentionPolicy): void { this.#retention = retentionPolicySchema.parse(policy); }
+
   constructor(
     readonly sqlite: Database,
     readonly reconcile: (snapshot: MailboxSnapshot) => CanonicalMessage[],
@@ -35,7 +42,7 @@ export class SynchronizationStore {
       if (replace) {
         this.sqlite.query("DELETE FROM sync_scopes WHERE tenant_id=? AND account_id=?").run(tenantId, accountId);
         this.sqlite.query("DELETE FROM sync_scans WHERE tenant_id=? AND account_id=?").run(tenantId, accountId);
-        this.sqlite.query(`UPDATE sync_jobs SET state='queued',generation=?,due_at=?,lease_until=NULL,attempts=0,error=NULL,coverage='partial',updated_at=?
+        this.sqlite.query(`UPDATE sync_jobs SET state='queued',generation=?,due_at=?,lease_until=NULL,attempts=0,error=NULL,error_at=NULL,last_success_at=NULL,coverage='partial',updated_at=?
           WHERE tenant_id=? AND account_id=?`).run(crypto.randomUUID(), now, now, tenantId, accountId);
       }
     }).immediate();
@@ -51,8 +58,11 @@ export class SynchronizationStore {
   }
 
   retry(tenantId: string, accountId: string, now: number): void {
-    this.sqlite.query(`UPDATE sync_jobs SET state='queued',generation=?,due_at=?,lease_until=NULL,attempts=0,error=NULL,updated_at=? WHERE tenant_id=? AND account_id=?`)
-      .run(crypto.randomUUID(), now, now, tenantId, accountId);
+    this.sqlite.transaction(() => {
+      this.sqlite.query(`UPDATE sync_jobs SET state='queued',generation=?,due_at=?,lease_until=NULL,attempts=0,updated_at=? WHERE tenant_id=? AND account_id=?`)
+        .run(crypto.randomUUID(), now, now, tenantId, accountId);
+      this.sqlite.query("UPDATE sync_scopes SET due_at=? WHERE tenant_id=? AND account_id=?").run(now, tenantId, accountId);
+    }).immediate();
   }
 
   release(claim: SyncClaim, now: number): void {
@@ -64,7 +74,7 @@ export class SynchronizationStore {
   claim(tenantId: string, now: number, leaseMs: number): SyncClaim | null {
     return this.sqlite.transaction(() => {
       const row = this.sqlite.query(`SELECT * FROM sync_jobs WHERE tenant_id=? AND
-        ((state IN ('queued','retry') AND due_at<=?) OR (state='running' AND lease_until<=?)) ORDER BY due_at,account_id LIMIT 1`)
+        ((state IN ('queued','retry') AND (state<>'retry' OR error IS NOT 'reauthorization') AND due_at<=?) OR (state='running' AND lease_until<=?)) ORDER BY due_at,account_id LIMIT 1`)
         .get(tenantId, now, now);
       if (!row) return null;
       const job = jobSchema.parse(row);
@@ -142,6 +152,7 @@ export class SynchronizationStore {
           observations: [toCanonicalObservation(claim.tenantId, claim.provider, message)], authoritative: false })[0]!;
         this.#index(claim, canonical.id, message, now);
       }
+      this.enforceRetention(claim.tenantId, claim.accountId, now);
       for (const move of page.moves) this.move(claim.tenantId, claim.provider, move.previous, move.current);
       for (const ref of page.removed) this.#remove(claim, ref);
       for (const set of page.locationSets) {
@@ -154,19 +165,50 @@ export class SynchronizationStore {
     }).immediate();
   }
 
-  finish(claim: SyncClaim, now: number, pollMs: number): void {
+  finish(claim: SyncClaim, now: number, pollMs: number, madeProgress = true): void {
     if (!this.current(claim, now)) return;
     const scopes = this.scopes(claim);
     const coverage = scopes.some(s => s.coverage === "catching-up") ? "catching-up"
       : scopes.length > 0 && scopes.every(s => s.coverage === "complete") ? "complete" : "partial";
     const due = Math.min(now + pollMs, ...scopes.map(s => s.due_at));
-    this.sqlite.query(`UPDATE sync_jobs SET state='queued',due_at=?,lease_until=NULL,attempts=0,error=NULL,coverage=?,updated_at=?
-      WHERE tenant_id=? AND account_id=? AND generation=? AND state='running'`).run(due, coverage, now, claim.tenantId, claim.accountId, claim.generation);
+    this.sqlite.query(`UPDATE sync_jobs SET state='queued',due_at=?,lease_until=NULL,attempts=CASE WHEN ? THEN 0 ELSE attempts END,error=CASE WHEN ? THEN NULL ELSE error END,
+      error_at=CASE WHEN ? THEN NULL ELSE error_at END,last_success_at=CASE WHEN ? THEN ? ELSE last_success_at END,coverage=?,updated_at=?
+      WHERE tenant_id=? AND account_id=? AND generation=? AND state='running'`).run(due, madeProgress, madeProgress, madeProgress, madeProgress, now, coverage, now, claim.tenantId, claim.accountId, claim.generation);
   }
 
   fail(claim: SyncClaim, now: number, kind: SyncFailureKind, retryMs: number): void {
-    this.sqlite.query(`UPDATE sync_jobs SET state='retry',due_at=?,lease_until=NULL,attempts=attempts+1,error=?,updated_at=?
-      WHERE tenant_id=? AND account_id=? AND generation=? AND state='running'`).run(now + retryMs, kind, now, claim.tenantId, claim.accountId, claim.generation);
+    this.sqlite.query(`UPDATE sync_jobs SET state='retry',due_at=?,lease_until=NULL,attempts=MIN(attempts+1,1000000),error=?,error_at=?,updated_at=?
+      WHERE tenant_id=? AND account_id=? AND generation=? AND state='running'`).run(now + retryMs, kind, now, now, claim.tenantId, claim.accountId, claim.generation);
+  }
+
+  retainedContentBytes(tenantId: string, accountId: string): number {
+    const row = this.sqlite.query("SELECT retained_content_bytes AS bytes FROM sync_jobs WHERE tenant_id=? AND account_id=?")
+      .get(tenantId, accountId) as { bytes: number } | null;
+    return row?.bytes ?? 0;
+  }
+
+  enforceRetention(tenantId: string, accountId: string, now: number): void {
+    this.sqlite.transaction(() => {
+      this.sqlite.query(`UPDATE indexed_messages SET content=json_set(content,'$.preview','')
+        WHERE tenant_id=? AND account_id=? AND updated_at<=? AND json_extract(content,'$.preview')<>''`)
+        .run(tenantId, accountId, now - this.#retention.maxAgeDays * 86_400_000);
+      let excess = this.retainedContentBytes(tenantId, accountId) - this.#retention.maxContentBytes;
+      while (excess > 0) {
+        const oldest = this.sqlite.query(`SELECT message_id,length(CAST(json_extract(content,'$.preview') AS BLOB)) AS bytes
+          FROM indexed_messages WHERE tenant_id=? AND account_id=? AND json_extract(content,'$.preview')<>''
+          ORDER BY updated_at,message_id LIMIT 100`).all(tenantId, accountId) as Array<{ message_id: string; bytes: number }>;
+        if (!oldest.length) throw new Error("Indexed content accounting is inconsistent");
+        const expired: string[] = [];
+        for (const row of oldest) {
+          expired.push(row.message_id);
+          excess -= row.bytes;
+          if (excess <= 0) break;
+        }
+        this.sqlite.query(`UPDATE indexed_messages SET content=json_set(content,'$.preview','')
+          WHERE tenant_id=? AND account_id=? AND message_id IN (SELECT value FROM json_each(?))`)
+          .run(tenantId, accountId, JSON.stringify(expired));
+      }
+    }).immediate();
   }
 
   indexed(tenantId: string, accountId: string, mailbox: string, limit = 100): CanonicalMessageSummary[] {
@@ -276,6 +318,33 @@ export class SynchronizationStore {
         PRIMARY KEY(tenant_id,account_id,scope,location_id),
         FOREIGN KEY(tenant_id,account_id,location_id) REFERENCES message_locations(tenant_id,account_id,id) ON DELETE CASCADE,
         FOREIGN KEY(tenant_id,account_id,scope) REFERENCES sync_scans(tenant_id,account_id,scope) ON DELETE CASCADE);
+    `);
+    const jobColumns = this.sqlite.query("PRAGMA table_info(sync_jobs)").all() as Array<{ name: string }>;
+    for (const column of ["error_at", "last_success_at"]) {
+      if (!jobColumns.some(existing => existing.name === column)) this.sqlite.exec(`ALTER TABLE sync_jobs ADD COLUMN ${column} INTEGER`);
+    }
+    this.sqlite.exec("UPDATE sync_jobs SET error_at=updated_at WHERE error IS NOT NULL AND error_at IS NULL");
+    if (!jobColumns.some(column => column.name === "retained_content_bytes")) {
+      this.sqlite.exec(`ALTER TABLE sync_jobs ADD COLUMN retained_content_bytes INTEGER NOT NULL DEFAULT 0;
+        UPDATE sync_jobs SET retained_content_bytes=(SELECT COALESCE(SUM(length(CAST(json_extract(content,'$.preview') AS BLOB))),0)
+          FROM indexed_messages WHERE tenant_id=sync_jobs.tenant_id AND account_id=sync_jobs.account_id);`);
+    }
+    this.sqlite.exec(`
+      CREATE INDEX IF NOT EXISTS indexed_previews_age ON indexed_messages(tenant_id,account_id,updated_at,message_id)
+        WHERE json_extract(content,'$.preview')<>'';
+      CREATE TRIGGER IF NOT EXISTS indexed_preview_insert AFTER INSERT ON indexed_messages BEGIN
+        UPDATE sync_jobs SET retained_content_bytes=retained_content_bytes+length(CAST(json_extract(NEW.content,'$.preview') AS BLOB))
+          WHERE tenant_id=NEW.tenant_id AND account_id=NEW.account_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS indexed_preview_update AFTER UPDATE OF content ON indexed_messages BEGIN
+        UPDATE sync_jobs SET retained_content_bytes=retained_content_bytes
+          +length(CAST(json_extract(NEW.content,'$.preview') AS BLOB))-length(CAST(json_extract(OLD.content,'$.preview') AS BLOB))
+          WHERE tenant_id=NEW.tenant_id AND account_id=NEW.account_id;
+      END;
+      CREATE TRIGGER IF NOT EXISTS indexed_preview_delete AFTER DELETE ON indexed_messages BEGIN
+        UPDATE sync_jobs SET retained_content_bytes=retained_content_bytes-length(CAST(json_extract(OLD.content,'$.preview') AS BLOB))
+          WHERE tenant_id=OLD.tenant_id AND account_id=OLD.account_id;
+      END;
     `);
     const scanColumns = this.sqlite.query("PRAGMA table_info(sync_scans)").all() as Array<{ name: string }>;
     if (!scanColumns.some(column => column.name === "completed_generation")) {

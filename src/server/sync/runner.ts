@@ -1,9 +1,11 @@
+import type { RetentionPolicy } from "../../shared/synchronization";
 import type { MailProviderRegistry } from "../mail/provider";
 import { additiveSynchronization, SynchronizationError, syncScopeSchema } from "../mail/synchronization";
 import type { SynchronizationStore, SyncClaim } from "./store";
 
 export interface SynchronizationOptions {
   readonly now?: () => number;
+  readonly retention?: RetentionPolicy;
   readonly pollMs?: number;
   readonly leaseMs?: number;
   readonly pageLimit?: number;
@@ -19,6 +21,7 @@ export class SynchronizationRunner {
   readonly #active = new Map<string, { claim: SyncClaim; controller: AbortController }>();
   #timer: ReturnType<typeof setTimeout> | undefined;
   #stopped = true;
+  #lastMaintenance = -Infinity;
   #running: Promise<boolean> | undefined;
 
   constructor(readonly store: SynchronizationStore, readonly tenantId: string, readonly providers: MailProviderRegistry, options: SynchronizationOptions = {}) {
@@ -28,7 +31,11 @@ export class SynchronizationRunner {
     this.#leaseMs = positive(options.leaseMs ?? 120_000);
     this.#pageLimit = positive(options.pageLimit ?? 100);
     this.#maxScopes = positive(options.maxScopes ?? 1_000);
+    if (options.retention) store.configureRetention(options.retention);
   }
+
+  now(): number { return this.#now(); }
+  get staleAfterMs(): number { return Math.max(this.#pollMs * 5, this.#leaseMs * 2); }
 
   schedule(accountId: string, replace = false): void {
     if (replace) this.#active.get(accountId)?.controller.abort();
@@ -73,6 +80,10 @@ export class SynchronizationRunner {
     this.#timer.unref();
   }
   async #run(): Promise<boolean> {
+    if (this.#now() - this.#lastMaintenance >= this.#pollMs) {
+      for (const job of this.store.jobs(this.tenantId)) this.store.enforceRetention(this.tenantId, job.account_id, this.#now());
+      this.#lastMaintenance = this.#now();
+    }
     const claim = this.store.claim(this.tenantId, this.#now(), this.#leaseMs);
     if (!claim) return false;
     const controller = new AbortController();
@@ -84,7 +95,7 @@ export class SynchronizationRunner {
     } catch (error) {
       const job = this.store.jobs(this.tenantId).find(job => job.account_id === claim.accountId);
       const retryMs = Math.min(this.#pollMs * 2 ** Math.min(job?.attempts ?? 0, 6), 3_600_000);
-      this.store.fail(claim, this.#now(), error instanceof SynchronizationError ? error.kind : "provider", retryMs);
+      this.store.fail(claim, this.#now(), synchronizationFailureKind(error), retryMs);
     } finally {
       clearTimeout(timeout);
       if (this.#active.get(claim.accountId)?.controller === controller) this.#active.delete(claim.accountId);
@@ -107,7 +118,7 @@ export class SynchronizationRunner {
         this.store.commit(claim, parsed, page, this.#now(), this.#pollMs, this.#pageLimit);
       } catch { throw new SynchronizationError("invalid-data"); }
     }
-    this.store.finish(claim, this.#now(), this.#pollMs);
+    this.store.finish(claim, this.#now(), this.#pollMs, scope !== undefined);
   }
 }
 
@@ -124,4 +135,13 @@ async function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise
 function positive(value: number): number {
   if (!Number.isSafeInteger(value) || value < 1) throw new Error("Synchronization limits must be positive integers");
   return value;
+}
+
+function synchronizationFailureKind(error: unknown): "provider" | "reauthorization" | "invalid-data" {
+  if (error instanceof SynchronizationError) return error.kind;
+  // ImapFlow marks failed authentication explicitly; raw server response text is not retained.
+  if (typeof error === "object" && error !== null && "authenticationFailed" in error && error.authenticationFailed === true) {
+    return "reauthorization";
+  }
+  return "provider";
 }

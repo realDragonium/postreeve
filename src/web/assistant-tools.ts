@@ -8,6 +8,9 @@ export interface AssistantTool {
 }
 
 export const assistantTools: readonly AssistantTool[] = [
+  { name: "inspect_synchronization", effect: "read" },
+  { name: "retry_synchronization", effect: "write · safe retry" },
+  { name: "request_reauthorization", effect: "human authorization instructions" },
   { name: "list_accounts", effect: "read" },
   { name: "list_folders", effect: "read" },
   { name: "list_messages", effect: "read" },

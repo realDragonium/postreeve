@@ -1,3 +1,4 @@
+import { accountHealthSchema, reauthorizationSchema, synchronizationStatusSchema } from "../../shared/synchronization";
 import { z } from "zod";
 
 import { uniqueCanonicalMessages } from "../../shared/canonical-messages.ts";
@@ -71,6 +72,9 @@ const listActivityInputSchema = z.object({ accountId: z.string().min(1) }).stric
 const undoBatchInputSchema = z.object({ batchId: batchIdSchema }).strict();
 
 export const webMcpInputSchemas = {
+  inspect_synchronization: noInputSchema,
+  retry_synchronization: listFoldersInputSchema,
+  request_reauthorization: listFoldersInputSchema,
   list_accounts: noInputSchema,
   list_folders: listFoldersInputSchema,
   create_folder: createFolderToolInputSchema,
@@ -132,6 +136,33 @@ function showMailboxView(
 
 export function createPostreeveWebMcpTools(services: WebMcpServices): readonly WebMcpTool[] {
   return [
+    {
+      name: "inspect_synchronization", title: "Inspect synchronization health",
+      description: "Inspect local account synchronization state, sanitized failures and retention policy without contacting mail providers.",
+      inputSchema: inputJsonSchema(noInputSchema), annotations: readOnlyAnnotations,
+      execute: async (input, { signal }) => {
+        noInputSchema.parse(input);
+        return synchronizationStatusSchema.parse(await services.inspectSynchronization(signal));
+      },
+    },
+    {
+      name: "retry_synchronization", title: "Retry account synchronization",
+      description: "Request a safe background retry for an account. Does not modify provider mail or replace credentials.",
+      inputSchema: inputJsonSchema(listFoldersInputSchema), annotations: mutatingAnnotations,
+      execute: async (input, { signal }) => {
+        const { accountId } = listFoldersInputSchema.parse(input);
+        return accountHealthSchema.parse(await services.retrySynchronization(accountId, signal));
+      },
+    },
+    {
+      name: "request_reauthorization", title: "Request human reauthorization instructions",
+      description: "Get instructions for the person to reauthorize an account through existing settings or Google consent. Never accepts credentials or grants authorization.",
+      inputSchema: inputJsonSchema(listFoldersInputSchema), annotations: mutatingAnnotations,
+      execute: async (input, { signal }) => {
+        const { accountId } = listFoldersInputSchema.parse(input);
+        return reauthorizationSchema.parse(await services.requestReauthorization(accountId, signal));
+      },
+    },
     {
       name: "list_accounts",
       title: "List email accounts",

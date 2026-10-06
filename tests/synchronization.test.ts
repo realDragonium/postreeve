@@ -70,6 +70,7 @@ describe("synchronization index", () => {
     const indexed = sync.indexed(tenant, "account", "INBOX");
     expect(new Set(indexed.map(m => m.canonicalId)).size).toBe(1);
     expect(indexed[0]!.canonicalAliases).toContain(original.canonicalId);
+    expect(sync.retainedContentBytes(tenant, "account")).toBe(Buffer.byteLength(indexed[0]!.preview));
   });
 
   test("rolls back messages and checkpoint when a later snapshot is invalid", async () => {
@@ -155,6 +156,11 @@ describe("synchronization index", () => {
     expect(() => commit(first.sync, first.claim, page([message("account", 3)]), 101)).toThrow("expired");
     commit(second.synchronization, resumed, page([], { snapshots: [{ scope: mailbox, generation: "restart", phase: "complete", seen: [] }] }), 101);
     expect(second.synchronization.indexed(tenant, "account", "INBOX").map(m => m.ref.uid)).toEqual([1]);
+    second.synchronization.fail(resumed, 102, "invalid-data", 10);
+    const reopened = new Store(path);
+    cleanup.push(() => reopened.close());
+    expect(reopened.synchronization.jobs(tenant)[0]).toMatchObject({ error: "invalid-data", error_at: 102 });
+    expect(reopened.synchronization.retainedContentBytes(tenant, "account")).toBe(2 * Buffer.byteLength("Indexed preview"));
   });
 
   test("accepts a full page with matching snapshot evidence but rejects oversized collections", async () => {
@@ -175,13 +181,13 @@ describe("durable synchronization runner", () => {
       async fetchPage(request) {
         cursors.push(request.cursor);
         if (request.cursor === null) return page([message(request.account.accountId)], { cursor: "next", hasMore: true });
-        if (failures++ < 2) throw new SynchronizationError("reauthorization");
+        if (failures++ < 2) throw new SynchronizationError("provider");
         return page([message(request.account.accountId, 2)], { cursor: "done", coverage: "complete" });
       },
     });
     await harness.runner.runOnce();
     await harness.runner.runOnce();
-    expect(harness.store.synchronization.jobs(tenant)[0]).toMatchObject({ state: "retry", attempts: 1, due_at: 10, error: "reauthorization" });
+    expect(harness.store.synchronization.jobs(tenant)[0]).toMatchObject({ state: "retry", attempts: 1, due_at: 10, error: "provider" });
     expect(await harness.runner.runOnce()).toBe(false);
     harness.clock(10);
     await harness.runner.runOnce();

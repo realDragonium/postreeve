@@ -151,6 +151,8 @@ export class MailProviderRegistry {
     this.#providers.delete(accountId);
   }
 
+  has(accountId: string): boolean { return this.#providers.has(accountId); }
+
   forAccount(accountId: string): MailProvider {
     const provider = this.#providers.get(accountId);
     if (!provider) throw new Error(`No mail provider is configured for account ${accountId}`);

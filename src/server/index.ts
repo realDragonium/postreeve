@@ -1,3 +1,4 @@
+import { defaultRetentionPolicy } from "../shared/synchronization";
 import { DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_MAX_MESSAGE_BYTES } from "./mail/outgoing-content";
 import { serveStatic } from "hono/bun";
 import { Hono } from "hono";
@@ -23,12 +24,16 @@ const googleClientId = process.env.POSTREEVE_GOOGLE_CLIENT_ID?.trim() ?? "";
 const googleClientSecret = process.env.POSTREEVE_GOOGLE_CLIENT_SECRET?.trim() ?? "";
 
 const serverConfig = z.object({
+  retentionDays: z.coerce.number().int().min(1).max(3650),
+  retentionBytes: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER),
   hostname: z.string().trim().min(1),
   port: z.coerce.number().int().min(1).max(65535),
   maxAttachmentBytes: z.coerce.number().int().positive(),
   maxUploadBytes: z.coerce.number().int().positive(),
   maxMessageBytes: z.coerce.number().int().positive(),
 }).parse({
+  retentionDays: process.env.POSTREEVE_CONTENT_RETENTION_DAYS ?? defaultRetentionPolicy.maxAgeDays,
+  retentionBytes: process.env.POSTREEVE_CONTENT_RETENTION_BYTES ?? defaultRetentionPolicy.maxContentBytes,
   maxUploadBytes: process.env.POSTREEVE_MAX_UPLOAD_BYTES ?? String(DEFAULT_MAX_UPLOAD_BYTES),
   maxMessageBytes: process.env.POSTREEVE_MAX_MESSAGE_BYTES ?? String(DEFAULT_MAX_MESSAGE_BYTES),
   hostname: process.env.POSTREEVE_HOST ?? "127.0.0.1",
@@ -47,6 +52,7 @@ const googleOAuth = googleClientId && googleClientSecret
 const service = new PostreeveService(
   store,
   { tenantId: "local", maxAttachmentBytes: serverConfig.maxAttachmentBytes,
+    synchronization: { retention: { maxAgeDays: serverConfig.retentionDays, maxContentBytes: serverConfig.retentionBytes } },
     maxUploadBytes: serverConfig.maxUploadBytes, maxMessageBytes: serverConfig.maxMessageBytes },
   providers,
   senders,

@@ -41,6 +41,9 @@ function showFolderList(accountId: string, folders: readonly Folder[]): void {
 }
 
 export const webMcpServices: WebMcpServices = {
+  inspectSynchronization: (signal) => api.synchronization(signal),
+  retrySynchronization: (accountId, signal) => api.retrySynchronization(accountId, signal),
+  requestReauthorization: (accountId, signal) => api.requestReauthorization(accountId, signal),
   listAccounts: (signal) => api.accounts(signal),
   listFolders: (accountId, signal) => api.folders(accountId, signal),
   createFolder: async (input: CreateFolderInput, signal) => {

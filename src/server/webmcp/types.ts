@@ -1,3 +1,4 @@
+import type { AccountHealth, SynchronizationStatus, Reauthorization } from "../../shared/synchronization";
 import type {
   Account,
   CanonicalMessageDetail,
@@ -15,6 +16,9 @@ import type {
 } from "../../shared/contracts.ts";
 
 export interface WebMcpServices {
+  inspectSynchronization(signal: AbortSignal): Promise<SynchronizationStatus>;
+  retrySynchronization(accountId: string, signal: AbortSignal): Promise<AccountHealth>;
+  requestReauthorization(accountId: string, signal: AbortSignal): Promise<Reauthorization>;
   listAccounts(signal: AbortSignal): Promise<readonly Account[]>;
   listFolders(accountId: string, signal: AbortSignal): Promise<readonly Folder[]>;
   createFolder(input: CreateFolderInput, signal: AbortSignal): Promise<readonly Folder[]>;

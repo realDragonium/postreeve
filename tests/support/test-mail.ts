@@ -1,3 +1,4 @@
+import type { SynchronizationOptions } from "../../src/server/sync/runner";
 import type { OutgoingContent } from "../../src/server/mail/outgoing-content";
 import {
   sendMessageInputSchema,
@@ -62,6 +63,7 @@ export function testAccountInput(name = "Work", email = "person@example.test"): 
 }
 
 interface TestHarnessOptions {
+  synchronization?: SynchronizationOptions;
   tenantId?: string;
   maxAttachmentBytes?: number;
   maxUploadBytes?: number;
@@ -118,7 +120,7 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
   const providers = new Map<string, MailProvider>();
   const service = new PostreeveService(
     store,
-    { tenantId, ...(options.maxAttachmentBytes === undefined ? {} : { maxAttachmentBytes: options.maxAttachmentBytes }),
+    { tenantId, ...(options.synchronization ? { synchronization: options.synchronization } : {}), ...(options.maxAttachmentBytes === undefined ? {} : { maxAttachmentBytes: options.maxAttachmentBytes }),
       ...(options.maxUploadBytes === undefined ? {} : { maxUploadBytes: options.maxUploadBytes }),
       ...(options.maxMessageBytes === undefined ? {} : { maxMessageBytes: options.maxMessageBytes }) },
     new MailProviderRegistry(),

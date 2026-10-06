@@ -1,3 +1,5 @@
+import { accountHealth } from "../sync/health";
+import type { AccountHealth, SynchronizationStatus, Reauthorization } from "../../shared/synchronization";
 import { SynchronizationRunner, type SynchronizationOptions } from "../sync/runner";
 import {
   DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_MAX_MESSAGE_BYTES, positiveByteLimit,
@@ -161,7 +163,13 @@ export class PostreeveService {
 
   async initialize(): Promise<void> {
     const accounts = await this.#store.listAccounts();
-    for (const account of accounts) this.#registerStoredAccount(account);
+    for (const account of accounts) {
+      try { this.#registerStoredAccount(account); }
+      catch {
+        this.synchronization.schedule(account.id);
+        this.synchronization.cancel(account.id);
+      }
+    }
   }
 
   async recoverInterruptedDraftSends(): Promise<Draft[]> {
@@ -170,6 +178,38 @@ export class PostreeveService {
       draftClaimOwner,
       new Date().toISOString(),
     );
+  }
+
+  async synchronizationStatus(): Promise<SynchronizationStatus> {
+    const accounts = await this.listAccounts();
+    const store = this.#store.synchronization;
+    const jobs = new Map(store.jobs(this.#context.tenantId).map(job => [job.account_id, job]));
+    return { retention: store.retention, accounts: accounts.map(account => accountHealth(account,
+      jobs.get(account.id), this.#providers.has(account.id), this.synchronization.now(), this.synchronization.staleAfterMs,
+      store.retainedContentBytes(this.#context.tenantId, account.id))) };
+  }
+
+  async retrySynchronization(accountId: string): Promise<AccountHealth> {
+    const account = await this.#requireAccount(accountId);
+    if (!this.#providers.has(accountId)) {
+      try { this.#registerStoredAccount(account); }
+      catch {
+        this.synchronization.schedule(accountId);
+        this.synchronization.cancel(accountId);
+        return (await this.synchronizationStatus()).accounts.find(item => item.account.id === accountId)!;
+      }
+    }
+    this.synchronization.schedule(accountId);
+    this.synchronization.retry(accountId);
+    return (await this.synchronizationStatus()).accounts.find(item => item.account.id === accountId)!;
+  }
+
+  async requestReauthorization(accountId: string): Promise<Reauthorization> {
+    const account = await this.#requireAccount(accountId);
+    return { accountId, method: account.kind === "gmail" ? "google-consent" : "account-settings",
+      instructions: account.kind === "gmail"
+        ? "In Settings > Accounts choose Reauthorise for this Gmail account, then complete Google consent for the same email address."
+        : "In Settings > Accounts choose Manage for this account, update connection credentials, and save after the connection test succeeds." };
   }
 
   async listAccounts(): Promise<Account[]> {

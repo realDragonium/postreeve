@@ -69,6 +69,11 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         return context.redirect(oauthResultUrl(options.oauthReturnUrl, "error"));
       }
     })
+    .get("/synchronization", async (context) => context.json(await service.synchronizationStatus()))
+    .post("/accounts/:accountId/synchronization/retry", zValidator("param", accountParamsSchema), async (context) =>
+      context.json(await service.retrySynchronization(context.req.valid("param").accountId)))
+    .post("/accounts/:accountId/reauthorization", zValidator("param", accountParamsSchema), async (context) =>
+      context.json(await service.requestReauthorization(context.req.valid("param").accountId)))
     .get("/accounts", async (context) => context.json(await service.listAccounts()))
     .post("/accounts/test", zValidator("json", createAccountInputSchema), async (context) => {
       await service.testNewAccountConnection(context.req.valid("json"));
