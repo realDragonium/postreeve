@@ -110,6 +110,36 @@ describe("synchronization index", () => {
     expect(sync.indexed("other", "account", "INBOX")).toHaveLength(1);
   });
 
+  test("replayed starts preserve original revisions and completed scans cannot reopen", async () => {
+    const { store, sync, claim } = await fixture();
+    commit(sync, claim, page([message(), message("account", 2)]));
+    const start = page([], { snapshots: [{ scope: mailbox, generation: "repair", phase: "start", seen: [message().ref] }] });
+    commit(sync, claim, start, 2);
+    await store.reconcileMailbox({ tenantId: tenant, accountId: "account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [toCanonicalObservation(tenant, "imap", message("account", 2, { read: true }))] });
+    commit(sync, claim, start, 3);
+    commit(sync, claim, page([], { snapshots: [{ scope: mailbox, generation: "repair", phase: "complete", seen: [] }] }), 4);
+    expect(sync.indexed(tenant, "account", "INBOX").map(m => m.ref.uid).sort()).toEqual([1, 2]);
+    commit(sync, claim, page([message("account", 3)]), 5);
+    expect(() => commit(sync, claim, start, 6)).toThrow("already completed");
+    commit(sync, claim, page([], { snapshots: [{ scope: mailbox, generation: "next-repair", phase: "start", seen: [] }] }), 7);
+    expect(() => commit(sync, claim, start, 8)).toThrow("already completed");
+    expect(sync.indexed(tenant, "account", "INBOX")).toHaveLength(3);
+  });
+
+  test("deduplicates physical copies before limiting and reads representative flags", async () => {
+    const { store, sync, claim } = await fixture();
+    commit(sync, claim, page([message("account", 3, { messageId: "<1@example.test>", read: true, flagged: false }),
+      message("account", 1), message("account", 2, { receivedAt: "2026-08-01T12:00:00.000Z" })]));
+    const indexed = sync.indexed(tenant, "account", "INBOX", 2);
+    expect(indexed).toHaveLength(2);
+    expect(new Set(indexed.map(m => m.canonicalId)).size).toBe(2);
+    expect(indexed[0]).toMatchObject({ ref: { uid: 3 }, read: true, flagged: false });
+    await store.reconcileMailbox({ tenantId: tenant, accountId: "account", provider: "imap", mailbox: "INBOX", authoritative: false,
+      observations: [toCanonicalObservation(tenant, "imap", message("account", 3, { messageId: "<1@example.test>", read: false, flagged: true }))] });
+    expect(sync.indexed(tenant, "account", "INBOX", 1)[0]).toMatchObject({ ref: { uid: 3 }, read: false, flagged: true });
+  });
+
   test("persists committed cursor and repair evidence across restart and fences old claims", async () => {
     const directory = mkdtempSync(join(tmpdir(), "postreeve-sync-"));
     cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
@@ -192,6 +222,27 @@ describe("durable synchronization runner", () => {
     sync.fail(claim, 111, "provider", 10);
     expect(sync.jobs(tenant)[0]).toMatchObject({ state: "running", generation: replacement.generation });
   });
+
+  for (const action of ["cancel", "replacement"] as const) {
+    test(`shutdown preserves ${action} during pending work`, async () => {
+      const entered = Promise.withResolvers<void>();
+      const delayed = Promise.withResolvers<SyncPage>();
+      const harness = await runnerFixture({ async discoverScopes() { return [mailbox]; }, async fetchPage() { entered.resolve(); return delayed.promise; } });
+      const running = harness.runner.runOnce();
+      await entered.promise;
+      if (action === "cancel") harness.runner.cancel(harness.account.id);
+      else {
+        harness.runner.schedule(harness.account.id, true);
+        harness.store.synchronization.claim(tenant, 0, 100);
+      }
+      const before = harness.store.synchronization.jobs(tenant)[0]!;
+      await harness.runner.stop();
+      expect(harness.store.synchronization.jobs(tenant)[0]).toEqual(before);
+      delayed.resolve(page([message(harness.account.id)]));
+      await running;
+      expect(harness.store.synchronization.indexed(tenant, harness.account.id, "INBOX")).toEqual([]);
+    });
+  }
 
   test("times out an uncooperative provider and persists a retry delay", async () => {
     const harness = await runnerFixture({
