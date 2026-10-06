@@ -92,6 +92,23 @@ describe("synchronization health and recovery", () => {
     expect(h.store.synchronization.jobs(tenant)[0]).toMatchObject({ state: "queued", provider_unavailable: 0 });
   });
 
+  for (const invalid of ["wrong-key", "corrupt-secret"] as const) {
+    test(`authenticated stored credential failures stop startup before provider registration: ${invalid}`, async () => {
+      const h = await harness();
+      if (invalid === "corrupt-secret") {
+        const account = (await h.store.getAccount(h.account.id))!;
+        await h.store.updateAccount({ ...account, encryptedCredentials: "corrupt synthetic ciphertext" });
+      }
+      let registered = false;
+      const service = new PostreeveService(h.store, { tenantId: tenant }, new MailProviderRegistry(), new MailSenderRegistry(),
+        new CredentialVault(Buffer.alloc(32, invalid === "wrong-key" ? 8 : 7).toString("base64")),
+        () => { registered = true; return h.providerForAccount(h.account.id)!; }, () => { throw new Error("Unused"); });
+      await expect(service.initialize()).rejects.toThrow();
+      expect(registered).toBe(false);
+      expect(h.store.synchronization.jobs(tenant)[0]).toMatchObject({ state: "queued", provider_unavailable: 0 });
+    });
+  }
+
   test("saving verified replacement settings preserves failure and last-success evidence until a page commits", async () => {
     const h = await harness();
     await h.service.synchronization.runOnce();

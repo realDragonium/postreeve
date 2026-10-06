@@ -163,9 +163,10 @@ export class PostreeveService {
 
   async initialize(): Promise<void> {
     const accounts = await this.#store.listAccounts();
-    if (accounts.some(account => account.encryptedCredentials !== null)) this.#vault.assertConfigured();
-    for (const account of accounts) {
-      try { this.#registerStoredAccount(account); }
+    const registrations = accounts.map(account => ({ account, credentials: account.encryptedCredentials === null
+      ? null : this.#vault.decrypt(account.encryptedCredentials) }));
+    for (const { account, credentials } of registrations) {
+      try { this.#registerStoredAccount(account, credentials ?? undefined); }
       catch {
         this.#providers.remove(account.id);
         this.#senders.remove(account.id);
@@ -1434,8 +1435,7 @@ export class PostreeveService {
     return null;
   }
 
-  #registerStoredAccount(account: StoredAccount): void {
-    const credentials = this.#credentialsFor(account);
+  #registerStoredAccount(account: StoredAccount, credentials = this.#credentialsFor(account)): void {
     this.#registerClients(account.id, this.#clientsFor(toPublicAccount(account), credentials), false);
     this.synchronization.setProviderAvailable(account.id, true);
   }

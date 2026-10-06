@@ -74,6 +74,10 @@ The system SHALL expose healthy, catching-up, degraded, disconnected and reautho
 - **WHEN** stored encrypted accounts exist but the server master key is missing
 - **THEN** initialization fails before per-account registration failures are handled
 
+#### Scenario: Stored secret cannot be authenticated
+- **WHEN** a syntactically valid master key cannot decrypt stored credentials or the stored ciphertext is corrupt
+- **THEN** initialization fails before provider registration rather than classifying the failure as a disconnected account
+
 #### Scenario: Credentials replaced
 - **WHEN** verified IMAP settings or Gmail authorization replace account credentials
 - **THEN** synchronization restarts while preserving the latest failure and last-success evidence until a new page commits
