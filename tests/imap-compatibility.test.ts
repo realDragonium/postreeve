@@ -1,4 +1,9 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { SynchronizationRunner } from "../src/server/sync/runner";
 import { describe, expect, test } from "bun:test";
+import type { ImapSyncOpenOptions } from "../src/server/mail/imap-synchronization";
 import { simpleParser } from "mailparser";
 import { Readable } from "node:stream";
 import type {
@@ -42,6 +47,8 @@ interface StoredMailbox {
   readonly specialUse?: string;
   readonly flags?: Set<string>;
   nextUid: number;
+  highestModseq?: bigint;
+  noModseq?: boolean;
   readonly messages: Map<number, FetchMessageObject>;
 }
 
@@ -54,6 +61,12 @@ interface FakeState {
   readonly searches: SearchObject[];
   readonly searchOptions: Array<{ uid?: boolean; returnOptions: Array<"MIN" | "MAX" | "COUNT" | "ALL" | { partial: string }> }>;
   readonly fetchQueries: FetchQueryObject[];
+  readonly syncEnabled: Set<string>;
+  readonly syncOpens: ImapSyncOpenOptions[];
+  readonly fetchRanges: number[][];
+  syncSearchResult?: ESearchResult | number[] | false;
+  duplicateFetchUid?: number;
+  unexpectedFetchUid?: number;
   readonly downloads: Array<{ uid: number; part: string | undefined }>;
   eSearchAll?: string;
   lists: number;
@@ -1290,13 +1303,257 @@ describe("Bun IMAP compatibility", () => {
   });
 });
 
+describe("IMAP synchronization", () => {
+  const account = { tenantId: "sync-tenant", accountId: config.accountId, provider: "imap" as const };
+  const page = (provider: ImapMailProvider, cursor: string | null = null, limit = 10, mailbox = "INBOX") =>
+    provider.synchronization.fetchPage({ account, scope: { kind: "mailbox", mailbox }, cursor, limit, signal: new AbortController().signal });
+
+  test("discovers selectable scopes and resumes bounded pages after reconnect", async () => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const scopes = await provider.synchronization.discoverScopes(account, new AbortController().signal);
+    expect(scopes.some(scope => scope.kind === "mailbox" && scope.mailbox === "Container")).toBe(false);
+    const first = await page(provider, null, 2);
+    expect(first.messages.map(message => message.ref.uid)).toEqual([1, 2]);
+    expect(first.snapshots?.[0]?.phase).toBe("start");
+    expect(first.hasMore).toBe(true);
+    const second = await page(new ImapMailProvider(config, fakeFactory(state)), first.cursor, 2);
+    expect(second.messages.map(message => message.ref.uid)).toEqual([3]);
+    expect(second.snapshots?.[0]?.generation).toBe(first.snapshots?.[0]?.generation);
+    expect(second.snapshots?.[0]?.phase).toBe("complete");
+    expect(second.hasMore).toBe(false);
+    expect(second.cursor!.length).toBeLessThan(512);
+  });
+
+  test.each([false, true])("uses MODSEQ and QRESYNC when negotiated (QRESYNC=%s)", async qresync => {
+    const state = fakeState();
+    state.syncEnabled.add("CONDSTORE");
+    if (qresync) state.syncEnabled.add("QRESYNC");
+    const inbox = state.mailboxes.get("INBOX")!;
+    inbox.highestModseq = 13n;
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const first = await page(provider);
+    state.fetchRanges.length = 0;
+    const unchanged = await page(provider, first.cursor);
+    expect(unchanged.messages).toHaveLength(0);
+    expect(unchanged.snapshots?.[0]?.seen.map(ref => ref.uid)).toEqual([1, 2, 3]);
+    expect(state.fetchRanges).toHaveLength(0);
+    expect(state.syncOpens.at(-1)).toEqual(qresync ? { readOnly: true, changedSince: 13n, uidValidity: 101n } : { readOnly: true });
+    inbox.messages.get(2)!.flags = new Set(["\\Seen", "\\Flagged"]);
+    inbox.messages.get(2)!.modseq = 14n;
+    inbox.messages.set(4, fakeMessage(4, 15n, "Arrived", "New", new Set()));
+    inbox.nextUid = 5;
+    inbox.highestModseq = 15n;
+    const changed = await page(provider, unchanged.cursor);
+    expect(changed.messages.map(message => message.ref.uid)).toEqual([2, 4]);
+    expect(changed.messages[0]).toMatchObject({ read: true, flagged: true });
+    expect(state.fetchRanges).toEqual([[2, 4]]);
+  });
+
+  test.each(["absent", "nomodseq", "lost"])("falls back to summaries when MODSEQ is %s", async mode => {
+    const state = fakeState();
+    const inbox = state.mailboxes.get("INBOX")!;
+    inbox.highestModseq = 13n;
+    if (mode !== "absent") state.syncEnabled.add("CONDSTORE");
+    if (mode === "nomodseq") inbox.noModseq = true;
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const first = await page(provider);
+    if (mode === "lost") state.syncEnabled.clear();
+    const second = await page(provider, first.cursor);
+    expect(second.messages).toHaveLength(3);
+    expect(second.coverage).toBe("complete");
+  });
+
+  test("keeps the opening watermark so changes between pages are fetched next cycle", async () => {
+    const state = fakeState();
+    state.syncEnabled.add("CONDSTORE");
+    const inbox = state.mailboxes.get("INBOX")!;
+    inbox.highestModseq = 13n;
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const first = await page(provider, null, 2);
+    inbox.messages.get(1)!.modseq = 14n;
+    inbox.messages.get(1)!.flags = new Set(["\\Flagged"]);
+    inbox.highestModseq = 14n;
+    const second = await page(provider, first.cursor, 2);
+    const nextCycle = await page(provider, second.cursor);
+    expect(nextCycle.messages.map(message => message.ref.uid)).toEqual([1]);
+    expect(nextCycle.messages[0]?.flagged).toBe(true);
+  });
+
+  test.each(["partial", "empty", "duplicate", "unexpected", "flags", "headers"])("rejects %s FETCH and retries the unchanged checkpoint", async mode => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const first = await page(provider, null, 1);
+    if (mode === "partial") state.omittedFetchUids.add(2);
+    if (mode === "empty") { state.omittedFetchUids.add(2); state.omittedFetchUids.add(3); }
+    if (mode === "duplicate") state.duplicateFetchUid = 2;
+    if (mode === "unexpected") state.unexpectedFetchUid = 999;
+    if (mode === "flags") state.fetchWithoutFlags.add(2);
+    if (mode === "headers") state.fetchWithoutHeaders.add(2);
+    await expect(page(provider, first.cursor)).rejects.toThrow("IMAP FETCH");
+    state.omittedFetchUids.clear();
+    delete state.duplicateFetchUid;
+    delete state.unexpectedFetchUid;
+    state.fetchWithoutFlags.clear();
+    state.fetchWithoutHeaders.clear();
+    const retried = await page(provider, first.cursor);
+    expect(retried.messages.map(message => message.ref.uid)).toEqual([2, 3]);
+    expect(retried.snapshots?.[0]?.phase).toBe("complete");
+  });
+
+  test.each([false, { count: 3 }, { all: "1:999" }, { all: "bad" }])("rejects failed or uncertain SEARCH coverage: %j", async response => {
+    const state = fakeState();
+    state.syncSearchResult = response;
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    await expect(page(provider)).rejects.toThrow("IMAP");
+    expect(state.fetchRanges).toEqual([]);
+  });
+
+  test("rebuilds when a server regresses MODSEQ within the same UIDVALIDITY", async () => {
+    const state = fakeState();
+    state.syncEnabled.add("CONDSTORE");
+    const inbox = state.mailboxes.get("INBOX")!;
+    inbox.highestModseq = 13n;
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const first = await page(provider);
+    inbox.highestModseq = 1n;
+    const repaired = await page(provider, first.cursor);
+    expect(repaired.messages).toHaveLength(3);
+    expect(repaired.snapshots?.[0]?.phase).toBe("start-and-complete");
+  });
+
+  test("repairs a reset during pagination with a new generation and canonical identity", async () => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const first = await page(provider, null, 1);
+    const inbox = state.mailboxes.get("INBOX")!;
+    const retained = inbox.messages.get(1)!;
+    inbox.uidValidity = 900n;
+    inbox.messages.clear();
+    inbox.messages.set(20, { ...retained, uid: 20 });
+    inbox.nextUid = 21;
+    const repaired = await page(provider, first.cursor);
+    expect(repaired.snapshots?.[0]?.phase).toBe("start-and-complete");
+    expect(repaired.snapshots?.[0]?.generation).not.toBe(first.snapshots?.[0]?.generation);
+    expect(repaired.messages[0]?.ref).toMatchObject({ uid: 20, uidValidity: "900" });
+    expect(repaired.messages[0]?.messageId).toBe(first.messages[0]?.messageId);
+    const archive = await page(provider, null, 10, "Archive");
+    expect(archive.messages).toEqual([]);
+    expect(archive.snapshots?.[0]?.scope).toEqual({ kind: "mailbox", mailbox: "Archive" });
+  });
+
+  test("reports disappearance and destination identity through independent snapshots", async () => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const first = await page(provider);
+    const inbox = state.mailboxes.get("INBOX")!;
+    const archive = state.mailboxes.get("Archive")!;
+    archive.messages.set(20, { ...inbox.messages.get(1)!, uid: 20 });
+    archive.nextUid = 21;
+    inbox.messages.delete(1);
+    const source = await page(provider, first.cursor);
+    const destination = await page(provider, null, 10, "Archive");
+    expect(source.snapshots?.[0]?.seen.map(ref => ref.uid)).toEqual([2, 3]);
+    expect(source.snapshots?.[0]?.phase).toBe("start-and-complete");
+    expect(destination.messages[0]?.messageId).toBe(first.messages[0]?.messageId);
+  });
+
+  test("runs the real adapter through durable SQLite retries, resets and external moves", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "postreeve-imap-sync-"));
+    const path = join(directory, "index.sqlite");
+    let store = new Store(path);
+    let now = 0;
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const registry = new MailProviderRegistry();
+    registry.register(config.accountId, provider);
+    const runnerFor = () => new SynchronizationRunner(store.synchronization, account.tenantId, registry,
+      { now: () => now, pollMs: 10, pageLimit: 2 });
+    let runner = runnerFor();
+    const drain = async () => {
+      for (let count = 0; count < 20; count++) if (!await runner.runOnce()) return;
+      throw new Error("Synchronization did not settle within the fixture bound");
+    };
+    try {
+      await store.insertAccount({ id: config.accountId, kind: "imap", name: "Fixture", email: "fixture@example.test", encryptedCredentials: null });
+      runner.schedule(config.accountId);
+      await drain();
+      const initial = store.synchronization.indexed(account.tenantId, config.accountId, "INBOX");
+      expect(initial).toHaveLength(3);
+      const original = initial.find(message => message.ref.uid === 2)!;
+      const otherMailbox = await page(provider, null, 10, "INBOX");
+      const otherMessages = await store.reconcileMailbox({ tenantId: "other-tenant", accountId: config.accountId, provider: "imap", mailbox: "INBOX",
+        authoritative: false, observations: otherMailbox.messages.map(message => toCanonicalObservation("other-tenant", "imap", message)) });
+      const other = otherMessages.find(message => message.messageId === "<message-2@example.test>");
+      const inbox = state.mailboxes.get("INBOX")!;
+      inbox.messages.delete(1);
+      state.omittedFetchUids.add(2);
+      now = 10;
+      await drain();
+      expect(store.synchronization.jobs(account.tenantId)[0]?.state).toBe("retry");
+      expect(store.synchronization.indexed(account.tenantId, config.accountId, "INBOX")).toHaveLength(3);
+      const saved = store.synchronization.scopes(account).find(scope => scope.scope.includes("INBOX"))?.cursor;
+      store.close();
+      store = new Store(path);
+      runner = runnerFor();
+      expect(store.synchronization.scopes(account).find(scope => scope.scope.includes("INBOX"))?.cursor).toBe(saved);
+      state.omittedFetchUids.clear();
+      inbox.messages.get(3)!.flags = new Set(["\\Seen", "\\Flagged"]);
+      now = 20;
+      await drain();
+      const recovered = store.synchronization.indexed(account.tenantId, config.accountId, "INBOX");
+      expect(recovered.map(message => message.ref.uid).sort()).toEqual([2, 3]);
+      expect(recovered.find(message => message.ref.uid === 3)).toMatchObject({ read: true, flagged: true });
+      expect(recovered.find(message => message.ref.uid === 2)?.canonicalId).toBe(original.canonicalId);
+      const oldTwo = inbox.messages.get(2)!;
+      const oldThree = inbox.messages.get(3)!;
+      inbox.messages.clear();
+      inbox.messages.set(20, { ...oldTwo, uid: 20 });
+      inbox.messages.set(21, { ...oldThree, uid: 21 });
+      inbox.uidValidity = 900n;
+      inbox.nextUid = 22;
+      now = 30;
+      await drain();
+      const reset = store.synchronization.indexed(account.tenantId, config.accountId, "INBOX");
+      expect(reset.map(message => message.ref.uid).sort()).toEqual([20, 21]);
+      expect(reset.find(message => message.ref.uid === 20)).toMatchObject({ canonicalId: original.canonicalId, conversationId: original.conversationId });
+      expect((await store.listMessageLocations(account.tenantId, original.canonicalId)).map(location => location.uidValidity)).toEqual(["900"]);
+      const archive = state.mailboxes.get("Archive")!;
+      archive.messages.set(30, { ...inbox.messages.get(20)!, uid: 30 });
+      archive.nextUid = 31;
+      inbox.messages.delete(20);
+      now = 40;
+      await drain();
+      expect(store.synchronization.indexed(account.tenantId, config.accountId, "INBOX").map(message => message.ref.uid)).toEqual([21]);
+      expect(store.synchronization.indexed(account.tenantId, config.accountId, "Archive")[0]).toMatchObject({ canonicalId: original.canonicalId, conversationId: original.conversationId });
+      expect(other).not.toBeNull();
+      expect(await store.listMessageLocations("other-tenant", other!.id)).toHaveLength(1);
+      expect((await store.listMessageLocations("other-tenant", other!.id))[0]?.uidValidity).toBe("101");
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("does not connect for aborted or cross-account requests", async () => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    await expect(provider.synchronization.fetchPage({ account, scope: { kind: "mailbox", mailbox: "INBOX" },
+      cursor: null, limit: 10, signal: AbortSignal.abort() })).rejects.toThrow();
+    await expect(provider.synchronization.discoverScopes({ ...account, accountId: "other" }, new AbortController().signal)).rejects.toThrow("account mismatch");
+    expect(state.options).toEqual([]);
+  });
+});
+
 class FakeImapClient implements ImapClient {
   readonly capabilities = new Map<string, boolean | number>([["UIDPLUS", true]]);
+  readonly enabled: Set<string>;
   readonly #state: FakeState;
   #selected: StoredMailbox | undefined;
 
   constructor(state: FakeState) {
     this.#state = state;
+    this.enabled = state.syncEnabled;
   }
 
   async connect(): Promise<void> {}
@@ -1361,6 +1618,7 @@ class FakeImapClient implements ImapClient {
   async mailboxOpen(path: string | string[], _options?: MailboxOpenOptions): Promise<MailboxObject> {
     const mailbox = this.#mailbox(path);
     this.#state.mailboxOpens += 1;
+    this.#state.syncOpens.push(_options ?? {});
     this.#state.onMailboxOpen?.(mailbox, this.#state.mailboxOpens);
     this.#selected = mailbox;
     return mailboxObject(mailbox);
@@ -1384,6 +1642,13 @@ class FakeImapClient implements ImapClient {
       return false;
     }
     if (query.all) return { all: this.#state.eSearchAll ?? messages.map((message) => message.uid).join(",") };
+    if (typeof query.uid === "string" && query.uid.includes(":")) {
+      if (this.#state.syncSearchResult !== undefined) return this.#state.syncSearchResult;
+      const [low, high] = query.uid.split(":").map(Number);
+      if (query.modseq !== undefined && !this.enabled.has("CONDSTORE")) throw new Error("Unsupported MODSEQ search");
+      return { all: messages.filter(message => message.uid >= low! && message.uid <= high!
+        && (query.modseq === undefined || (message.modseq ?? 0n) >= query.modseq)).map(message => message.uid).join(",") };
+    }
     if (query.uid !== undefined) {
       const uid = Number(query.uid);
       if (this.#state.exactUidSearchFailures.has(uid)) return false;
@@ -1418,10 +1683,15 @@ class FakeImapClient implements ImapClient {
   ): AsyncIterableIterator<FetchMessageObject> {
     this.#state.fetchQueries.push(query);
     const mailbox = this.#requireSelected();
+    this.#state.fetchRanges.push([...range]);
     for (const uid of range) {
       if (this.#state.omittedFetchUids.has(uid)) continue;
       const message = mailbox.messages.get(uid);
-      if (message) yield this.#withFetchOmissions(fetchedMessage(message, query));
+      if (message) {
+        yield this.#withFetchOmissions(fetchedMessage(message, query));
+        if (this.#state.duplicateFetchUid === uid) yield fetchedMessage(message, query);
+        if (this.#state.unexpectedFetchUid !== undefined) yield { ...fetchedMessage(message, query), uid: this.#state.unexpectedFetchUid };
+      }
     }
   }
 
@@ -1616,6 +1886,9 @@ function fakeState(): FakeState {
 
   return {
     options: [],
+    syncEnabled: new Set(),
+    syncOpens: [],
+    fetchRanges: [],
     storeOptions: [],
     flagAdds: [],
     messageDeletes: [],
@@ -1855,6 +2128,8 @@ function mailboxObject(mailbox: StoredMailbox): MailboxObject {
     uidValidity: mailbox.uidValidity,
     uidNext: mailbox.nextUid,
     exists: mailbox.messages.size,
+    ...(mailbox.highestModseq === undefined ? {} : { highestModseq: mailbox.highestModseq }),
+    ...(mailbox.noModseq === undefined ? {} : { noModseq: mailbox.noModseq }),
   };
 }
 
