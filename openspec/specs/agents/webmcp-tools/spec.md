@@ -17,11 +17,11 @@ The web page SHALL register its tools with `document.modelContext`, or `navigato
 - **THEN** its tools are no longer available to the agent
 
 ### Requirement: Fixed tool set without proposal tools
-The system SHALL define exactly these tools: `list_accounts`, `list_folders`, `create_folder`, `rename_folder`, `delete_folder`, `list_messages`, `read_messages`, `search_messages`, `send_message`, `apply_message_actions`, `list_activity`, `undo_batch`. The six `list_*`, `read_*` and `search_*` tools SHALL be annotated `readOnlyHint: true`, the others `readOnlyHint: false`, and all `untrustedContentHint: true`. No tool SHALL create, update, approve or apply a proposal.
+The system SHALL define exactly fifteen page tools: the twelve mailbox tools below plus `inspect_synchronization`, `retry_synchronization` and `request_reauthorization`. Inspection tools SHALL have `readOnlyHint: true`; mutation and recovery request tools SHALL have `readOnlyHint: false`. All SHALL have `untrustedContentHint: true`. No tool SHALL create, update, approve or apply a proposal.
 
 #### Scenario: Agent inspects available tools
 - **WHEN** an agent lists the tools of an open Postreeve page with nothing hidden
-- **THEN** it sees the twelve tools above and no proposal tool
+- **THEN** it sees `list_accounts`, `list_folders`, `create_folder`, `rename_folder`, `delete_folder`, `list_messages`, `read_messages`, `search_messages`, `send_message`, `apply_message_actions`, `list_activity`, `undo_batch`, `inspect_synchronization`, `retry_synchronization` and `request_reauthorization`, and no proposal tool
 
 ### Requirement: WebMCP mirrors user workflows
 Every tool SHALL perform an operation a person can perform in the web UI, through Postreeve's server API, and SHALL NOT introduce an agent-only workflow or capability. Where the UI can do more than a tool, the tool SHALL offer the narrower operation rather than a different one.
@@ -118,3 +118,10 @@ The `send_message` description SHALL state that it sends real mail and must only
 #### Scenario: Undo an agent action
 - **WHEN** an agent calls `undo_batch` with the ID returned by `apply_message_actions`
 - **THEN** the returned batch's status is `undone` or `partially_undone`
+
+### Requirement: Synchronization tools
+`inspect_synchronization` SHALL accept an empty object and return current local account health and retention policy. `retry_synchronization` and `request_reauthorization` SHALL accept an account ID. Retry SHALL schedule safe background work without changing mail; reauthorization SHALL return human authorization instructions and SHALL NOT receive credentials or grant consent. These tools SHALL validate strict inputs and shared outputs and pass cancellation signals to their API requests.
+
+#### Scenario: Agent requests authorization recovery
+- **WHEN** an agent requests reauthorization for an account
+- **THEN** it receives instructions for the person to use existing Gmail consent or IMAP account settings, without any credential being exposed

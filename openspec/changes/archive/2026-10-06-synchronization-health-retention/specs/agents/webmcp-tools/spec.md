@@ -1,11 +1,11 @@
 ## MODIFIED Requirements
 
 ### Requirement: Fixed tool set without proposal tools
-The system SHALL define exactly these tools: `list_accounts`, `list_folders`, `create_folder`, `rename_folder`, `delete_folder`, `list_messages`, `read_messages`, `search_messages`, `send_message`, `apply_message_actions`, `list_activity`, `undo_batch`, `inspect_synchronization`, `retry_synchronization`, `request_reauthorization`. Read-only inspection tools SHALL be annotated `readOnlyHint: true`; mutation and recovery request tools SHALL be annotated `readOnlyHint: false`. All SHALL use `untrustedContentHint: true`. No tool SHALL create, update, approve or apply a proposal.
+The system SHALL define exactly fifteen page tools: the twelve mailbox tools below plus `inspect_synchronization`, `retry_synchronization` and `request_reauthorization`. Inspection tools SHALL have `readOnlyHint: true`; mutation and recovery request tools SHALL have `readOnlyHint: false`. All SHALL have `untrustedContentHint: true`. No tool SHALL create, update, approve or apply a proposal.
 
 #### Scenario: Agent inspects available tools
 - **WHEN** an agent lists the tools of an open Postreeve page with nothing hidden
-- **THEN** it sees the fifteen tools above and no proposal tool
+- **THEN** it sees `list_accounts`, `list_folders`, `create_folder`, `rename_folder`, `delete_folder`, `list_messages`, `read_messages`, `search_messages`, `send_message`, `apply_message_actions`, `list_activity`, `undo_batch`, `inspect_synchronization`, `retry_synchronization` and `request_reauthorization`, and no proposal tool
 
 ## ADDED Requirements
 
