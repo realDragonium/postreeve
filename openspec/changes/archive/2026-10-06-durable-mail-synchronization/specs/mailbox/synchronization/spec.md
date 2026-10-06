@@ -12,6 +12,10 @@ The system SHALL retain canonical metadata, mutable locations and flags, bounded
 - **WHEN** synchronization observes a previously committed message again
 - **THEN** the index contains the same canonical message with its latest location flags and preview
 
+#### Scenario: Duplicate physical copies
+- **WHEN** one mailbox contains several physical copies of a canonical message
+- **THEN** indexed reads choose one deterministic location with its current flags before applying the requested limit
+
 #### Scenario: Failed page
 - **WHEN** a page fails validation or reconciliation
 - **THEN** its previous checkpoint and indexed data remain available
@@ -45,3 +49,8 @@ Provider ingestion SHALL use an opaque cursor with a tenant, account and optiona
 #### Scenario: Foreign reference
 - **WHEN** ingestion returns a reference outside its account or mailbox
 - **THEN** the page is rejected without changes
+
+#### Scenario: Replayed snapshot generation
+- **WHEN** an active snapshot start is repeated
+- **THEN** its original candidate revisions and accumulated observations remain unchanged
+- **AND** replay of the most recently completed generation is rejected without modifying the index or checkpoint
