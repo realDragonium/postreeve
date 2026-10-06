@@ -1,3 +1,5 @@
+import { gmailSynchronization, gmailLocationMailboxes, GmailHttpError } from "./gmail-synchronization";
+import type { MailSynchronization } from "./synchronization";
 import { composeMime, type OutgoingContent } from "./outgoing-content";
 import type { ProviderDraftInput } from "./provider";
 import { simpleParser, type AddressObject, type EmailAddress, type ParsedMail } from "mailparser";
@@ -114,6 +116,7 @@ export class GmailMailClient implements MailProvider, MailSender {
   readonly #clientId: string;
   readonly #clientSecret: string | undefined;
   readonly #fetch: HttpFetch;
+  readonly synchronization: MailSynchronization;
   #accessToken: { value: string; expiresAt: number } | null = null;
 
   constructor(config: GmailClientConfig) {
@@ -122,6 +125,17 @@ export class GmailMailClient implements MailProvider, MailSender {
     this.#clientId = config.clientId;
     this.#clientSecret = config.clientSecret;
     this.#fetch = config.fetch ?? fetch;
+    this.synchronization = gmailSynchronization(config.account.id, {
+      request: (path, schema, signal) => this.#request(path, schema, { signal }, 2 * 1024 * 1024),
+      observe: async (id, signal) => {
+        const params = metadataParams();
+        const message = await this.#request(`/messages/${encodeURIComponent(id)}?${params}`,
+          gmailMessageSchema.extend({ labelIds: z.array(z.string().min(1)), payload: gmailPartSchema }), { signal }, 2 * 1024 * 1024);
+        if (message.id !== id) throw new Error("Gmail returned another message during synchronization");
+        return { mailboxes: gmailLocationMailboxes(message.labelIds),
+          message: mailbox => toSummary(this.#account.id, mailbox, message) };
+      },
+    });
   }
 
   async verifyConnection(): Promise<void> {
@@ -559,10 +573,7 @@ export class GmailMailClient implements MailProvider, MailSender {
     }
     const listed = await this.#request(`/messages?${params.toString()}`, messageListSchema);
     const messages = await Promise.all(listed.messages.map(({ id }) => {
-      const metadata = new URLSearchParams({ format: "metadata" });
-      for (const header of ["Subject", "From", "Reply-To", "To", "Cc", "Delivered-To", "Message-ID", "In-Reply-To", "References", "Date"]) {
-        metadata.append("metadataHeaders", header);
-      }
+      const metadata = metadataParams();
       return this.#request(`/messages/${encodeURIComponent(id)}?${metadata.toString()}`, gmailMessageSchema);
     }));
     return {
@@ -595,7 +606,7 @@ export class GmailMailClient implements MailProvider, MailSender {
     init: RequestInit = {},
     maxResponseBytes?: number,
   ): Promise<T> {
-    const token = await this.#token();
+    const token = await this.#token(init.signal ?? undefined);
     return this.#requestWithToken(token, path, schema, init, maxResponseBytes);
   }
 
@@ -616,11 +627,12 @@ export class GmailMailClient implements MailProvider, MailSender {
       },
     });
     const body = await responseJson(response, maxResponseBytes);
-    if (!response.ok) throw new GmailHttpError(response.status, googleError(body));
+    if (!response.ok) throw new GmailHttpError(response.status, googleError(body), oauthErrorCode(body));
     return schema.parse(body);
   }
 
-  async #token(): Promise<string> {
+  async #token(signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     if (this.#accessToken && this.#accessToken.expiresAt > Date.now() + 60_000) return this.#accessToken.value;
     const tokenRequest = new URLSearchParams({
       client_id: this.#clientId,
@@ -632,9 +644,10 @@ export class GmailMailClient implements MailProvider, MailSender {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: tokenRequest,
+      ...(signal ? { signal } : {}),
     });
     const body: unknown = await response.json().catch(() => null);
-    if (!response.ok) throw new GmailHttpError(response.status, googleError(body));
+    if (!response.ok) throw new GmailHttpError(response.status, googleError(body), oauthErrorCode(body));
     const token = tokenSchema.parse(body);
     this.#accessToken = { value: token.access_token, expiresAt: Date.now() + token.expires_in * 1000 };
     return token.access_token;
@@ -656,13 +669,17 @@ export class GmailMailClient implements MailProvider, MailSender {
   }
 }
 
-class GmailHttpError extends Error {
-  readonly status: number;
-
-  constructor(status: number, message: string) {
-    super(message);
-    this.status = status;
+function metadataParams(): URLSearchParams {
+  const params = new URLSearchParams({ format: "metadata" });
+  for (const header of ["Subject", "From", "Reply-To", "To", "Cc", "Delivered-To", "Message-ID", "In-Reply-To", "References", "Date"]) {
+    params.append("metadataHeaders", header);
   }
+  return params;
+}
+
+function oauthErrorCode(body: unknown): string | null {
+  const parsed = z.object({ error: z.string() }).safeParse(body);
+  return parsed.success ? parsed.data.error : null;
 }
 
 function providerId(reference: MessageRef): string {

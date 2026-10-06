@@ -4,6 +4,8 @@ Postreeve is a self-hosted email client for humans and agents. It connects to Gm
 
 Humans can read, search, compose, send, mark, move, and safely trash mail across multiple accounts. External agents can inspect mail and apply explicit mailbox actions through page-scoped WebMCP tools. Applied work remains visible in Activity and supported actions can be undone.
 
+Gmail synchronization consumes account history and repairs expired cursors through bounded full-message pages followed by history catch-up. Repair preserves existing canonical messages, conversations and local workflow references; incomplete repairs retain unseen locations until the account snapshot finishes.
+
 ## Local setup
 
 Requirements:
