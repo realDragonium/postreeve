@@ -1,3 +1,4 @@
+import type { MailSynchronization } from "./synchronization";
 import type { OutgoingContent } from "./outgoing-content";
 import type {
   Draft,
@@ -115,6 +116,7 @@ export interface ProviderDraftScope {
 export type ProviderDraftInput = Draft & OutgoingContent;
 
 export interface MailProvider {
+  readonly synchronization?: MailSynchronization;
   verifyConnection(): Promise<void>;
   listFolders(accountId: string): Promise<Folder[]>;
   createFolder(accountId: string, name: string): Promise<void>;
