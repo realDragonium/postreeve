@@ -59,6 +59,8 @@ export class CredentialVault {
     this.#key = key;
   }
 
+  assertConfigured(): void { this.#requiredKey(); }
+
   encrypt(credentials: AccountCredentials): string {
     const key = this.#requiredKey();
     const iv = randomBytes(12);

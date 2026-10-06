@@ -12,7 +12,7 @@ const jobSchema = z.object({
   due_at: z.number(), lease_until: z.number().nullable(), attempts: z.number(),
   error: z.enum(["provider", "reauthorization", "invalid-data"]).nullable(),
   coverage: z.enum(["partial", "catching-up", "complete"]), updated_at: z.number(),
-  error_at: z.number().nullable(), last_success_at: z.number().nullable(),
+  error_at: z.number().nullable(), last_success_at: z.number().nullable(), provider_unavailable: z.number().int().min(0).max(1),
 });
 export type SyncJob = z.infer<typeof jobSchema>;
 export interface SyncClaim extends SyncAccount { readonly generation: string }
@@ -42,7 +42,7 @@ export class SynchronizationStore {
       if (replace) {
         this.sqlite.query("DELETE FROM sync_scopes WHERE tenant_id=? AND account_id=?").run(tenantId, accountId);
         this.sqlite.query("DELETE FROM sync_scans WHERE tenant_id=? AND account_id=?").run(tenantId, accountId);
-        this.sqlite.query(`UPDATE sync_jobs SET state='queued',generation=?,due_at=?,lease_until=NULL,attempts=0,error=NULL,error_at=NULL,last_success_at=NULL,coverage='partial',updated_at=?
+        this.sqlite.query(`UPDATE sync_jobs SET state='queued',generation=?,due_at=?,lease_until=NULL,attempts=0,provider_unavailable=0,coverage='partial',updated_at=?
           WHERE tenant_id=? AND account_id=?`).run(crypto.randomUUID(), now, now, tenantId, accountId);
       }
     }).immediate();
@@ -50,6 +50,13 @@ export class SynchronizationStore {
 
   jobs(tenantId: string): SyncJob[] {
     return z.array(jobSchema).parse(this.sqlite.query("SELECT * FROM sync_jobs WHERE tenant_id=? ORDER BY due_at,account_id").all(tenantId));
+  }
+
+  setProviderAvailable(tenantId: string, accountId: string, available: boolean, now: number): void {
+    this.sqlite.query(`UPDATE sync_jobs SET provider_unavailable=?,generation=?,lease_until=NULL,
+      state=CASE WHEN state='running' THEN 'queued' ELSE state END,due_at=?,updated_at=?
+      WHERE tenant_id=? AND account_id=? AND provider_unavailable<>?`)
+      .run(available ? 0 : 1, crypto.randomUUID(), now, now, tenantId, accountId, available ? 0 : 1);
   }
 
   cancel(tenantId: string, accountId: string, now: number): void {
@@ -73,7 +80,7 @@ export class SynchronizationStore {
 
   claim(tenantId: string, now: number, leaseMs: number): SyncClaim | null {
     return this.sqlite.transaction(() => {
-      const row = this.sqlite.query(`SELECT * FROM sync_jobs WHERE tenant_id=? AND
+      const row = this.sqlite.query(`SELECT * FROM sync_jobs WHERE tenant_id=? AND provider_unavailable=0 AND
         ((state IN ('queued','retry') AND (state<>'retry' OR error IS NOT 'reauthorization') AND due_at<=?) OR (state='running' AND lease_until<=?)) ORDER BY due_at,account_id LIMIT 1`)
         .get(tenantId, now, now);
       if (!row) return null;
@@ -320,6 +327,9 @@ export class SynchronizationStore {
         FOREIGN KEY(tenant_id,account_id,scope) REFERENCES sync_scans(tenant_id,account_id,scope) ON DELETE CASCADE);
     `);
     const jobColumns = this.sqlite.query("PRAGMA table_info(sync_jobs)").all() as Array<{ name: string }>;
+    if (!jobColumns.some(column => column.name === "provider_unavailable")) {
+      this.sqlite.exec("ALTER TABLE sync_jobs ADD COLUMN provider_unavailable INTEGER NOT NULL DEFAULT 0 CHECK(provider_unavailable IN (0,1))");
+    }
     for (const column of ["error_at", "last_success_at"]) {
       if (!jobColumns.some(existing => existing.name === column)) this.sqlite.exec(`ALTER TABLE sync_jobs ADD COLUMN ${column} INTEGER`);
     }

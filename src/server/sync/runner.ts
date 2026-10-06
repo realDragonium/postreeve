@@ -41,6 +41,10 @@ export class SynchronizationRunner {
     if (replace) this.#active.get(accountId)?.controller.abort();
     this.store.schedule(this.tenantId, accountId, this.#now(), replace);
   }
+  setProviderAvailable(accountId: string, available: boolean): void {
+    if (!available) this.#active.get(accountId)?.controller.abort();
+    this.store.setProviderAvailable(this.tenantId, accountId, available, this.#now());
+  }
   cancel(accountId: string): void {
     this.store.cancel(this.tenantId, accountId, this.#now());
     this.#active.get(accountId)?.controller.abort();

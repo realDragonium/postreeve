@@ -25,7 +25,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Add an IMAP/SMTP account | Complete | Not covered | No matching WebMCP tool exists. |
 | Test IMAP and SMTP settings | Complete | Not covered | No matching WebMCP tool exists. |
 | Update or reconnect an IMAP/SMTP account | Complete | Not covered | No matching WebMCP tool exists. |
-| Reauthorize Gmail | Complete | Not covered | No matching WebMCP tool exists. The current UI uses an interactive Google consent flow. |
+| Reauthorize Gmail | Complete | Partial | `request_reauthorization` provides human guidance; Google login and consent remain interactive UI steps. |
 | Remove an account and its local history | Complete | Not covered | No matching WebMCP tool exists. Removing an account through the UI never deletes provider mail. |
 
 ## Folders and mailbox navigation
@@ -152,9 +152,10 @@ The following tools are discoverable only while the Postreeve page is open:
 10. `apply_message_actions`
 11. `list_activity`
 12. `undo_batch`
+13. `inspect_synchronization`
+14. `retry_synchronization`
+15. `request_reauthorization`
 
 Calling `list_messages` or `search_messages` updates the open page to the same account, folder, query, filter, sort order, and message results returned to the AI. Calling a folder-management tool updates the open page's folder list and keeps the selected mailbox valid.
 
 The former proposal tools are absent because there is no matching completed user-facing proposal workflow in the current UI.
-
-Synchronization tools: `inspect_synchronization`, `retry_synchronization`, `request_reauthorization`.
