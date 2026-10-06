@@ -64,7 +64,9 @@ Start with a secondary mailbox and verify these actions manually before relying 
 
 Passwords are encrypted with AES-256-GCM before they are stored in the local SQLite database. They are never sent to OpenAI by Postreeve.
 
-The backend maintains a local summary index through durable account synchronization jobs, even with no mailbox view open. Jobs retain checkpoints across restart, back off after failures, and reject results from canceled or disconnected accounts. The compatibility ingestion path records partial coverage and preserves unseen locations; provider-specific repair and offline mailbox views are separate capabilities.
+The backend maintains a local summary index through durable account synchronization jobs, even with no mailbox view open. Jobs retain checkpoints across restart, back off after failures, and reject results from canceled or disconnected accounts. The compatibility ingestion path records partial coverage and preserves unseen locations; offline mailbox views are a separate capability.
+
+IMAP synchronization resumes bounded mailbox scans after reconnect, uses negotiated QRESYNC and MODSEQ when available, and falls back to full summary observations otherwise. Incomplete fetches keep the prior checkpoint and cached locations. UIDVALIDITY resets rebuild only the affected mailbox while preserving canonical messages and conversation identity.
 
 ## Use WebMCP with Codex
 

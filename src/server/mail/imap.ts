@@ -1,4 +1,5 @@
 import type { ProviderDraftInput } from "./provider";
+import { imapSynchronization } from "./imap-synchronization";
 import {
   ImapFlow,
   type AppendResponseObject,
@@ -56,6 +57,7 @@ export interface ImapAccountConfig {
 
 export interface ImapClient {
   capabilities: Map<string, boolean | number>;
+  readonly enabled?: Set<string>;
   connect(): Promise<void>;
   logout(): Promise<void>;
   close(): void;
@@ -132,11 +134,17 @@ const defaultClientFactory: ImapClientFactory = (options) => new ImapFlow(option
 export class ImapMailProvider implements MailProvider {
   readonly #config: ImapAccountConfig;
   readonly #createClient: ImapClientFactory;
+  readonly synchronization;
 
   constructor(config: ImapAccountConfig, createClient: ImapClientFactory = defaultClientFactory) {
     if (!config.accountId) throw new Error("An IMAP account ID is required");
     this.#config = { ...config };
     this.#createClient = createClient;
+    this.synchronization = imapSynchronization({
+      accountId: config.accountId,
+      withClient: (operation, signal) => this.#withClient(operation, signal),
+      summaries: (client, mailbox, uids) => this.#fetchSummaries(client, mailbox, uids, true),
+    });
   }
 
   async verifyConnection(): Promise<void> {
@@ -671,8 +679,9 @@ export class ImapMailProvider implements MailProvider {
     client: ImapClient,
     mailbox: MailboxObject,
     uids: number[],
-  ): Promise<MessageSummary[]> {
-    const summaries: MessageSummary[] = [];
+    requireComplete = false,
+  ): Promise<ProviderMessageSummary[]> {
+    const summaries: ProviderMessageSummary[] = [];
     for await (const message of client.fetch(
       uids,
       {
@@ -685,6 +694,9 @@ export class ImapMailProvider implements MailProvider {
       },
       { uid: true },
     )) {
+      if (requireComplete && (!message.flags || !message.envelope || !message.headers || !message.source)) {
+        throw new Error("IMAP FETCH omitted requested summary fields");
+      }
       const parsed = message.source ? await parseMessage(message.source) : undefined;
       const threadingHeaders = message.headers ? await parseMessage(message.headers) : undefined;
       summaries.push(toSummary(this.#config.accountId, mailbox.path, mailbox, message, parsed, threadingHeaders));
@@ -695,7 +707,8 @@ export class ImapMailProvider implements MailProvider {
     return summaries;
   }
 
-  async #withClient<T>(operation: (client: ImapClient) => Promise<T>): Promise<T> {
+  async #withClient<T>(operation: (client: ImapClient) => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
     const client = this.#createClient({
       host: this.#config.host,
       port: this.#config.port,
@@ -705,12 +718,16 @@ export class ImapMailProvider implements MailProvider {
       qresync: true,
     });
 
+    const abort = () => client.close();
+    signal?.addEventListener("abort", abort, { once: true });
     let connected = false;
     try {
       await client.connect();
       connected = true;
+      signal?.throwIfAborted();
       return await operation(client);
     } finally {
+      signal?.removeEventListener("abort", abort);
       if (!connected) {
         client.close();
       } else {
