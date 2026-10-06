@@ -41,6 +41,24 @@ async function finish(client: GmailMailClient, initial: string | null = null, li
 }
 
 describe("Gmail synchronization", () => {
+  test("ingests unopened bounded body text and headers, and reports unavailable oversized bodies", async () => {
+    for (const oversized of [false,true]) {
+      const { client } = fixture(url => {
+        if (url.pathname.endsWith("/profile")) return json({historyId:"100"});
+        if (url.pathname.endsWith("/messages")) return json({messages:[{id:"body"}]});
+        if (url.pathname.endsWith("/history")) return json({historyId:"120"});
+        const base = metadata("body");
+        return json({...base,payload:{...base.payload,mimeType:"text/plain",
+          headers:[...base.payload.headers,{name:"X-Search",value:"custom-header"}],
+          body:{size:oversized?100000:19,data:Buffer.from("Unopened searchbody").toString("base64url")}}});
+      });
+      const result = await finish(client);
+      const message=result.pages.flatMap(page=>page.messages)[0]!;
+      expect(message.searchHeaders).toContain("X-Search: custom-header");
+      expect(message.searchBody).toBe(oversized?null:"Unopened searchbody");
+    }
+  });
+
   test("bootstraps all message pages, catches changes made during listing and resumes from the committed history", async () => {
     let incremental = false;
     const { client, calls } = fixture(url => {

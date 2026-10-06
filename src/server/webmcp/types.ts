@@ -1,3 +1,4 @@
+import type { MailboxPage, MailboxSource } from "../../shared/mailbox-query";
 import type { AccountHealth, SynchronizationStatus, Reauthorization } from "../../shared/synchronization";
 import type {
   Account,
@@ -24,9 +25,9 @@ export interface WebMcpServices {
   createFolder(input: CreateFolderInput, signal: AbortSignal): Promise<readonly Folder[]>;
   renameFolder(input: RenameFolderInput, signal: AbortSignal): Promise<readonly Folder[]>;
   deleteFolder(input: DeleteFolderInput, signal: AbortSignal): Promise<readonly Folder[]>;
-  listMessages(input: WebMcpListMessagesInput, signal: AbortSignal): Promise<readonly CanonicalMessageSummary[]>;
+  listMessages(input: WebMcpListMessagesInput, signal: AbortSignal): Promise<MailboxPage>;
   readMessages(messages: readonly MessageRef[], signal: AbortSignal): Promise<readonly CanonicalMessageDetail[]>;
-  searchMessages(input: WebMcpSearchMessagesInput, signal: AbortSignal): Promise<readonly CanonicalMessageSummary[]>;
+  searchMessages(input: WebMcpSearchMessagesInput, signal: AbortSignal): Promise<MailboxPage>;
   sendMessage(input: SendMessageInput, signal: AbortSignal): Promise<SendReceipt>;
   applyMessageActions(input: DirectActionInput, signal: AbortSignal): Promise<OperationBatch>;
   listActivity(accountId: string, signal: AbortSignal): Promise<readonly OperationBatch[]>;
@@ -38,6 +39,8 @@ export type WebMcpMessageFilter = "all" | "unread" | "flagged";
 export type WebMcpMessageSort = "newest" | "oldest" | "sender" | "subject";
 
 export interface WebMcpListMessagesInput extends ListMessagesInput {
+  readonly sources?: MailboxSource[] | undefined;
+  readonly cursor?: string | undefined;
   readonly filter: WebMcpMessageFilter;
   readonly sort: WebMcpMessageSort;
 }
@@ -49,6 +52,8 @@ export interface WebMcpSearchMessagesInput extends WebMcpListMessagesInput {
 export interface WebMcpMailboxView extends WebMcpListMessagesInput {
   readonly query: string;
   readonly messages: readonly CanonicalMessageSummary[];
+  readonly nextCursor: string | null;
+  readonly coverage: MailboxPage["coverage"];
 }
 
 export interface WebMcpToolAnnotations {

@@ -29,6 +29,8 @@ export interface MessageListProps {
   filter: MessageFilter;
   query: string;
   canLoadMore: boolean;
+  pageSize?: number;
+  coverageText?: string | null;
   busy: boolean;
   onSort: (sort: MessageSort) => void;
   onOpen: (message: MessageSummary) => void;
@@ -92,6 +94,7 @@ export function MessageList(props: MessageListProps) {
       </span>
     </div>
 
+    {props.coverageText ? <p role="status" className="t-dim" style={{ margin: "8px 24px" }}>{props.coverageText}</p> : null}
     <div className="list" aria-label="Messages" style={{ "--row-cols": columns } as React.CSSProperties}>
       {props.loading ? Array.from({ length: 8 }, (_, index) => (
         <div className="row" key={index} style={{ gridTemplateColumns: "2px 14px minmax(96px,168px) minmax(150px,1.3fr)" }}>
@@ -134,7 +137,7 @@ export function MessageList(props: MessageListProps) {
         </button>;
       })}
 
-      {props.canLoadMore ? <button className="load-more" disabled={props.busy} onClick={props.onLoadMore}>Load 50 more</button> : null}
+      {props.canLoadMore ? <button className="load-more" disabled={props.busy} onClick={props.onLoadMore}>Load {props.pageSize ?? 50} more</button> : null}
     </div>
 
     <div className="hintbar">

@@ -1,5 +1,6 @@
+import type { MailboxPage, MailboxSource } from "../shared/mailbox-query";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Account, Draft, Folder, MessageSummary, ReceivedAttachment, TriageAction } from "../shared/contracts";
 import { api } from "./api";
 import { registerPostreeveWebMcp } from "../server/webmcp/register";
@@ -18,9 +19,7 @@ import {
   messageKey,
   messageMatchesKey,
   mergeMessages,
-  filterMessages,
   scopeSources,
-  sortMessages,
   specialUseName,
   type Scope,
 } from "./mail-view";
@@ -81,6 +80,7 @@ function App() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MessageFilter>("all");
   const [sort, setSort] = useState<MessageSort>("newest");
+  const [agentSources, setAgentSources] = useState<MailboxSource[] | null>(null);
   const [limit, setLimit] = useState(50);
   const [focus, setFocus] = useState(0);
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
@@ -161,7 +161,7 @@ function App() {
 
   // The first account list decides whether the unified view is even meaningful.
   useEffect(() => {
-    if (scope !== null || accounts.length === 0) return;
+    if (scope !== null || agentSources !== null || accounts.length === 0) return;
     if (accounts.length > 1) {
       setScope({ kind: "unified", specialUse: "inbox" });
       return;
@@ -173,20 +173,27 @@ function App() {
     if (inbox) setScope({ kind: "account", accountId: only.id, path: inbox.path });
   }, [accounts, folderResults.map((result) => result.data?.length).join()]);
 
-  const sources = scope ? scopeSources(scope, foldersByAccount) : [];
-  const messageResults = useQueries({
-    queries: sources.map((source) => ({
-      queryKey: ["messages", source.accountId, source.mailbox, query, limit],
-      queryFn: () => api.messages(source.accountId, source.mailbox, query, limit),
-    })),
+  const sources = agentSources ?? (scope ? scopeSources(scope, foldersByAccount) : []);
+  const messageQueryKey = ["messages", sources, query, filter, sort, limit];
+  const messageResults = useInfiniteQuery({
+    queryKey: messageQueryKey,
+    initialPageParam: null as string | null,
+    queryFn: ({ pageParam, signal }) => api.queryMessages({ sources: [...sources], query, filter, sort, limit,
+      ...(pageParam ? { cursor: pageParam } : {}) }, signal),
+    getNextPageParam: page => page.nextCursor,
+    enabled: sources.length > 0,
   });
-  const messages = sortMessages(
-    filterMessages(mergeMessages(messageResults.map((result) => result.data ?? [])), filter),
-    sort,
-  );
-  const messagesLoading = messageResults.some((result) => result.isLoading);
-  const messagesError = messageResults.find((result) => result.error)?.error?.message ?? null;
-  const busy = messageResults.some((result) => result.isFetching);
+  const messages = mergeMessages((messageResults.data?.pages ?? []).map(page => page.messages));
+  const messagesLoading = messageResults.isLoading;
+  const messagesError = messageResults.error?.message ?? null;
+  const busy = messageResults.isFetching;
+  const coverage = messageResults.data?.pages.at(-1)?.coverage;
+  const coverageText = coverage ? [
+    coverage.sources.some(source => !source.synchronized) ? "Synchronization is incomplete; more messages may appear." : "",
+    `${coverage.sources.reduce((total, source) => total + source.bodiesAvailable, 0)} of ${coverage.sources.reduce((total, source) => total + source.indexedMessages, 0)} indexed bodies available; body search is limited to ${coverage.bodyTextLimit.toLocaleString()} characters per message and retained content.`,
+    messageResults.data?.pages.some(page => page.coverage.sources.some(source => source.fallback === "failed")) ? "Provider fallback failed; cached results remain available." : "",
+    messageResults.data?.pages.some(page => page.coverage.sources.some(source => source.fallback === "limited")) ? "Provider fallback is limited and may omit matches." : "",
+  ].filter(Boolean).join(" ") : null;
 
   const openMessage = messages.find((message) => messageMatchesKey(message, openKey)) ?? null;
   const detailQuery = useQuery({
@@ -202,7 +209,7 @@ function App() {
   const folderName = scope === null ? ""
     : scope.kind === "unified" ? specialUseName(scope.specialUse)
     : (foldersByAccount.get(scope.accountId) ?? []).find((folder) => folder.path === scope.path)?.name ?? scope.path;
-  const scopeTitle = scope === null ? "Mailbox"
+  const scopeTitle = agentSources && agentSources.length > 1 ? "Selected mailboxes" : scope === null ? "Mailbox"
     : scope.kind === "unified" ? `Unified · ${folderName}`
     : `${accounts.find((account) => account.id === scope.accountId)?.email ?? ""} · ${folderName}`;
   const composeAccountId = openMessage?.ref.accountId ?? scopeAccountId ?? accounts[0]?.id ?? "";
@@ -315,6 +322,7 @@ function App() {
   }
 
   function changeScope(next: Scope): void {
+    setAgentSources(null);
     setScope(next);
     if (window.innerWidth <= narrowWidth) setSideOpen(false);
     setView("mail");
@@ -327,11 +335,14 @@ function App() {
   // ── WebMCP ──────────────────────────────────────────────────────────
   useEffect(() => {
     const unsubscribeViews = subscribeToWebMcpMailboxViews((incoming) => {
-      queryClient.setQueryData(
-        ["messages", incoming.accountId, incoming.mailbox, incoming.query, incoming.limit],
-        [...incoming.messages],
-      );
-      setScope({ kind: "account", accountId: incoming.accountId, path: incoming.mailbox });
+      const incomingSources = incoming.sources ?? [{ accountId: incoming.accountId, mailbox: incoming.mailbox }];
+      const key = ["messages", incomingSources, incoming.query, incoming.filter, incoming.sort, incoming.limit];
+      const page: MailboxPage = { messages: [...incoming.messages], nextCursor: incoming.nextCursor, coverage: incoming.coverage };
+      queryClient.setQueryData<{ pages: MailboxPage[]; pageParams: (string | null)[] }>(key, current =>
+        incoming.cursor && current ? { pages: [...current.pages, page], pageParams: [...current.pageParams, incoming.cursor] }
+          : { pages: [page], pageParams: [incoming.cursor ?? null] });
+      setAgentSources(incomingSources);
+      setScope(incomingSources.length > 1 ? null : { kind: "account", accountId: incoming.accountId, path: incoming.mailbox });
       setView("mail");
       setQueryDraft(incoming.query);
       setQuery(incoming.query);
@@ -553,7 +564,9 @@ function App() {
               filter={filter}
               query={query}
               busy={busy || actionMutation.isPending}
-              canLoadMore={messageResults.some((result) => (result.data?.length ?? 0) >= limit) && limit < 100}
+              coverageText={coverageText}
+              pageSize={limit}
+              canLoadMore={messageResults.hasNextPage}
               onSort={(next) => { setSort(next); setFocus(0); }}
               onOpen={openRow}
               onSelect={(message, modifiers) => {
@@ -576,7 +589,7 @@ function App() {
               onBulk={(action) => applyTo(targetsFor(messages[focus]), action)}
               onAcceptProposal={(proposalId) => acceptMutation.mutate(proposalId)}
               onCompose={() => composeAccountId && setOverlay({ kind: "compose", accountId: composeAccountId, intent: { mode: "new" } })}
-              onLoadMore={() => setLimit((current) => Math.min(100, current + 50))}
+              onLoadMore={() => void messageResults.fetchNextPage()}
               onRetry={() => void refresh()}
             />
           </section>

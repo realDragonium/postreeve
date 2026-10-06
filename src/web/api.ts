@@ -1,3 +1,4 @@
+import { mailboxPageSchema, type MailboxQueryInput, type MailboxPage } from "../shared/mailbox-query";
 import { accountHealthSchema, reauthorizationSchema, synchronizationStatusSchema } from "../shared/synchronization";
 import type { ZodType } from "zod";
 import { z } from "zod";
@@ -241,6 +242,8 @@ export const api = {
     sendReceiptSchema,
     { method: "POST", ...jsonBody(input), ...withSignal(signal) },
   ),
+  queryMessages: (input: MailboxQueryInput, signal?: AbortSignal): Promise<MailboxPage> =>
+    request("/messages/query", mailboxPageSchema, { method: "POST", ...jsonBody(input), ...withSignal(signal) }),
   messages: (accountId: string, mailbox: string, query: string, limit = 50, signal?: AbortSignal): Promise<CanonicalMessageSummary[]> => {
     const params = new URLSearchParams({ mailbox });
     if (query.trim()) params.set("query", query.trim());

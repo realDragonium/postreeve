@@ -1,3 +1,4 @@
+import { mailboxQuerySchema } from "../../src/shared/mailbox-query";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import {
   createFolderInputSchema,
@@ -19,6 +20,11 @@ import {
   type Draft,
   type UpdateDraftInput,
 } from "../../src/shared/contracts";
+
+function mailboxResult(messages: readonly CanonicalMessageDetail[]) {
+  return { messages: canonicalMessageSummarySchema.array().parse(messages),nextCursor:null,
+    coverage:{sources:[],complete:true,bodyTextLimit:32768} };
+}
 
 const account: Account = {
   id: "account-work",
@@ -290,10 +296,11 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
       liveFolders = liveFolders.filter(({ path }) => path !== input.path);
       return json(route, liveFolders);
     }
-    if (method === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) {
+    if (method === "POST" && url.pathname === "/api/messages/query") {
       messageRequests += 1;
-      lastMessageQuery = url.searchParams.get("query") ?? "";
-      return json(route, url.searchParams.get("mailbox") === "INBOX" ? [message] : []);
+      const query=mailboxQuerySchema.parse(request.postDataJSON());
+      lastMessageQuery = query.query;
+      return json(route, mailboxResult(query.sources[0]?.mailbox === "INBOX" ? [message] : []));
     }
     if (method === "POST" && url.pathname === "/api/messages/read") return json(route, [message]);
     if (method === "GET" && url.pathname === `/api/accounts/${account.id}/drafts`) return json(route, liveDrafts);
@@ -406,7 +413,7 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
       sort: "oldest",
     });
   });
-  expect(searchResult).toEqual([canonicalMessageSummarySchema.parse(message)]);
+  expect(searchResult).toEqual(mailboxResult([message]));
   expect(lastMessageQuery).toBe("quarterly planning");
   await expect(page.getByLabel("Search messages")).toHaveValue("quarterly planning");
   await expect(page.getByRole("button", { name: "Unread", exact: true }).first()).toHaveAttribute("aria-pressed", "true");
@@ -626,7 +633,7 @@ test("keeps trace-header recipients and does not restore a sent draft", async ({
     if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
     if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
     if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
-    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, [tracedMessage]);
+    if (request.method() === "POST" && url.pathname === "/api/messages/query") return json(route, mailboxResult([tracedMessage]));
     if (request.method() === "POST" && url.pathname === "/api/messages/read") return json(route, [tracedMessage]);
     if (await draftFixture.handle(route, account.id, (input) => {
       sentMessages.push(input);
@@ -701,7 +708,7 @@ test("refetches backend drafts on reopen and leaves unchanged structured drafts 
     if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
     if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
     if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
-    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, []);
+    if (request.method() === "POST" && url.pathname === "/api/messages/query") return json(route, mailboxResult([]));
     if (await fixture.handle(route, account.id)) return;
     if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
     if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
@@ -778,7 +785,7 @@ test("shows draft list failures truthfully and distinguishes pending provider mi
     if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
     if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
     if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
-    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, []);
+    if (request.method() === "POST" && url.pathname === "/api/messages/query") return json(route, mailboxResult([]));
     if (await fixture.handle(route, account.id)) return;
     if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
     if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
@@ -811,7 +818,7 @@ test("freezes compose controls and close paths while a draft send is pending", a
     if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
     if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
     if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
-    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, []);
+    if (request.method() === "POST" && url.pathname === "/api/messages/query") return json(route, mailboxResult([]));
     if (await fixture.handle(route, account.id, async (input) => {
       markSendStarted();
       await sendGate;
@@ -866,7 +873,7 @@ test("keeps dirty compose content open until a failed backend save can be retrie
     if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
     if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
     if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
-    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, []);
+    if (request.method() === "POST" && url.pathname === "/api/messages/query") return json(route, mailboxResult([]));
     if (await fixture.handle(route, account.id)) return;
     if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
     if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
@@ -924,7 +931,7 @@ test("reads a message and returns to the list on a narrow screen", async ({ page
     if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
     if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
     if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
-    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, [message]);
+    if (request.method() === "POST" && url.pathname === "/api/messages/query") return json(route, mailboxResult([message]));
     if (request.method() === "POST" && url.pathname === "/api/messages/read") return json(route, [message]);
     if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
     if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
@@ -970,7 +977,7 @@ test("downloads received attachments with loading and provider error feedback", 
     if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
     if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
     if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
-    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) return json(route, [attached]);
+    if (request.method() === "POST" && url.pathname === "/api/messages/query") return json(route, mailboxResult([attached]));
     if (request.method() === "POST" && url.pathname === "/api/messages/read") return json(route, [attached]);
     if (request.method() === "GET" && url.pathname.endsWith("/attachments/download-reference")) {
       await downloadGate;
@@ -1023,8 +1030,9 @@ test("keyboard shortcuts open, move through and archive mail", async ({ page }) 
     if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
     if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
     if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
-    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/messages`) {
-      return json(route, url.searchParams.get("mailbox") === "INBOX" ? [message, second] : []);
+    if (request.method() === "POST" && url.pathname === "/api/messages/query") {
+      const query=mailboxQuerySchema.parse(request.postDataJSON());
+      return json(route, mailboxResult(query.sources[0]?.mailbox === "INBOX" ? [message, second] : []));
     }
     if (request.method() === "POST" && url.pathname === "/api/messages/read") {
       const { references } = request.postDataJSON();
@@ -1114,9 +1122,9 @@ test("refreshes an open canonical message when its provider representative chang
           { path: "Old Archive", name: "Old Archive", specialUse: "archive", unread: 0, total: 0 },
         ]);
     }
-    if (request.method() === "GET" && url.pathname.endsWith("/messages")) {
-      const isSecond = url.pathname.includes(secondAccount.id);
-      return json(route, useNewRepresentative === isSecond ? [isSecond ? newMessage : oldMessage] : []);
+    if (request.method() === "POST" && url.pathname === "/api/messages/query") {
+      const query=mailboxQuerySchema.parse(request.postDataJSON());
+      return json(route, mailboxResult(query.sources.flatMap(source => useNewRepresentative === (source.accountId === secondAccount.id) ? [useNewRepresentative ? newMessage : oldMessage] : [])));
     }
     if (request.method() === "POST" && url.pathname === "/api/messages/read") {
       const body: unknown = request.postDataJSON();
@@ -1179,9 +1187,9 @@ test("keeps a selected fallback identity attached to its surviving canonical sum
     if (request.method() === "GET" && url.pathname.endsWith("/folders")) {
       return json(route, [{ path: "INBOX", name: "Inbox", specialUse: "inbox", unread: 1, total: 1 }]);
     }
-    if (request.method() === "GET" && url.pathname.endsWith("/messages")) {
-      const isSecond = url.pathname.includes(secondAccount.id);
-      return json(route, useSurvivor === isSecond ? [isSecond ? survivor : fallback] : []);
+    if (request.method() === "POST" && url.pathname === "/api/messages/query") {
+      const query=mailboxQuerySchema.parse(request.postDataJSON());
+      return json(route, mailboxResult(query.sources.flatMap(source => useSurvivor === (source.accountId === secondAccount.id) ? [useSurvivor ? survivor : fallback] : [])));
     }
     if (await draftFixture.handle(route, account.id, () => {
       useSurvivor = true;
@@ -1239,7 +1247,7 @@ test("shows and selects a newly connected account without a reload", async ({ pa
     if (method === "GET" && url.pathname.endsWith("/folders")) {
       return json(route, [{ path: "INBOX", name: "Inbox", specialUse: "inbox", unread: 0, total: 0 }]);
     }
-    if (method === "GET" && url.pathname.endsWith("/messages")) return json(route, []);
+    if (method === "POST" && url.pathname === "/api/messages/query") return json(route, mailboxResult([]));
     if (method === "GET" && url.pathname === "/api/proposals") return json(route, []);
     if (method === "GET" && url.pathname === "/api/batches") return json(route, []);
     return json(route, { error: `Unhandled test route: ${method} ${url.pathname}` }, 404);
@@ -1287,7 +1295,7 @@ test("uploads binary files, retries failures, and reopens them in another client
       if (path === "/api/outgoing-mail-limits") return json(route, { maxUploadBytes: 20 * 1024 * 1024, maxMessageBytes: 25 * 1024 * 1024 });
       if (path === "/api/oauth/google/status") return json(route, { configured: false });
       if (path.endsWith("/folders")) return json(route, folders);
-      if (path.endsWith("/messages")) return json(route, []);
+      if (path === "/api/messages/query") return json(route, mailboxResult([]));
       if (path === "/api/proposals" || path === "/api/batches") return json(route, []);
       const upload = /\/drafts\/([^/]+)\/files$/.exec(path);
       if (upload && request.method() === "POST") {

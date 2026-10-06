@@ -1,3 +1,5 @@
+import { migrateSearchIndex, queryIndex, normalizedQuery, searchFields, type IndexedRow } from "./query";
+import { SEARCH_BODY_LIMIT, SEARCH_HEADERS_LIMIT, type MailboxQueryInput, type MailboxCoverage } from "../../shared/mailbox-query";
 import { defaultRetentionPolicy, retentionPolicySchema, type RetentionPolicy } from "../../shared/synchronization";
 import type { Database } from "bun:sqlite";
 import { z } from "zod";
@@ -30,7 +32,7 @@ export class SynchronizationStore {
     readonly reconcile: (snapshot: MailboxSnapshot) => CanonicalMessage[],
     readonly move: (tenantId: string, provider: MailProviderKind, previous: MessageRef, current: MessageRef) => boolean,
     readonly canonical: (tenantId: string, id: string) => CanonicalMessage | null,
-  ) { this.#migrate(); }
+  ) { this.#migrate(); migrateSearchIndex(this.sqlite); }
 
   schedule(tenantId: string, accountId: string, now: number, replace = false): void {
     this.sqlite.transaction(() => {
@@ -189,13 +191,13 @@ export class SynchronizationStore {
 
   enforceRetention(tenantId: string, accountId: string, now: number): void {
     this.sqlite.transaction(() => {
-      this.sqlite.query(`UPDATE indexed_messages SET content=json_set(content,'$.preview','')
-        WHERE tenant_id=? AND account_id=? AND updated_at<=? AND json_extract(content,'$.preview')<>''`)
+      this.sqlite.query(`UPDATE indexed_messages SET content=json_set(content,'$.preview','','$.searchPreview','','$.searchBody',NULL)
+        WHERE tenant_id=? AND account_id=? AND updated_at<=? AND (json_extract(content,'$.preview')<>'' OR json_type(content,'$.searchBody')='text')`)
         .run(tenantId, accountId, now - this.#retention.maxAgeDays * 86_400_000);
       let excess = this.retainedContentBytes(tenantId, accountId) - this.#retention.maxContentBytes;
       while (excess > 0) {
-        const oldest = this.sqlite.query(`SELECT message_id,length(CAST(json_extract(content,'$.preview') AS BLOB)) AS bytes
-          FROM indexed_messages WHERE tenant_id=? AND account_id=? AND json_extract(content,'$.preview')<>''
+        const oldest = this.sqlite.query(`SELECT message_id,(length(CAST(json_extract(content,'$.preview') AS BLOB))+COALESCE(length(CAST(json_extract(content,'$.searchBody') AS BLOB)),0)) AS bytes
+          FROM indexed_messages WHERE tenant_id=? AND account_id=? AND (json_extract(content,'$.preview')<>'' OR json_type(content,'$.searchBody')='text')
           ORDER BY updated_at,message_id LIMIT 100`).all(tenantId, accountId) as Array<{ message_id: string; bytes: number }>;
         if (!oldest.length) throw new Error("Indexed content accounting is inconsistent");
         const expired: string[] = [];
@@ -204,31 +206,77 @@ export class SynchronizationStore {
           excess -= row.bytes;
           if (excess <= 0) break;
         }
-        this.sqlite.query(`UPDATE indexed_messages SET content=json_set(content,'$.preview','')
+        this.sqlite.query(`UPDATE indexed_messages SET content=json_set(content,'$.preview','','$.searchPreview','','$.searchBody',NULL)
           WHERE tenant_id=? AND account_id=? AND message_id IN (SELECT value FROM json_each(?))`)
           .run(tenantId, accountId, JSON.stringify(expired));
       }
     }).immediate();
   }
 
-  indexed(tenantId: string, accountId: string, mailbox: string, limit = 100): CanonicalMessageSummary[] {
-    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Invalid indexed read limit");
-    const rows = this.sqlite.query(`SELECT * FROM (
-      SELECT i.message_id,i.content,i.received_at,l.uid_validity,l.uid,l.modseq,l.provider_id,l.read,l.flagged,
-        ROW_NUMBER() OVER (PARTITION BY i.message_id ORDER BY l.uid DESC,l.uid_validity DESC,l.provider_id DESC,l.id DESC) AS representative
-      FROM indexed_messages i JOIN message_locations l ON l.tenant_id=i.tenant_id AND l.account_id=i.account_id AND l.message_id=i.message_id
-      WHERE i.tenant_id=? AND i.account_id=? AND l.mailbox=?)
-      WHERE representative=1 ORDER BY received_at DESC,message_id DESC LIMIT ?`)
-      .all(tenantId, accountId, mailbox, limit) as Array<{ message_id: string; content: string; uid_validity: string; uid: number; modseq: string | null; provider_id: string | null; read: number; flagged: number }>;
-    return rows.map(row => {
-      const canonical = this.canonical(tenantId, row.message_id);
-      if (!canonical) throw new Error("Indexed canonical message missing");
-      return { ...indexedContentSchema.parse(JSON.parse(row.content)),
-        canonicalId: canonical.id, canonicalAliases: canonical.aliases, conversationId: canonical.conversationId,
-        messageId: canonical.messageId ?? "", inReplyTo: canonical.inReplyTo, references: canonical.references,
-        ref: { accountId, mailbox, uidValidity: row.uid_validity, uid: row.uid, modseq: row.modseq,
-          ...(row.provider_id ? { providerId: row.provider_id } : {}) }, read: row.read === 1, flagged: row.flagged === 1 };
+  query(tenantId: string, input: MailboxQueryInput, fallbackIds: readonly string[] = []): { messages: CanonicalMessageSummary[]; nextCursor: string | null } {
+    const result = queryIndex(this.sqlite, tenantId, normalizedQuery(input), fallbackIds);
+    return { messages: result.rows.map(row => this.#summary(tenantId, row)), nextCursor: result.nextCursor };
+  }
+
+  coverage(tenantId: string, sources: MailboxQueryInput["sources"]): MailboxCoverage {
+    const coverage = sources.map(source => {
+      const scopes = this.scopes({ tenantId, accountId: source.accountId });
+      const synchronized = scopes.some(scope => scope.coverage === "complete"
+        && (scope.scope === syncScopeKey({ kind: "account" }) || scope.scope === syncScopeKey({ kind: "mailbox", mailbox: source.mailbox })));
+      const row = this.sqlite.query(`SELECT COUNT(DISTINCT i.message_id) total,
+        COUNT(DISTINCT CASE WHEN json_type(i.content,'$.searchBody')='text' THEN i.message_id END) bodies
+        FROM indexed_messages i JOIN message_locations l ON l.tenant_id=i.tenant_id AND l.account_id=i.account_id AND l.message_id=i.message_id
+        WHERE i.tenant_id=? AND l.account_id=? AND l.mailbox=?`).get(tenantId,source.accountId,source.mailbox) as { total: number; bodies: number };
+      return { ...source, synchronized, indexedMessages: row.total, bodiesAvailable: row.bodies, fallback: "not-requested" as const };
     });
+    return { sources: coverage, complete: coverage.every(source => source.synchronized && source.bodiesAvailable === source.indexedMessages), bodyTextLimit: SEARCH_BODY_LIMIT };
+  }
+
+  observe(account: SyncAccount, messages: readonly ProviderMessageSummary[], now: number): string[] {
+    return this.sqlite.transaction(() => {
+      const ids: string[] = [];
+      for (const message of messages) {
+        if (message.ref.accountId !== account.accountId) throw new Error("Indexed observation crossed account scope");
+        const canonical = this.reconcile({ ...account, mailbox: message.ref.mailbox,
+          observations: [toCanonicalObservation(account.tenantId, account.provider, message)], authoritative: false })[0]!;
+        this.#index(account, canonical.id, message, now);
+        ids.push(canonical.id);
+      }
+      this.enforceRetention(account.tenantId, account.accountId, now);
+      return ids;
+    }).immediate();
+  }
+
+  confirmedAction(account: SyncAccount, previous: MessageRef, current: MessageRef, read?: boolean): void {
+    if (previous.accountId !== account.accountId || current.accountId !== account.accountId) throw new Error("Action crossed account scope");
+    this.sqlite.transaction(() => {
+      const row = this.sqlite.query(`SELECT l.message_id,i.content,l.read,l.flagged FROM message_locations l
+        JOIN indexed_messages i ON i.tenant_id=l.tenant_id AND i.account_id=l.account_id AND i.message_id=l.message_id
+        WHERE l.tenant_id=? AND l.account_id=? AND l.mailbox=? AND
+        ((? IS NOT NULL AND l.provider_id=?) OR (? IS NULL AND l.uid_validity=? AND l.uid=?)) LIMIT 1`)
+        .get(account.tenantId,account.accountId,previous.mailbox,previous.providerId ?? null,previous.providerId ?? null,
+          previous.providerId ?? null,previous.uidValidity,previous.uid) as { message_id: string; content: string; read: number; flagged: number } | null;
+      if (!row) return;
+      const summary = indexedContentSchema.parse(JSON.parse(row.content));
+      this.reconcile({ ...account, mailbox: current.mailbox, authoritative: false,
+        observations: [toCanonicalObservation(account.tenantId, account.provider,
+          { ...summary, ref: current, read: read ?? row.read === 1, flagged: row.flagged === 1 })] });
+      if (previous.mailbox !== current.mailbox || previous.uidValidity !== current.uidValidity || previous.uid !== current.uid) this.#remove(account, previous);
+    }).immediate();
+  }
+
+  indexed(tenantId: string, accountId: string, mailbox: string, limit = 100): CanonicalMessageSummary[] {
+    return this.query(tenantId, { sources: [{ accountId, mailbox }], limit }).messages;
+  }
+
+  #summary(tenantId: string, row: IndexedRow): CanonicalMessageSummary {
+    const canonical = this.canonical(tenantId, row.message_id);
+    if (!canonical) throw new Error("Indexed canonical message missing");
+    return { ...indexedContentSchema.parse(JSON.parse(row.content)),
+      canonicalId: canonical.id, canonicalAliases: canonical.aliases, conversationId: canonical.conversationId,
+      messageId: canonical.messageId ?? "", inReplyTo: canonical.inReplyTo, references: canonical.references,
+      ref: { accountId: row.account_id, mailbox: row.mailbox, uidValidity: row.uid_validity, uid: row.uid, modseq: row.modseq,
+        ...(row.provider_id ? { providerId: row.provider_id } : {}) }, read: row.read === 1, flagged: row.flagged === 1 };
   }
 
   #requireClaim(claim: SyncClaim, now: number): void { if (!this.current(claim, now)) throw new Error("Synchronization claim expired or was canceled"); }
@@ -241,12 +289,17 @@ export class SynchronizationStore {
   #index(claim: SyncAccount, id: string, message: ProviderMessageSummary, now: number): void {
     const content = indexedContentSchema.parse(message);
     const addresses = (items: typeof content.from) => items.slice(0, 100).map(a => ({ name: a.name.slice(0,256), address: a.address.slice(0,512) }));
-    const bounded = { ...content, subject: content.subject.slice(0,2048), preview: content.preview.slice(0,4096),
+    const retained = this.sqlite.query("SELECT content FROM indexed_messages WHERE tenant_id=? AND account_id=? AND message_id=?")
+      .get(claim.tenantId, claim.accountId, id) as { content: string } | null;
+    const prior = retained ? z.object({ searchBody: z.string().nullable().optional(), searchHeaders: z.string().optional() }).parse(JSON.parse(retained.content)) : null;
+    const bounded = { ...content,
+      searchBody: message.searchBody === undefined ? prior?.searchBody ?? null : message.searchBody?.toLowerCase().slice(0, SEARCH_BODY_LIMIT) ?? null,
+      searchHeaders: (message.searchHeaders ?? prior?.searchHeaders ?? [content.messageId, content.inReplyTo ?? "", ...(content.references ?? [])].join("\n")).toLowerCase().slice(0, SEARCH_HEADERS_LIMIT), subject: content.subject.slice(0,2048), preview: content.preview.slice(0,4096),
       from: addresses(content.from), to: addresses(content.to), cc: content.cc ? addresses(content.cc) : undefined,
       replyTo: content.replyTo ? addresses(content.replyTo) : undefined, deliveredTo: content.deliveredTo?.slice(0,100),
       references: content.references?.slice(-100), messageId: content.messageId.slice(0,1024), inReplyTo: content.inReplyTo?.slice(0,2048) };
-    const serialized = JSON.stringify(bounded);
-    if (serialized.length > 128 * 1024) throw new Error("Indexed summary exceeds content limit");
+    const serialized = JSON.stringify({ ...bounded, ...searchFields(bounded) });
+    if (serialized.length > 256 * 1024) throw new Error("Indexed summary exceeds content limit");
     this.sqlite.query(`INSERT INTO indexed_messages(tenant_id,account_id,message_id,received_at,content,updated_at) VALUES(?,?,?,?,?,?)
       ON CONFLICT(tenant_id,account_id,message_id) DO UPDATE SET received_at=excluded.received_at,content=excluded.content,updated_at=excluded.updated_at`)
       .run(claim.tenantId, claim.accountId, id, message.receivedAt, serialized, now);
@@ -326,23 +379,27 @@ export class SynchronizationStore {
     this.sqlite.exec("UPDATE sync_jobs SET error_at=updated_at WHERE error IS NOT NULL AND error_at IS NULL");
     if (!jobColumns.some(column => column.name === "retained_content_bytes")) {
       this.sqlite.exec(`ALTER TABLE sync_jobs ADD COLUMN retained_content_bytes INTEGER NOT NULL DEFAULT 0;
-        UPDATE sync_jobs SET retained_content_bytes=(SELECT COALESCE(SUM(length(CAST(json_extract(content,'$.preview') AS BLOB))),0)
+        UPDATE sync_jobs SET retained_content_bytes=(SELECT COALESCE(SUM((length(CAST(json_extract(content,'$.preview') AS BLOB))+COALESCE(length(CAST(json_extract(content,'$.searchBody') AS BLOB)),0))),0)
           FROM indexed_messages WHERE tenant_id=sync_jobs.tenant_id AND account_id=sync_jobs.account_id);`);
     }
     this.sqlite.exec(`
-      CREATE INDEX IF NOT EXISTS indexed_previews_age ON indexed_messages(tenant_id,account_id,updated_at,message_id)
-        WHERE json_extract(content,'$.preview')<>'';
-      CREATE TRIGGER IF NOT EXISTS indexed_preview_insert AFTER INSERT ON indexed_messages BEGIN
-        UPDATE sync_jobs SET retained_content_bytes=retained_content_bytes+length(CAST(json_extract(NEW.content,'$.preview') AS BLOB))
+      DROP INDEX IF EXISTS indexed_previews_age;
+      CREATE INDEX indexed_previews_age ON indexed_messages(tenant_id,account_id,updated_at,message_id)
+        WHERE (json_extract(content,'$.preview')<>'' OR json_type(content,'$.searchBody')='text');
+      DROP TRIGGER IF EXISTS indexed_preview_insert;
+      DROP TRIGGER IF EXISTS indexed_preview_update;
+      DROP TRIGGER IF EXISTS indexed_preview_delete;
+      CREATE TRIGGER indexed_preview_insert AFTER INSERT ON indexed_messages BEGIN
+        UPDATE sync_jobs SET retained_content_bytes=retained_content_bytes+(length(CAST(json_extract(NEW.content,'$.preview') AS BLOB))+COALESCE(length(CAST(json_extract(NEW.content,'$.searchBody') AS BLOB)),0))
           WHERE tenant_id=NEW.tenant_id AND account_id=NEW.account_id;
       END;
       CREATE TRIGGER IF NOT EXISTS indexed_preview_update AFTER UPDATE OF content ON indexed_messages BEGIN
         UPDATE sync_jobs SET retained_content_bytes=retained_content_bytes
-          +length(CAST(json_extract(NEW.content,'$.preview') AS BLOB))-length(CAST(json_extract(OLD.content,'$.preview') AS BLOB))
+          +(length(CAST(json_extract(NEW.content,'$.preview') AS BLOB))+COALESCE(length(CAST(json_extract(NEW.content,'$.searchBody') AS BLOB)),0))-(length(CAST(json_extract(OLD.content,'$.preview') AS BLOB))+COALESCE(length(CAST(json_extract(OLD.content,'$.searchBody') AS BLOB)),0))
           WHERE tenant_id=NEW.tenant_id AND account_id=NEW.account_id;
       END;
       CREATE TRIGGER IF NOT EXISTS indexed_preview_delete AFTER DELETE ON indexed_messages BEGIN
-        UPDATE sync_jobs SET retained_content_bytes=retained_content_bytes-length(CAST(json_extract(OLD.content,'$.preview') AS BLOB))
+        UPDATE sync_jobs SET retained_content_bytes=retained_content_bytes-(length(CAST(json_extract(OLD.content,'$.preview') AS BLOB))+COALESCE(length(CAST(json_extract(OLD.content,'$.searchBody') AS BLOB)),0))
           WHERE tenant_id=OLD.tenant_id AND account_id=OLD.account_id;
       END;
     `);

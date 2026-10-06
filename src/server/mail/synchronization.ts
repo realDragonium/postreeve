@@ -43,6 +43,8 @@ export interface MailSynchronization {
 
 export const syncPageSchema = z.object({
   messages: z.array(messageSummarySchema.extend({
+    searchBody: z.string().max(32_768).nullable().optional(),
+    searchHeaders: z.string().max(32_768).optional(),
     providerConversationId: z.string().min(1).optional(),
     canonicalReceivedAt: z.iso.datetime().nullable().optional(),
     referenceSequences: z.array(z.array(z.string())).optional(),

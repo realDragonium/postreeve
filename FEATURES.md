@@ -35,9 +35,9 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | List folders | Complete | Complete | `list_folders` |
 | Show total and unread folder counts | Complete | Complete | Returned by `list_folders`. |
 | Open Inbox, Sent, Drafts, Spam, Trash, and custom folders | Complete | Complete | `list_messages` opens the same account and folder in the UI. |
-| Manually refresh the mailbox | Complete | Equivalent | Each WebMCP list, read, or search call requests current provider data. |
+| Manually refresh the mailbox | Complete | Equivalent | List/search query the synchronized index and report coverage; incomplete coverage uses bounded provider fallback. Full reads request provider data. |
 | Detect changed folder counts in the open UI | Complete | Equivalent | The UI polls folder metadata; an agent can call `list_folders` again. |
-| Load more messages | Complete, up to 100 | Complete, up to 100 | `list_messages.limit` |
+| Load more messages | Complete, cursor pages | Complete, cursor pages | `list_messages.cursor` / `search_messages.cursor`; one backend cursor across unified sources. |
 | Create provider folders or Gmail labels | Complete | Complete | `create_folder` updates the provider and the open UI. |
 | Rename custom provider folders or Gmail labels | Complete | Complete | `rename_folder` preserves an IMAP folder's parent path and updates the open UI. |
 | Delete custom provider folders or Gmail labels | Complete | Complete | `delete_folder`; IMAP folders must be empty, while deleting a Gmail label leaves messages in their other labels. System folders are protected. |
@@ -134,7 +134,7 @@ These features are not provider-backed today. Whether and how they should be exp
 | Inspect account synchronization health and retention policy | Complete | Complete | `inspect_synchronization`; reads local evidence. |
 | Retry account synchronization safely | Complete | Complete | `retry_synchronization`; does not mutate provider mail. |
 | Request human reauthorization instructions | Complete | Complete | `request_reauthorization`; consent and credentials stay in the human authorization flow. |
-| Bounded preview retention | Complete | Complete | Defaults to 30 days since refresh and 100 MiB per account. Headers, locations, canonical identities and workflow history remain retained; this is not a total database-size limit. |
+| Bounded preview/body retention | Complete | Complete | Defaults to 30 days since refresh and 100 MiB per account. Retained preview and searchable body text expire together. Headers, locations, canonical identities and workflow history remain retained; this is not a total database-size limit. |
 
 ## Current WebMCP tool set
 
