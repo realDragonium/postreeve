@@ -1,0 +1,117 @@
+# Message Actions Specification
+
+## Purpose
+Covers the direct mailbox actions a person applies to messages: mark read, mark unread, archive, move and Trash, through the web UI and `POST /api/messages/actions`. The audited batch each request produces, and its undo, are specified in actions/activity-undo; proposals in actions/proposals; the same actions for agents in agents/webmcp-tools; folder management in mailbox/folders; how message identity follows a moved message in conversations/message-identity.
+
+## Requirements
+
+### Requirement: Direct action request
+The system SHALL accept `POST /api/messages/actions` with `{ accountId, items }`, where `items` holds 1 to 100 entries of `{ message, subject, action }`, `message` is a stable message reference and `action` is one of `{ type: "mark_read" }`, `{ type: "mark_unread" }`, `{ type: "move", destination }` or `{ type: "trash" }`. It SHALL answer 200 with the resulting operation batch. A request that fails validation SHALL be answered 400 and SHALL change no mail.
+
+#### Scenario: Mark one message read
+- **WHEN** the UI posts one item with action `mark_read` for a current unread message
+- **THEN** the response is 200 with a batch whose `status` is `applied` and whose single operation has `status` `applied`
+- **AND** the message is read at the provider
+
+#### Scenario: Too many items
+- **WHEN** a request contains 101 items
+- **THEN** the response is 400 and no message is changed
+
+### Requirement: One account per batch
+The system SHALL apply a direct action request to exactly one account. Every item's `message.accountId` MUST equal the request's `accountId`; otherwise the request SHALL be refused with 400 `Every direct action must belong to the selected account` before any item is applied. An unknown `accountId` SHALL be refused with 400 `Account not found`. When the UI applies one action to a selection that spans several accounts, it SHALL send one request per account.
+
+#### Scenario: Item from another account
+- **WHEN** a request for account A contains an item whose reference belongs to account B
+- **THEN** the response is 400 and no item of the request is applied
+
+#### Scenario: Unified selection across two accounts
+- **WHEN** a person archives a selection containing messages from two accounts in the unified view
+- **THEN** the UI sends two requests, one per account, and records one batch for each
+
+### Requirement: Stable references are revalidated before each action
+Before applying each item the system SHALL revalidate its reference against the provider: for IMAP the folder's UIDVALIDITY MUST match, the UID MUST exist and, when the reference carries a `modseq`, the message's MODSEQ MUST equal it; for Gmail the message MUST exist and, when the reference carries a `modseq`, its `historyId` MUST equal it. An item that fails revalidation SHALL be recorded as `failed` with error `Message is stale, changed, or missing` and its message SHALL NOT be changed.
+
+#### Scenario: Message changed since it was listed
+- **WHEN** an item's reference carries a `modseq` that no longer matches the provider
+- **THEN** that operation is `failed` with error `Message is stale, changed, or missing`
+- **AND** the message's read state and folder are unchanged
+
+### Requirement: Items succeed or fail individually
+The system SHALL attempt every item in request order, and a failure of one item SHALL NOT prevent or undo the others. Each operation result SHALL carry `itemId`, `message`, `action`, `status` (`applied` or `failed`) and `error` (the provider's message for a failure, otherwise null or a warning). The batch `status` SHALL be `applied` when every item applied, `failed` when none did, and `partially_applied` otherwise.
+
+#### Scenario: One stale and one current message
+- **WHEN** a request marks a current message and a stale message read
+- **THEN** the batch is `partially_applied` with operation statuses `applied` then `failed`
+- **AND** the stale message remains unread
+
+### Requirement: Every direct action is recorded as an audited batch
+The system SHALL record each direct action request as a proposal titled `Direct mailbox action` (or `Direct mailbox actions` for several items) with item reason `Requested directly through Postreeve.`, mark it approved, apply it and persist the resulting batch with that proposal's ID. The batch SHALL then be listed in Activity and be undoable as specified in actions/activity-undo.
+
+#### Scenario: Direct move appears in activity
+- **WHEN** a person moves a message to Archive
+- **THEN** `GET /api/batches?accountId=<account>` lists a batch for that move whose `proposalId` names an approved proposal
+
+### Requirement: Read-state actions
+The system SHALL apply `mark_read` and `mark_unread` by setting or clearing the provider's read state (the IMAP `\Seen` flag, the Gmail `UNREAD` label) without moving the message, and SHALL record the message's previous read state so the action can be undone.
+
+#### Scenario: Mark unread in Gmail
+- **WHEN** a person marks a read Gmail message unread
+- **THEN** the Gmail message gains the `UNREAD` label and stays in its folder
+
+### Requirement: Move actions
+The system SHALL apply `move` by moving the message to the folder path in `destination` (IMAP moves it to that mailbox; Gmail adds the destination label and removes the source label) and SHALL retain the message's local identity at its new location. When the provider move succeeds but the identity cannot be retained, the operation SHALL stay `applied` and undoable, with an `error` warning that begins `Provider action succeeded, but local message identity could not be retained`.
+
+#### Scenario: Move to a custom folder
+- **WHEN** a person moves an inbox message to `Clients`
+- **THEN** the message is listed in `Clients`, no longer in the inbox, and keeps its canonical ID
+
+#### Scenario: Identity cannot be retained
+- **WHEN** a provider move succeeds but recording the new location fails
+- **THEN** the operation is `applied` with an `error` warning and the batch can still be undone
+
+### Requirement: Archive is a move to the account's archive folder
+The system SHALL treat archiving as a `move` to the account's folder whose `specialUse` is `archive`; there SHALL be no separate archive action. For Gmail, the archive folder is the synthetic path `__archive__`, and moving there removes the `INBOX` label and the source label. The UI SHALL disable its Archive control when the account has no archive folder, and the `e` shortcut SHALL show `This account has no Archive folder.` instead of acting.
+
+#### Scenario: Archive with the keyboard
+- **WHEN** a person presses `e` on a focused message in an account with an archive folder
+- **THEN** the UI sends a `move` action whose `destination` is that folder's path
+
+#### Scenario: Account without an archive folder
+- **WHEN** the open message's account has no folder with `specialUse` `archive`
+- **THEN** the Archive button is disabled with the title `This account has no Archive folder`
+
+### Requirement: Trash moves to the provider's Trash and nothing is permanently deleted
+The system SHALL apply `trash` by moving the message to the provider's Trash: the IMAP mailbox with the special-use `\Trash` attribute, or Gmail's trash operation. An IMAP account without such a mailbox SHALL fail the item with `This account has no discoverable special-use Trash mailbox`. No action, endpoint or tool SHALL permanently delete or expunge a message. The UI SHALL disable Trash when the account has no Trash folder or the open message is already in Trash.
+
+#### Scenario: Trash an IMAP message
+- **WHEN** a person trashes an IMAP message and the account has a `\Trash` mailbox
+- **THEN** the message is moved to that mailbox and remains recoverable there
+
+#### Scenario: Message already in Trash
+- **WHEN** a person opens a message stored in the Trash folder
+- **THEN** the reader's Trash control is disabled and labelled `In Trash`
+
+### Requirement: Flagging is not available
+The system SHALL NOT offer a flag or unflag action in the API, the UI or WebMCP. A message's `flagged` state SHALL be read-only and used only for display and the `flagged` list filter. A direct action request with an unknown action type, such as `flag`, SHALL be refused with 400.
+
+#### Scenario: Flag request
+- **WHEN** a client posts an item with action `{ type: "flag" }`
+- **THEN** the response is 400 and no message is changed
+
+### Requirement: Action controls in the web UI
+The UI SHALL offer Archive, Mark read or Mark unread, Move to… and Trash for the open message in the reader, and Archive, Mark read, Unread, Move and Trash for the selection (or the focused message when nothing is selected) in the message list, plus the `e` (archive) and `u` (toggle read) shortcuts. Move destinations SHALL exclude the Trash folder, and in the reader also the message's current folder.
+
+#### Scenario: Reader move menu
+- **WHEN** a person opens the Move to… menu for an inbox message
+- **THEN** it lists the account's folders except the inbox and Trash
+
+### Requirement: Feedback after a UI action
+After a successful action the UI SHALL clear the selection, close the reader for a move or Trash, show a status (`Moved <n> to <folder>`, `Moved <n> to Trash`, `Marked <n> read` or `Marked <n> unread`), add an undo entry and refresh the mailbox, folders and activity. A failed request SHALL show its error message.
+
+#### Scenario: Bulk mark read
+- **WHEN** a person selects three messages and chooses Mark read
+- **THEN** the status reads `Marked 3 read`, the selection is cleared and the action can be undone
+
+#### Scenario: Move from the reader
+- **WHEN** a person chooses `Archive` in the reader's Move to… menu
+- **THEN** the status reads `Moved 1 to Archive` and the reader closes

@@ -1,5 +1,15 @@
 # Postreeve repository guidance
 
+## Changes go through OpenSpec
+
+Every requested change uses the OpenSpec workflow; `openspec/specs/` describes current behavior.
+
+1. Propose with `/opsx:propose` (Codex: `$openspec-propose`), or `/opsx:explore` first when the direction is unclear. This writes `openspec/changes/<name>/` with the proposal, delta specs, design and tasks. Stop there until the user has reviewed it.
+2. Implement with `/opsx:apply`, checking off `tasks.md` as you go.
+3. Archive with `/opsx:archive` once the change is implemented and verified, in the same pull request, so the main specs merge together with the code.
+
+A change with no behavior change (refactor, tooling, docs only) sets `skip_specs: true` in its `.openspec.yaml` instead of inventing requirements. If `openspec` is not on `PATH`, run it as `bunx openspec`. Check specs with `bunx openspec validate --specs --strict`.
+
 ## Setup
 
 - Install Bun 1.4 or newer.

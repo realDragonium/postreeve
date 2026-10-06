@@ -1,0 +1,38 @@
+schema: spec-driven
+
+context: |
+  Postreeve is a local-first email client for humans and agents: a Bun/Hono
+  server with SQLite, a React web UI, page-scoped WebMCP tools and an Electron
+  desktop shell. Mail providers are Gmail (API) and IMAP/SMTP.
+  Specs are grouped by domain: accounts/, mailbox/, conversations/, actions/,
+  compose/, agents/, runtime/. Reuse an existing capability path before
+  adding one.
+  Specs state the behavior contract. When a change alters behavior that
+  README.md or FEATURES.md describes, update that file in the same change.
+  WebMCP mirrors user mailbox workflows; a change that adds or alters a UI
+  mailbox workflow states whether agents/webmcp-tools changes with it.
+  Only the human-facing UI may approve a proposal; no change may give an
+  agent a path around that boundary.
+  Changes usually implement a Linear issue (DRA-nnn); name it in the proposal.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always state what is out of scope
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing
