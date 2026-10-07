@@ -1,3 +1,6 @@
+import { uniqueCanonicalMessages } from "../../shared/canonical-messages";
+import { mailboxQuerySchema, type MailboxQueryInput, type MailboxPage as IndexedMailboxPage } from "../../shared/mailbox-query";
+import { normalizedQuery, readCursor } from "../sync/query";
 import { accountHealth } from "../sync/health";
 import type { AccountHealth, SynchronizationStatus, Reauthorization } from "../../shared/synchronization";
 import { SynchronizationRunner, type SynchronizationOptions } from "../sync/runner";
@@ -51,16 +54,15 @@ import {
   updateDraftInputSchema,
   updateProposalInputSchema,
 } from "../../shared/contracts";
-import { uniqueCanonicalMessages } from "../../shared/canonical-messages";
 import type { Store, StoredAccount, StoredBatch } from "../db/store";
 import type { StoredOperation } from "../db/schema";
 import {
   MailProviderRegistry,
   toCanonicalObservation,
   type MailProvider,
+  type ProviderMessageSummary,
   type ProviderMessageDetail,
   type ProviderLocationMove,
-  type ProviderMessageSummary,
   type ProviderDraft,
   type ProviderDraftScope,
   type ProviderAttachmentDownload,
@@ -367,6 +369,48 @@ export class PostreeveService {
     return provider.listFolders(input.accountId);
   }
 
+  async queryMessages(rawInput: MailboxQueryInput): Promise<IndexedMailboxPage> {
+    const input = normalizedQuery(mailboxQuerySchema.parse(rawInput));
+    const continuation = readCursor(this.#context.tenantId, input);
+    const fallbackIds = [...(continuation?.fallbackIds ?? [])];
+    const accounts = new Map<string, StoredAccount>();
+    for (const source of input.sources) if (!accounts.has(source.accountId)) accounts.set(source.accountId, await this.#requireAccount(source.accountId));
+    const sync = this.#store.synchronization;
+    const now = this.synchronization.now();
+    for (const accountId of accounts.keys()) sync.enforceRetention(this.#context.tenantId, accountId, now);
+    const coverage = sync.coverage(this.#context.tenantId, input.sources);
+    let fallbackCalls = 0;
+    let expired = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => { expired = true; reject(new Error("Provider fallback timed out")); }, 5_000);
+    });
+    try {
+      for (const source of coverage.sources) {
+        const needsFallback = !source.synchronized || (input.query !== "" && source.bodiesAvailable < source.indexedMessages);
+        if (!needsFallback) { source.fallback = "not-needed"; continue; }
+        if (input.cursor || fallbackIds.length >= 1000 || fallbackCalls >= 10 || expired) continue;
+        try {
+          const account = accounts.get(source.accountId)!;
+          const provider = this.#providers.forAccount(source.accountId);
+          fallbackCalls++;
+          const pending = input.query
+            ? provider.searchMessages(source.accountId, source.mailbox, input.query, 100)
+            : provider.listMessagePage(source.accountId, source.mailbox, 100).then(page => page.messages);
+          const messages = await Promise.race([pending, deadline]);
+          if (expired) throw new Error("Provider fallback timed out");
+          if (messages.some(message => message.ref.mailbox !== source.mailbox || message.ref.accountId !== source.accountId)) throw new Error("Provider result crossed mailbox scope");
+          const observed = sync.observe({ tenantId: this.#context.tenantId, accountId: account.id, provider: account.kind }, messages, now);
+          if (input.query) fallbackIds.push(...observed.slice(0, 1000 - fallbackIds.length));
+          source.fallback = "limited";
+        } catch { source.fallback = "failed"; }
+      }
+    } finally { clearTimeout(timeout); }
+    const refreshed = sync.coverage(this.#context.tenantId, input.sources);
+    refreshed.sources.forEach((source, index) => { source.fallback = coverage.sources[index]!.fallback; });
+    return { ...sync.query(this.#context.tenantId, input, fallbackIds), coverage: refreshed };
+  }
+
   async listMessages(input: ListMessagesInput): Promise<CanonicalMessageSummary[]> {
     const account = await this.#requireAccount(input.accountId);
     const provider = this.#providers.forAccount(input.accountId);
@@ -434,6 +478,8 @@ export class PostreeveService {
         providerConversationId: _providerConversationId,
         canonicalReceivedAt: _canonicalReceivedAt,
         referenceSequences: _referenceSequences,
+        searchBody: _searchBody,
+        searchHeaders: _searchHeaders,
         attachments: providerAttachments,
         ...publicDetail
       } = detail;
@@ -1304,7 +1350,8 @@ export class PostreeveService {
           operation = { result: operationResult(item, "applied", null), applied: null };
         } else {
           const applied = await provider.apply(item.message, item.action);
-          const identityError = await this.#recordProviderMove(proposal.accountId, applied);
+          const identityError = await this.#recordProviderMove(proposal.accountId, applied,
+            item.action.type === "mark_read" ? true : item.action.type === "mark_unread" ? false : undefined);
           operation = { result: operationResult(item, "applied", identityError), applied };
         }
       } catch (error) {
@@ -1356,7 +1403,9 @@ export class PostreeveService {
       }
       try {
         const reversed = await provider.undo(operation.applied);
-        const identityError = reversed ? await this.#recordProviderMove(batch.accountId, reversed) : null;
+        const reverse = reversed ?? { previous: operation.applied.current,
+          current: { ...operation.applied.previous, modseq: null } };
+        const identityError = await this.#recordProviderMove(batch.accountId, reverse, operation.applied.previousRead);
         storedOperations.push({
           ...operation,
           result: { ...operation.result, status: "undone", error: identityError },
@@ -1383,7 +1432,7 @@ export class PostreeveService {
     return toPublicBatch(updated);
   }
 
-  async #recordProviderMove(accountId: string, move: ProviderLocationMove): Promise<string | null> {
+  async #recordProviderMove(accountId: string, move: ProviderLocationMove, read?: boolean): Promise<string | null> {
     try {
       const account = await this.#requireAccount(accountId);
       const retained = await this.#store.recordProviderMove(
@@ -1392,6 +1441,7 @@ export class PostreeveService {
         move.previous,
         move.current,
       );
+      this.#store.synchronization.confirmedAction({ tenantId: this.#context.tenantId, accountId, provider: account.kind }, move.previous, move.current, read);
       if (!retained) {
         return "Provider action succeeded, but local message identity could not be retained: source identity is unknown";
       }
@@ -1460,6 +1510,8 @@ export class PostreeveService {
         providerConversationId: _providerConversationId,
         canonicalReceivedAt: _canonicalReceivedAt,
         referenceSequences: _referenceSequences,
+        searchBody: _searchBody,
+        searchHeaders: _searchHeaders,
         ...publicMessage
       } = message;
       return {

@@ -1,7 +1,7 @@
+import { mailboxPageSchema, type MailboxPage } from "../src/shared/mailbox-query";
 import { defaultRetentionPolicy, type AccountHealth, type SynchronizationStatus, type Reauthorization } from "../src/shared/synchronization";
 import { describe, expect, test } from "bun:test";
 
-import { canonicalMessageSummarySchema } from "../src/shared/contracts.ts";
 import type {
   Account,
   CanonicalMessageDetail,
@@ -69,6 +69,9 @@ const message: CanonicalMessageSummary = {
   flagged: false,
 };
 
+const coverage: MailboxPage["coverage"] = { sources: [], complete: false, bodyTextLimit: 32768 };
+function page(messages: readonly CanonicalMessageSummary[]): MailboxPage { return { messages: [...messages], nextCursor: null, coverage }; }
+
 const messageDetail: CanonicalMessageDetail = {
   attachments: [],
   ...message,
@@ -84,16 +87,6 @@ const olderUnreadMessage: CanonicalMessageSummary = {
   subject: "Older matching subject",
   receivedAt: "2026-08-28T12:00:00.000Z",
   flagged: true,
-};
-
-const readMessage: CanonicalMessageSummary = {
-  ...message,
-  canonicalId: "canonical-message-read",
-  ref: { ...message.ref, uid: 8 },
-  messageId: "message-read@example.test",
-  subject: "Read matching subject",
-  receivedAt: "2026-08-27T12:00:00.000Z",
-  read: true,
 };
 
 const sendInput: SendMessageInput = {
@@ -193,9 +186,9 @@ class FakeServices implements WebMcpServices {
     return [folder];
   }
 
-  async listMessages(_input: WebMcpListMessagesInput, signal: AbortSignal): Promise<readonly CanonicalMessageSummary[]> {
+  async listMessages(_input: WebMcpListMessagesInput, signal: AbortSignal): Promise<MailboxPage> {
     this.lastSignal = signal;
-    return [message];
+    return page([message]);
   }
 
   async readMessages(_messages: readonly MessageRef[], signal: AbortSignal): Promise<readonly CanonicalMessageDetail[]> {
@@ -206,9 +199,9 @@ class FakeServices implements WebMcpServices {
   async searchMessages(
     _input: WebMcpSearchMessagesInput,
     signal: AbortSignal,
-  ): Promise<readonly CanonicalMessageSummary[]> {
+  ): Promise<MailboxPage> {
     this.lastSignal = signal;
-    return [message, olderUnreadMessage, readMessage];
+    return page([olderUnreadMessage, message]);
   }
 
   async sendMessage(input: SendMessageInput, signal: AbortSignal): Promise<SendReceipt> {
@@ -288,7 +281,7 @@ describe("Postreeve WebMCP", () => {
     expect([...modelContext.tools.keys()]).toEqual(expectedNames);
     expect(modelContext.tool("list_messages").inputSchema).toMatchObject({
       type: "object",
-      required: ["accountId", "mailbox"],
+      anyOf: [{ required: ["sources"] }, { required: ["accountId", "mailbox"] }],
     });
     expect(modelContext.tool("list_messages").annotations).toEqual({
       readOnlyHint: true,
@@ -356,7 +349,7 @@ describe("Postreeve WebMCP", () => {
         { accountId: account.id, mailbox: "INBOX" },
         executeOptions(),
       ),
-    ).toEqual([message]);
+    ).toEqual(page([message]));
     expect(
       await modelContext.tool("read_messages").execute({ messages: [messageRef] }, executeOptions()),
     ).toEqual([messageDetail]);
@@ -371,7 +364,7 @@ describe("Postreeve WebMCP", () => {
         },
         executeOptions(),
       ),
-    ).toEqual([olderUnreadMessage, message]);
+    ).toEqual(page([olderUnreadMessage, message]));
     expect(services.mailboxViews).toEqual([
       {
         accountId: account.id,
@@ -380,7 +373,7 @@ describe("Postreeve WebMCP", () => {
         filter: "all",
         sort: "newest",
         query: "",
-        messages: [message],
+        ...page([message]),
       },
       {
         accountId: account.id,
@@ -389,7 +382,7 @@ describe("Postreeve WebMCP", () => {
         filter: "unread",
         sort: "oldest",
         query: "subject",
-        messages: [message, olderUnreadMessage, readMessage],
+        ...page([olderUnreadMessage, message]),
       },
     ]);
     expect(
@@ -434,24 +427,24 @@ describe("Postreeve WebMCP", () => {
       override async listMessages(
         input: WebMcpListMessagesInput,
         signal: AbortSignal,
-      ): Promise<readonly CanonicalMessageSummary[]> {
-        const [result] = await super.listMessages(input, signal);
-        if (!result) return [];
+      ): Promise<MailboxPage> {
+        const [result] = (await super.listMessages(input, signal)).messages;
+        if (!result) return page([]);
         const invalid = structuredClone(result);
         Reflect.deleteProperty(invalid, "canonicalId");
-        return [invalid];
+        return page([invalid]);
       }
 
       override async searchMessages(
         input: WebMcpSearchMessagesInput,
         signal: AbortSignal,
-      ): Promise<readonly CanonicalMessageSummary[]> {
-        const results = [...await super.searchMessages(input, signal)];
+      ): Promise<MailboxPage> {
+        const results = (await super.searchMessages(input, signal)).messages;
         const result = results[0];
-        if (!result) return [];
+        if (!result) return page([]);
         const invalid = structuredClone(result);
         Reflect.deleteProperty(invalid, "canonicalId");
-        return [invalid, ...results.slice(1)];
+        return page([invalid, ...results.slice(1)]);
       }
 
       override async readMessages(
@@ -497,15 +490,15 @@ describe("Postreeve WebMCP", () => {
       override async listMessages(
         input: WebMcpListMessagesInput,
         signal: AbortSignal,
-      ): Promise<readonly CanonicalMessageSummary[]> {
-        return [...await super.listMessages(input, signal), duplicate];
+      ): Promise<MailboxPage> {
+        return page([...(await super.listMessages(input, signal)).messages, duplicate]);
       }
 
       override async searchMessages(
         _input: WebMcpSearchMessagesInput,
         _signal: AbortSignal,
-      ): Promise<readonly CanonicalMessageSummary[]> {
-        return [message, duplicate];
+      ): Promise<MailboxPage> {
+        return page([message, duplicate]);
       }
     }
 
@@ -515,16 +508,16 @@ describe("Postreeve WebMCP", () => {
     const search = tools.find(({ name }) => name === "search_messages");
     if (!list || !search) throw new Error("Missing message listing tools");
 
-    const listed = canonicalMessageSummarySchema.array().parse(
+    const listed = mailboxPageSchema.parse(
       await list.execute({ accountId: account.id, mailbox: "INBOX" }, executeOptions()),
-    );
-    const searched = canonicalMessageSummarySchema.array().parse(await search.execute({
+    ).messages;
+    const searched = mailboxPageSchema.parse(await search.execute({
       accountId: account.id,
       mailbox: "INBOX",
       query: "subject",
       filter: "all",
       sort: "newest",
-    }, executeOptions()));
+    }, executeOptions())).messages;
 
     expect(listed).toEqual([{ ...message, canonicalAliases: ["retired-canonical"] }]);
     expect(searched).toEqual([{ ...message, canonicalAliases: ["retired-canonical"] }]);

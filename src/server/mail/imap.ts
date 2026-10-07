@@ -690,7 +690,7 @@ export class ImapMailProvider implements MailProvider {
         flags: true,
         envelope: true,
         internalDate: true,
-        headers: ["Message-ID", "In-Reply-To", "References"],
+        headers: true,
         source: { maxLength: SUMMARY_SOURCE_BYTES },
       },
       { uid: true },
@@ -1001,6 +1001,9 @@ function toSummary(
     canonicalReceivedAt,
     receivedAt: canonicalReceivedAt ?? new Date(0).toISOString(),
     preview: previewFor(parsed?.text),
+    searchBody: parsed && (parsed.text !== undefined || (message.source?.byteLength ?? 0) < SUMMARY_SOURCE_BYTES)
+      ? (parsed.text ?? "").slice(0, 32_768) : null,
+    searchHeaders: (threading?.headerLines.map(header => header.line).join("\n") ?? "").slice(0, 32_768),
     read: hasFlag(message.flags, SEEN_FLAG),
     flagged: hasFlag(message.flags, "\\Flagged"),
   };

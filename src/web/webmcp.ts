@@ -62,10 +62,12 @@ export const webMcpServices: WebMcpServices = {
     return folders;
   },
   listMessages: (input: WebMcpListMessagesInput, signal) =>
-    api.messages(input.accountId, input.mailbox, "", input.limit, signal),
+    api.queryMessages({ sources: input.sources ?? [{ accountId: input.accountId, mailbox: input.mailbox }],
+      limit: input.limit, filter: input.filter, sort: input.sort, ...(input.cursor ? { cursor: input.cursor } : {}) }, signal),
   readMessages: (messages: readonly MessageRef[], signal) => api.readMessages(messages, signal),
   searchMessages: (input: WebMcpSearchMessagesInput, signal) =>
-    api.messages(input.accountId, input.mailbox, input.query, input.limit, signal),
+    api.queryMessages({ sources: input.sources ?? [{ accountId: input.accountId, mailbox: input.mailbox }],
+      query: input.query, limit: input.limit, filter: input.filter, sort: input.sort, ...(input.cursor ? { cursor: input.cursor } : {}) }, signal),
   sendMessage: (input: SendMessageInput, signal) => api.sendMessage(input, signal),
   applyMessageActions: async (input: DirectActionInput, signal) => {
     const batch = await api.applyDirectActions(input, signal);

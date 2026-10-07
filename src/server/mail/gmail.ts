@@ -136,12 +136,33 @@ export class GmailMailClient implements MailProvider, MailSender {
     this.synchronization = gmailSynchronization(config.account.id, {
       request: (path, schema, signal) => this.#request(path, schema, { signal }, 2 * 1024 * 1024),
       observe: async (id, signal) => {
-        const params = metadataParams();
-        const message = await this.#request(`/messages/${encodeURIComponent(id)}?${params}`,
-          gmailSyncMessageSchema, { signal }, 2 * 1024 * 1024);
+        const path = `/messages/${encodeURIComponent(id)}`;
+        let message: z.infer<typeof gmailSyncMessageSchema>;
+        let full = true;
+        try { message = await this.#request(`${path}?format=full`, gmailSyncMessageSchema, { signal }, 2 * 1024 * 1024); }
+        catch (error) {
+          if (error instanceof GmailHttpError || signal.aborted) throw error;
+          full = false;
+          message = await this.#request(`${path}?format=metadata`, gmailSyncMessageSchema, { signal }, 2 * 1024 * 1024);
+        }
         if (message.id !== id) throw new Error("Gmail returned another message during synchronization");
+        let searchBody: string | null = null;
+        if (full && message.payload.mimeType !== "application/octet-stream") {
+          try {
+            let remaining = 64 * 1024;
+            const body = await readGmailText(message.payload, async part => {
+              if (part.body.size > remaining) throw new Error("Body exceeds synchronization text budget");
+              remaining -= part.body.size;
+              return this.#gmailPartContent(id, part, 128 * 1024);
+            });
+            const text = body.text || (body.html ? (await simpleParser(Buffer.from(
+              `Content-Type: text/html; charset=utf-8\r\n\r\n${body.html}`), { skipTextToHtml: true })).text ?? "" : "");
+            searchBody = text.slice(0, 32_768);
+          } catch (error) { if (signal.aborted || (error instanceof GmailHttpError && error.status === 401)) throw error; }
+        }
+        const searchHeaders = message.payload.headers.map(header => `${header.name}: ${header.value}`).join("\n").slice(0, 32_768);
         return { mailboxes: gmailLocationMailboxes(message.labelIds),
-          message: mailbox => toSummary(this.#account.id, mailbox, message) };
+          message: mailbox => ({ ...toSummary(this.#account.id, mailbox, message), searchBody, searchHeaders }) };
       },
     });
   }

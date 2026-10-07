@@ -2315,10 +2315,19 @@ function mergeCanonicalMessages(
 ): void {
   mergeMessageConversationRelations(sqlite, tenantId, retainedMessageId, removedMessageId);
   if (sqlite.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='indexed_messages'").get()) {
+    const retainedBody = `CASE WHEN json_type(excluded.content,'$.searchBody')='text'
+      AND (COALESCE(json_extract(excluded.content,'$.searchBodyAt'),0)>COALESCE(json_extract(indexed_messages.content,'$.searchBodyAt'),0)
+        OR COALESCE(json_type(indexed_messages.content,'$.searchBody'),'null')<>'text')
+      THEN excluded.content ELSE indexed_messages.content END`;
     sqlite.query(`INSERT INTO indexed_messages(tenant_id,account_id,message_id,received_at,content,updated_at)
       SELECT tenant_id,account_id,?,received_at,content,updated_at FROM indexed_messages WHERE tenant_id=? AND message_id=?
       ON CONFLICT(tenant_id,account_id,message_id) DO UPDATE SET
-        content=CASE WHEN excluded.updated_at>indexed_messages.updated_at THEN excluded.content ELSE indexed_messages.content END,
+        content=json_set(CASE WHEN excluded.updated_at>indexed_messages.updated_at THEN excluded.content ELSE indexed_messages.content END,
+          '$.searchBody',json_extract(${retainedBody},'$.searchBody'),
+          '$.searchBodyAt',json_extract(${retainedBody},'$.searchBodyAt'),
+          '$.sortReceivedAt',COALESCE(json_extract(indexed_messages.content,'$.sortReceivedAt'),json_extract(excluded.content,'$.sortReceivedAt')),
+          '$.sortSender',COALESCE(json_extract(indexed_messages.content,'$.sortSender'),json_extract(excluded.content,'$.sortSender')),
+          '$.sortSubject',COALESCE(json_extract(indexed_messages.content,'$.sortSubject'),json_extract(excluded.content,'$.sortSubject'))),
         received_at=CASE WHEN excluded.updated_at>indexed_messages.updated_at THEN excluded.received_at ELSE indexed_messages.received_at END,
         updated_at=MAX(excluded.updated_at,indexed_messages.updated_at)`).run(retainedMessageId,tenantId,removedMessageId);
     sqlite.query("DELETE FROM indexed_messages WHERE tenant_id=? AND message_id=?").run(tenantId,removedMessageId);

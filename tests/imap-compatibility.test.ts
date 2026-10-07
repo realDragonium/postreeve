@@ -365,6 +365,20 @@ describe("Bun IMAP compatibility", () => {
       ]);
   });
 
+  test("synchronizes bounded searchable body text without opening messages", async () => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config,fakeFactory(state));
+    const page = await provider.synchronization.fetchPage({
+      account:{tenantId:"tenant",accountId:config.accountId,provider:"imap"},scope:{kind:"mailbox",mailbox:"INBOX"},
+      cursor:null,limit:100,signal:new AbortController().signal,
+    });
+    expect(page.messages.length).toBeGreaterThan(0);
+    expect(page.messages.every(message=>typeof message.searchBody === "string")).toBe(true);
+    expect(page.messages[0]?.searchHeaders).toContain("From:");
+    expect(state.fetchQueries.filter(({source})=>typeof source === "object")
+      .every(({source})=>typeof source === "object" && source.maxLength === 64*1024)).toBe(true);
+  });
+
   test("fetches complete threading headers while keeping IMAP summary source bounded", async () => {
     const state = fakeState();
     const inbox = state.mailboxes.get("INBOX");
@@ -395,11 +409,7 @@ describe("Bun IMAP compatibility", () => {
     expect(listed?.references).toEqual(["<root@example.test>", '<"a>b<c"@example.test>']);
     expect(searched?.references).toEqual(listed?.references);
     expect(listed?.preview.length).toBeLessThanOrEqual(240);
-    expect(state.fetchQueries.filter(({ headers }) => Array.isArray(headers)).map(({ headers }) => headers))
-      .toEqual([
-        ["Message-ID", "In-Reply-To", "References"],
-        ["Message-ID", "In-Reply-To", "References"],
-      ]);
+    expect(state.fetchQueries.filter(({ headers }) => headers === true)).toHaveLength(2);
     expect(state.fetchQueries.filter(({ source }) => typeof source === "object")
       .every(({ source }) => typeof source === "object" && source.maxLength === 64 * 1024)).toBe(true);
   });

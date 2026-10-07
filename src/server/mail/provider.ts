@@ -15,6 +15,8 @@ import type {
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "./message-id";
 
 interface ProviderMessageMetadata {
+  searchBody?: string | null | undefined;
+  searchHeaders?: string | undefined;
   providerConversationId?: string;
   canonicalReceivedAt?: string | null;
   referenceSequences?: readonly (readonly string[])[];

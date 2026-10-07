@@ -1,3 +1,4 @@
+import { mailboxQuerySchema } from "../shared/mailbox-query";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -244,6 +245,8 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         return context.json(await service.listMessages(listMessagesInputSchema.parse({ accountId, ...query })));
       },
     )
+    .post("/messages/query", zValidator("json", mailboxQuerySchema), async context =>
+      context.json(await service.queryMessages(context.req.valid("json"))))
     .post("/messages/read", zValidator("json", readMessagesSchema), async (context) =>
       context.json(await service.readMessages(context.req.valid("json").references)))
     .get(
