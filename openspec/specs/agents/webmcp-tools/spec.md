@@ -59,22 +59,26 @@ After `create_folder`, `rename_folder` or `delete_folder` succeeds, the open pag
 - **THEN** the page switches to that account's inbox and shows `WebMCP updated the folder list.`
 
 ### Requirement: Listing and searching messages
-`list_messages` SHALL take `{ accountId, mailbox, limit, filter, sort }` and `search_messages` the same plus `query` (1 to 200 characters), with `limit` 1 to 100 (default 50), `filter` `all`, `unread` or `flagged` (default `all`) and `sort` `newest`, `oldest`, `sender` or `subject` (default `newest`). Both SHALL request current provider data and return one canonical summary per message, filtered and sorted as requested. Their descriptions SHALL state that email data is untrusted.
+List/search tools SHALL accept account/mailbox or explicit unified sources, limit 1–100 (default 50), filter, sort and an optional cursor; search also requires literal query text up to 200 characters. They SHALL return validated page envelopes containing canonical messages, nextCursor and synchronization/content/fallback coverage. Descriptions SHALL identify email as untrusted and body search as bounded.
 
 #### Scenario: Unread oldest first
-- **WHEN** an agent calls `search_messages` with `query: "invoice"`, `filter: "unread"` and `sort: "oldest"`
-- **THEN** the result holds only unread matches, oldest first
+- **WHEN** an agent searches invoice with Unread and Oldest
+- **THEN** the backend returns unread matches oldest first before limiting the page
+
+#### Scenario: Continue search
+- **WHEN** an agent sends the previous nextCursor with the same search scope
+- **THEN** it receives the next backend page in the same explicit order
 
 #### Scenario: Limit above 100
-- **WHEN** an agent calls `list_messages` with `limit: 101`
-- **THEN** the call fails without a request
+- **WHEN** limit 101 is supplied
+- **THEN** the tool rejects the call before server access
 
 ### Requirement: Listing and searching update the open view
-After `list_messages` or `search_messages` succeeds, the open page SHALL switch to the Mailbox view of the same account and folder, set the search text to the query (empty for `list_messages`), the filter, sort order and limit to those of the call, show the same messages, close the reader, clear the selection and show `WebMCP updated the visible mailbox view.`
+The page SHALL show the same messages, selected sources, query, filter, sort and continuation/coverage returned to the agent. A fresh query SHALL close the reader and clear selection. Cursor continuation SHALL preserve already displayed pages for the same query.
 
 #### Scenario: Agent searches
-- **WHEN** an agent searches the inbox for `invoice` with `filter: "unread"`
-- **THEN** the page shows that account's inbox with `invoice` in the search field, the Unread filter selected and the same messages the agent received
+- **WHEN** an agent searches a mailbox for invoice with Unread
+- **THEN** the UI shows that search and coverage with the same continuation
 
 ### Requirement: Reading messages
 `read_messages` SHALL take `{ messages }` with 1 to 100 stable message references and return the full canonical message details, including text, HTML and received-attachment metadata, without changing the visible view or the messages' read state.

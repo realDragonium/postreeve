@@ -6,30 +6,34 @@ Covers listing and searching message summaries within a folder, the fields each 
 ## Requirements
 
 ### Requirement: List the newest messages in a folder
-The system SHALL return at most `limit` of a folder's newest messages, read from the provider at request time, at `GET /api/accounts/<accountId>/messages?mailbox=<path>&limit=<n>`, where `mailbox` is required and `limit` is an integer from 1 to 100, default 50. On IMAP these SHALL be the highest UIDs, highest first; on Gmail the label's first page in Gmail's order. An invalid parameter, unknown account or provider failure SHALL answer 400 with `{ error }`.
+The system SHALL serve indexed cursor pages of 1–100 canonical summaries (default 50) for selected account/mailbox sources at POST /api/messages/query. The existing account GET endpoint SHALL retain bounded provider listing for compatibility. Invalid queries or scope-bound cursors SHALL fail with 400.
 
 #### Scenario: Default page size
-- **WHEN** a client lists a folder of 300 messages without `limit`
-- **THEN** at most 50 summaries are returned, newest first
+- **WHEN** a client queries 300 synchronized messages without a limit
+- **THEN** the first 50 summaries and a continuation cursor are returned
 
 #### Scenario: Limit above the maximum
-- **WHEN** a client requests `limit=101`
-- **THEN** the response is 400 and the provider is not queried
+- **WHEN** limit 101 is requested
+- **THEN** the request fails with 400 before provider access
 
 ### Requirement: Search within a folder
-When `query` (trimmed, at most 200 characters) is present, the system SHALL return at most `limit` of the newest messages in that one folder that match it, searched by the provider at request time. On IMAP a message SHALL match when the query appears in its subject, From, To or body text. On Gmail the query SHALL be run as a Gmail search restricted to the folder's label, or to the Archive selection for the Archive folder.
+Search SHALL match literal case-insensitive text in SQLite-indexed sender, recipients, subject, headers, preview and bounded body text within selected mailbox sources. Search SHALL NOT interpret Gmail query syntax. Provider search SHALL supplement incomplete indexed coverage, with its limitations reported.
+
+#### Scenario: Literal search
+- **WHEN** a person searches for invoice
+- **THEN** only indexed fields containing invoice or reported provider fallback matches are returned
 
 #### Scenario: IMAP search
-- **WHEN** a person searches the IMAP Inbox for `invoice`
-- **THEN** only Inbox messages whose subject, sender, recipients or text contain `invoice` are returned, newest first
+- **WHEN** invoice is searched in the IMAP Inbox
+- **THEN** indexed sender, recipients, subject, headers and retained preview/body fields are matched literally inside Inbox
 
 #### Scenario: Gmail search in Archive
-- **WHEN** a person searches the Gmail Archive folder for `from:alex`
-- **THEN** the results match `from:alex` and carry none of the Inbox, Sent, Drafts, Spam or Trash labels
+- **WHEN** from:alex is searched in a synchronized Gmail Archive
+- **THEN** the indexed query matches the literal text from:alex within the selected Archive locations, without interpreting Gmail operators
 
 #### Scenario: Overlong query
-- **WHEN** a client sends a 201-character query
-- **THEN** the response is 400
+- **WHEN** a 201-character query is supplied
+- **THEN** the request fails with 400
 
 ### Requirement: Summary fields
 Each summary SHALL carry `ref` (the provider location used by later reads and actions), `messageId`, `subject`, `from`, `to`, `cc`, `replyTo`, `receivedAt`, `preview`, `read`, `flagged`, `canonicalId`, `canonicalAliases` and `conversationId`. A missing subject SHALL be reported as `(no subject)`. `receivedAt` SHALL be an ISO timestamp from the provider's received date, falling back to the Date header.
@@ -68,50 +72,58 @@ A list or search response SHALL contain at most one summary per canonical messag
 - **THEN** the list response contains one summary for it
 
 ### Requirement: Unified view lists across accounts
-When more than one account is connected, the web interface SHALL offer a Unified view per special folder that lists the matching special folder of every account that has one, with the same query and limit, and merges the results into one list. The merged list SHALL show each canonical message once. Each row SHALL show its account's colour, and searching in the Unified view SHALL search every account.
+The unified view SHALL send its matching account/mailbox sources to one backend query. The backend SHALL filter, sort, deduplicate canonical identities and paginate the combined results. Rows SHALL retain their representative account colour.
 
 #### Scenario: Unified Inbox
-- **WHEN** a person with a Gmail and an IMAP account opens the Unified Inbox
-- **THEN** the list combines both Inboxes, newest first
+- **WHEN** a person opens Unified Inbox across Gmail and IMAP
+- **THEN** one cursor pages the combined canonical results
 
 ### Requirement: Filter the visible list
-The web interface SHALL offer the filters All, Unread and Flagged. Unread SHALL keep messages with `read` false and Flagged messages with `flagged` true. Filters SHALL apply to the summaries already loaded for the current folder and query, not to the whole folder at the provider.
+All, Unread and Flagged filters SHALL apply before pagination to every indexed message in the selected sources. Mutable flags SHALL come from a representative matching location.
 
 #### Scenario: Unread filter
-- **WHEN** a person selects Unread in a folder whose 50 loaded messages include 3 unread
-- **THEN** the list shows those 3 messages and the count line ends with `unread only`
+- **WHEN** Unread is selected in a synchronized folder
+- **THEN** unread messages beyond the initial 100 messages remain reachable
 
 ### Requirement: Sort the visible list
-The web interface SHALL offer the sort orders Newest (default), Oldest, Sender and Subject over the loaded summaries. Newest and Oldest SHALL order by `receivedAt`, Sender by the first sender's display name or, without one, its address, and Subject by subject text.
+Newest and Oldest SHALL order the complete indexed selection by received timestamp, Sender by first sender name or address, and Subject by subject. Every order SHALL use canonical identity as a deterministic tie-break.
 
 #### Scenario: Oldest first
-- **WHEN** a person selects Oldest
-- **THEN** the loaded messages are shown with the earliest `receivedAt` first
+- **WHEN** Oldest is selected
+- **THEN** the earliest indexed messages are returned first across cursor pages
 
 ### Requirement: Search from the web interface
-The web interface SHALL run a search when the person presses Enter in the search field, sending the trimmed text as `query` for every folder in the current view and resetting the page size to 50. Clearing the field SHALL return to the unsearched list. The `/` key SHALL focus the search field.
+Enter SHALL submit trimmed search text for one backend query across the current view and restart cursor paging. Clearing search SHALL restore the unsearched view. The / key SHALL focus search.
 
 #### Scenario: Search the open folder
-- **WHEN** a person types `quarterly planning` in the search field and presses Enter
-- **THEN** the list shows the folder's matching messages and the count line includes `matching “quarterly planning”`
+- **WHEN** quarterly planning is submitted
+- **THEN** the count line names the query and the backend returns matching messages
 
-### Requirement: Load more messages up to 100
-The web interface SHALL load 50 messages per folder at first and SHALL offer **Load 50 more** while a folder returned as many messages as requested and fewer than 100 were requested, raising the limit to at most 100. Choosing another folder or submitting a search SHALL reset the limit to 50.
+### Requirement: Load more messages with cursors
+The UI SHALL load 50 messages initially and follow nextCursor with Load 50 more until no cursor remains. Changing source, search, filter or sort SHALL restart paging. Newly synchronized messages SHALL NOT shift the keyset position. Results are not a frozen snapshot.
+
+#### Scenario: Third page
+- **WHEN** a person loads twice more in a synchronized folder of 300 messages
+- **THEN** 150 distinct messages are visible and another continuation remains
 
 #### Scenario: Second page
-- **WHEN** a person chooses Load 50 more in a folder of 300 messages
-- **THEN** the list shows the newest 100 messages and the button disappears
+- **WHEN** Load 50 more is selected in a synchronized 300-message mailbox
+- **THEN** 100 messages are visible and the cursor allows further pages
 
 ### Requirement: List states and count line
-The web interface SHALL show placeholder rows while loading, a provider error with **Try again** when listing fails, and, for an empty result, "This folder is clear. New messages will appear here." or, when a search or filter is active, "Nothing matches. Clear the search or switch the filter back to All." A count line SHALL state the number of shown messages and how many are unread, and name the active query and filter.
+The UI SHALL show placeholders, actionable request errors and existing empty/count states. It SHALL separately disclose incomplete synchronization, bounded/unavailable or expired body coverage, and failed or limited provider fallback. Cached indexed results SHALL remain usable when fallback fails.
+
+#### Scenario: Provider unavailable
+- **WHEN** a provider fallback fails with indexed results available
+- **THEN** indexed results remain visible with a coverage warning
 
 #### Scenario: Listing fails
-- **WHEN** the provider is unreachable while a folder is opened
-- **THEN** the list shows the error message with a Try again control that requests the list again
+- **WHEN** the backend query fails
+- **THEN** the UI displays an error and Try again control
 
 #### Scenario: Empty search
-- **WHEN** a search returns no messages
-- **THEN** the list shows "Nothing matches. Clear the search or switch the filter back to All."
+- **WHEN** no indexed or available provider matches are returned
+- **THEN** the UI displays the empty-search message together with any incomplete coverage warning
 
 ### Requirement: The list refreshes after changes
 The web interface SHALL request the visible message lists again after a mailbox action, undo or accepted proposal completes, after a folder is created, renamed or deleted, after **Try again**, and after a message is sent. The message list is not polled on a timer.
@@ -119,3 +131,21 @@ The web interface SHALL request the visible message lists again after a mailbox 
 #### Scenario: Moved message leaves the list
 - **WHEN** a person moves a message from Inbox to Archive
 - **THEN** the Inbox list is requested again and no longer shows the message
+
+### Requirement: Bounded searchable content during synchronization
+Synchronization SHALL index bounded body text without requiring messages to be opened. Retained preview and body text SHALL obey the account retention policy. Missing or expired content SHALL be reported separately from metadata synchronization coverage; bounds SHALL be disclosed.
+
+#### Scenario: Unopened message
+- **WHEN** a message with available bounded body text synchronizes
+- **THEN** its retained body text is searchable without opening it
+
+#### Scenario: Retention eviction
+- **WHEN** retained text expires or exceeds the account budget
+- **THEN** preview/body search no longer finds evicted text, metadata remains searchable and content coverage reports the omission
+
+### Requirement: Cursor isolation
+Continuation cursors SHALL be bound to tenant, mailbox sources, query, filter and sort. Malformed or mismatched cursors SHALL be rejected before provider access.
+
+#### Scenario: Changed query
+- **WHEN** a cursor from one search is reused for another
+- **THEN** the request fails instead of continuing a different result set

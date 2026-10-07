@@ -94,7 +94,7 @@ export function MessageList(props: MessageListProps) {
       </span>
     </div>
 
-    {props.coverageText ? <p role="status" className="t-dim" style={{ margin: "8px 24px" }}>{props.coverageText}</p> : null}
+    {props.coverageText ? <p role="note" aria-label="Mailbox coverage" className="t-dim" style={{ margin: "8px 24px" }}>{props.coverageText}</p> : null}
     <div className="list" aria-label="Messages" style={{ "--row-cols": columns } as React.CSSProperties}>
       {props.loading ? Array.from({ length: 8 }, (_, index) => (
         <div className="row" key={index} style={{ gridTemplateColumns: "2px 14px minmax(96px,168px) minmax(150px,1.3fr)" }}>

@@ -7,6 +7,7 @@ import type { ProviderMessageSummary } from "../../src/server/mail/provider";
 const harness = await createEmptyTestHarness();
 const accounts = [await harness.service.createAccount(testAccountInput()),
   await harness.service.createAccount({ ...testAccountInput(),name:"Second mailbox",email:"second@example.test" })];
+for (const account of accounts) harness.store.synchronization.cancel("test-tenant",account.id,Date.now());
 for (const [index,account] of accounts.entries()) {
   const messages: ProviderMessageSummary[] = Array.from({length:index ? 100 : 150},(_,i)=>{
     const uid=i+1+index*100;

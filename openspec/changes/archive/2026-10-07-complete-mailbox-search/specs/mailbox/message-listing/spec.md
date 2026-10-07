@@ -51,7 +51,7 @@ Newest and Oldest SHALL order the complete indexed selection by received timesta
 - **WHEN** Oldest is selected
 - **THEN** the earliest indexed messages are returned first across cursor pages
 
-### Requirement: Load more messages up to 100
+### Requirement: Load more messages with cursors
 The UI SHALL load 50 messages initially and follow nextCursor with Load 50 more until no cursor remains. Changing source, search, filter or sort SHALL restart paging. Newly synchronized messages SHALL NOT shift the keyset position. Results are not a frozen snapshot.
 
 #### Scenario: Third page
@@ -103,3 +103,8 @@ Continuation cursors SHALL be bound to tenant, mailbox sources, query, filter an
 #### Scenario: Changed query
 - **WHEN** a cursor from one search is reused for another
 - **THEN** the request fails instead of continuing a different result set
+
+## RENAMED Requirements
+
+- FROM: `### Requirement: Load more messages up to 100`
+- TO: `### Requirement: Load more messages with cursors`

@@ -198,6 +198,10 @@ export class SynchronizationStore {
 
   enforceRetention(tenantId: string, accountId: string, now: number): void {
     this.sqlite.transaction(() => {
+      this.sqlite.query(`UPDATE indexed_messages SET content=json_set(content,'$.searchBody',NULL,'$.searchBodyAt',NULL)
+        WHERE tenant_id=? AND account_id=? AND json_type(content,'$.searchBody')='text'
+          AND COALESCE(json_extract(content,'$.searchBodyAt'),updated_at)<=?`)
+        .run(tenantId, accountId, now - this.#retention.maxAgeDays * 86_400_000);
       this.sqlite.query(`UPDATE indexed_messages SET content=json_set(content,'$.preview','','$.searchPreview','','$.searchBody',NULL)
         WHERE tenant_id=? AND account_id=? AND updated_at<=? AND (json_extract(content,'$.preview')<>'' OR json_type(content,'$.searchBody')='text')`)
         .run(tenantId, accountId, now - this.#retention.maxAgeDays * 86_400_000);
@@ -298,8 +302,9 @@ export class SynchronizationStore {
     const addresses = (items: typeof content.from) => items.slice(0, 100).map(a => ({ name: a.name.slice(0,256), address: a.address.slice(0,512) }));
     const retained = this.sqlite.query("SELECT content FROM indexed_messages WHERE tenant_id=? AND account_id=? AND message_id=?")
       .get(claim.tenantId, claim.accountId, id) as { content: string } | null;
-    const prior = retained ? z.object({ searchBody: z.string().nullable().optional(), searchHeaders: z.string().optional() }).parse(JSON.parse(retained.content)) : null;
+    const prior = retained ? z.object({ searchBody: z.string().nullable().optional(), searchBodyAt: z.number().nullable().optional(), searchHeaders: z.string().optional() }).parse(JSON.parse(retained.content)) : null;
     const bounded = { ...content,
+      searchBodyAt: message.searchBody === undefined ? prior?.searchBodyAt ?? null : message.searchBody === null ? null : now,
       searchBody: message.searchBody === undefined ? prior?.searchBody ?? null : message.searchBody?.toLowerCase().slice(0, SEARCH_BODY_LIMIT) ?? null,
       searchHeaders: (message.searchHeaders ?? prior?.searchHeaders ?? [content.messageId, content.inReplyTo ?? "", ...(content.references ?? [])].join("\n")).toLowerCase().slice(0, SEARCH_HEADERS_LIMIT), subject: content.subject.slice(0,2048), preview: content.preview.slice(0,4096),
       from: addresses(content.from), to: addresses(content.to), cc: content.cc ? addresses(content.cc) : undefined,
@@ -396,6 +401,9 @@ export class SynchronizationStore {
       DROP INDEX IF EXISTS indexed_previews_age;
       CREATE INDEX indexed_previews_age ON indexed_messages(tenant_id,account_id,updated_at,message_id)
         WHERE (json_extract(content,'$.preview')<>'' OR json_type(content,'$.searchBody')='text');
+      CREATE INDEX IF NOT EXISTS indexed_bodies_age ON indexed_messages(
+        tenant_id,account_id,COALESCE(json_extract(content,'$.searchBodyAt'),updated_at))
+        WHERE json_type(content,'$.searchBody')='text';
       DROP TRIGGER IF EXISTS indexed_preview_insert;
       DROP TRIGGER IF EXISTS indexed_preview_update;
       DROP TRIGGER IF EXISTS indexed_preview_delete;

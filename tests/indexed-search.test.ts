@@ -86,6 +86,16 @@ describe("indexed mailbox search", () => {
     expect(sync.retainedContentBytes(tenant,"a")).toBe(0);
   });
 
+  test("metadata refresh does not extend the age of retained body text", async () => {
+    const store=await fixture();const sync=store.synchronization;
+    index(store,"a",[message("a",1)]);
+    sync.configureRetention({maxAgeDays:1,maxContentBytes:100000});
+    const {searchBody:_body,...metadata}=message("a",1);
+    sync.observe({tenantId:tenant,accountId:"a",provider:"imap"},[metadata],1000+86_400_000);
+    expect(sync.query(tenant,{sources:[{accountId:"a",mailbox:"INBOX"}],query:"body text"}).messages).toEqual([]);
+    expect(sync.query(tenant,{sources:[{accountId:"a",mailbox:"INBOX"}],query:"preview"}).messages).toHaveLength(1);
+  });
+
   test("API pages backend unified results, keeps provider-only matches and cached results when fallback fails", async () => {
     const harness=await createTestHarness();close.push(()=>harness.store.close());
     const {service,account,store}=harness;
