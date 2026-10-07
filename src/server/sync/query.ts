@@ -40,8 +40,8 @@ export function readCursor(tenant: string, query: MailboxQuery): z.infer<typeof 
 export function queryIndex(sqlite: Database, tenant: string, query: MailboxQuery, fallbackIds: readonly string[] = []): { rows: IndexedRow[]; nextCursor: string | null } {
   const cursor = readCursor(tenant, query);
   const matches = cursor?.fallbackIds ?? [...new Set(fallbackIds)];
-  const sort = query.sort === "sender" ? "json_extract(i.content,'$.searchSenderSort')"
-    : query.sort === "subject" ? "json_extract(i.content,'$.searchSubject')" : "i.received_at";
+  const sort = query.sort === "sender" ? "json_extract(anchor.content,'$.sortSender')"
+    : query.sort === "subject" ? "json_extract(anchor.content,'$.sortSubject')" : "json_extract(anchor.content,'$.sortReceivedAt')";
   const direction = query.sort === "newest" ? "DESC" : "ASC";
   const comparison = query.sort === "newest" ? "<" : ">";
   const parameters: SQLQueryBindings[] = [JSON.stringify(query.sources), tenant];
@@ -69,6 +69,8 @@ export function queryIndex(sqlite: Database, tenant: string, query: MailboxQuery
         COALESCE(${sort},'') sort_value,
         ROW_NUMBER() OVER (PARTITION BY i.message_id ORDER BY i.account_id,l.mailbox,l.uid DESC,l.uid_validity DESC,l.id DESC) representative
       FROM indexed_messages i JOIN message_locations l ON l.tenant_id=i.tenant_id AND l.account_id=i.account_id AND l.message_id=i.message_id
+      JOIN indexed_messages anchor ON anchor.rowid=(SELECT first.rowid FROM indexed_messages first
+        WHERE first.tenant_id=i.tenant_id AND first.message_id=i.message_id ORDER BY first.rowid LIMIT 1)
       JOIN sources s ON s.account_id=l.account_id AND s.mailbox=l.mailbox
       WHERE i.tenant_id=? ${flag} ${search})
     SELECT * FROM candidates WHERE representative=1 ${keyset}
@@ -101,7 +103,15 @@ export function migrateSearchIndex(sqlite: Database): void {
         searchHeaders: [content.messageId,content.inReplyTo ?? "",...(content.references ?? [])].join("\n").toLowerCase(),
       }),raw.rowid);
     }
-    sqlite.exec("DELETE FROM indexed_search");
-    sqlite.exec(`INSERT INTO indexed_search(rowid,${fields.join(",")}) SELECT rowid,${values("indexed_messages")} FROM indexed_messages`);
+  }
+  sqlite.exec("CREATE INDEX IF NOT EXISTS indexed_messages_canonical ON indexed_messages(tenant_id,message_id)");
+  if (!sqlite.query("SELECT 1 FROM schema_migrations WHERE version=487001").get()) {
+    sqlite.transaction(() => {
+      sqlite.exec(`UPDATE indexed_messages SET content=json_set(content,
+        '$.sortReceivedAt',received_at,
+        '$.sortSender',COALESCE(json_extract(content,'$.searchSenderSort'),'unknown sender'),
+        '$.sortSubject',COALESCE(json_extract(content,'$.searchSubject'),''));
+        INSERT INTO schema_migrations(version,applied_at) VALUES(487001,CURRENT_TIMESTAMP);`);
+    }).immediate();
   }
 }

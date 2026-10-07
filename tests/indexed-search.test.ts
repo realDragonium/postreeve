@@ -1,9 +1,13 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { Store } from "../src/server/db/store";
 import { createApi } from "../src/server/api";
 import { mailboxPageSchema, type MailboxQueryInput } from "../src/shared/mailbox-query";
 import type { ProviderMessageSummary } from "../src/server/mail/provider";
 import { createTestHarness } from "./support/test-mail";
+import { migrateSearchIndex } from "../src/server/sync/query";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const close: Array<() => void> = [];
 afterEach(() => { for (const cleanup of close.splice(0)) cleanup(); });
@@ -30,9 +34,9 @@ function index(store: Store, accountId: string, messages: ProviderMessageSummary
 
 describe("indexed mailbox search", () => {
   test("pages all synchronized mail with ties and stable positions when new mail arrives, for every sort", async () => {
-    const store = await fixture();
-    index(store,"a",Array.from({ length: 237 },(_, i) => message("a",i+1)));
     for (const sort of ["newest","oldest","sender","subject"] as const) {
+      const store = await fixture();
+      index(store,"a",Array.from({ length: 237 },(_, i) => message("a",i+1)));
       const input: MailboxQueryInput = { sources: [{accountId:"a",mailbox:"INBOX"}],sort,limit:40 };
       const all = [];
       let page = store.synchronization.query(tenant,input);
@@ -42,8 +46,89 @@ describe("indexed mailbox search", () => {
       while (page.nextCursor) { page = store.synchronization.query(tenant,{...input,cursor:page.nextCursor}); all.push(...page.messages); }
       expect(all).toHaveLength(237);
       expect(new Set(all.map(m => m.canonicalId)).size).toBe(237);
-      store.synchronization.sqlite.query("DELETE FROM message_locations WHERE uid=900").run();
     }
+  });
+
+  test("new duplicate locations cannot move existing canonical sort anchors across pages", async () => {
+    for (const sort of ["newest", "oldest", "sender", "subject"] as const) {
+      for (const duplicateAccount of ["a", "b"]) {
+        const store = await fixture();
+        index(store, "b", Array.from({ length: 120 }, (_, i) => message("b", i + 1)));
+        const input = { sources: [{ accountId: "a", mailbox: "INBOX" }, { accountId: "b", mailbox: "INBOX" }], sort, limit: 50 };
+        let page = store.synchronization.query(tenant, input);
+        const seen = [...page.messages];
+        const uid = sort === "newest" ? 30 : 90;
+        index(store, duplicateAccount, [{ ...message(duplicateAccount, uid),
+          ref: { ...message(duplicateAccount, 999).ref },
+          receivedAt: sort === "newest" ? "2030-01-01T00:00:00.000Z" : "2020-01-01T00:00:00.000Z",
+          subject: "AAAA duplicate", from: [{ name: "AAAA duplicate", address: "duplicate@test.local" }] }]);
+        while (page.nextCursor) {
+          page = store.synchronization.query(tenant, { ...input, cursor: page.nextCursor });
+          seen.push(...page.messages);
+        }
+        expect(seen).toHaveLength(120);
+        expect(new Set(seen.map(item => item.canonicalId)).size).toBe(120);
+        expect(seen.some(item => item.messageId === `<${uid}@search.test>`)).toBe(true);
+      }
+    }
+  });
+
+  test("canonical merges preserve the retained message's sort anchor", async () => {
+    const store = await fixture();
+    index(store, "a", [message("a", 1, { messageId: "", subject: "Zulu", searchBody: null }), message("a", 2, { subject: "Mike", searchBody: "Retained canonical body" }),
+      message("a", 3, { subject: "Alpha" }), message("a", 4, { subject: "Yankee" })]);
+    const input = { sources: [{ accountId: "a", mailbox: "INBOX" }], sort: "subject" as const };
+    const retained = store.synchronization.query(tenant, input).messages.find(item => item.messageId === "<2@search.test>")!;
+    store.synchronization.observe({ tenantId: tenant, accountId: "a", provider: "imap" },
+      [message("a", 1, { messageId: "", subject: "Zulu", searchBody: null })], 1500);
+    store.synchronization.observe({ tenantId: tenant, accountId: "a", provider: "imap" },
+      [message("a", 1, { messageId: "<2@search.test>", subject: "ZZZ latest copy", searchBody: null })], 2000);
+    const ordered = store.synchronization.query(tenant, input).messages;
+    expect(ordered).toHaveLength(3);
+    expect(ordered[1]?.canonicalId).toBe(retained.canonicalId);
+    expect(ordered[1]?.subject).toBe("ZZZ latest copy");
+    expect(store.synchronization.query(tenant, { ...input, query: "Retained canonical body" }).messages).toHaveLength(1);
+  });
+
+  test.each(["retained", "removed"])("canonical merges keep the newest body observation from the %s record without renewing its age", async newest => {
+    const store = await fixture();
+    const sync = store.synchronization;
+    const scope = { tenantId: tenant, accountId: "a", provider: "imap" as const };
+    const retained = message("a", 2, { searchBody: "Retained body" });
+    const removed = message("a", 1, { messageId: "", searchBody: "Removed body" });
+    sync.observe(scope, [retained, removed], 1000);
+    sync.observe(scope, [newest === "retained" ? retained : removed], 1200);
+    sync.observe(scope, [{ ...(newest === "retained" ? removed : retained), searchBody: null }], 1500);
+    sync.observe(scope, [{ ...removed, messageId: retained.messageId, searchBody: null }], 2000);
+    const input = { sources: [{ accountId: "a", mailbox: "INBOX" }], query: `${newest} body` };
+    expect(sync.query(tenant, input).messages).toHaveLength(1);
+    sync.configureRetention({ maxAgeDays: 1, maxContentBytes: 100000 });
+    sync.enforceRetention(tenant, "a", 1200 + 86_400_000);
+    expect(sync.query(tenant, input).messages).toHaveLength(0);
+    sync.observe(scope, [{ ...removed, messageId: retained.messageId, searchBody: null }], 1500 + 86_400_000);
+    expect(sync.query(tenant, input).messages).toHaveLength(0);
+  });
+
+  test("backfills sort anchors and FTS from an earlier index and preserves them after reopening", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "postreeve-search-migration-"));
+    const path = join(directory, "index.sqlite");
+    let store = new Store(path);
+    try {
+      await store.insertAccount({ id: "a", kind: "imap", name: "a", email: "a@search.test", encryptedCredentials: null });
+      store.synchronization.schedule(tenant, "a", 0);
+      index(store, "a", [message("a", 1, { subject: "Middle" }), message("a", 2, { subject: "Zulu" })]);
+      const db = store.synchronization.sqlite;
+      db.exec(`DROP TRIGGER indexed_search_insert; DROP TRIGGER indexed_search_update; DROP TRIGGER indexed_search_delete;
+        DROP TABLE indexed_search; DELETE FROM schema_migrations WHERE version=487001;
+        UPDATE indexed_messages SET content=json_remove(content,'$.sortReceivedAt','$.sortSender','$.sortSubject');`);
+      migrateSearchIndex(db);
+      const input = { sources: [{ accountId: "a", mailbox: "INBOX" }], sort: "subject" as const };
+      expect(store.synchronization.query(tenant, { ...input, query: "Middle" }).messages).toHaveLength(1);
+      store.close();
+      store = new Store(path);
+      index(store, "a", [{ ...message("a", 1, { subject: "ZZZ duplicate" }), ref: message("a", 999).ref }]);
+      expect(store.synchronization.query(tenant, input).messages.map(item => item.messageId)).toEqual(["<1@search.test>", "<2@search.test>"]);
+    } finally { store.close(); rmSync(directory, { recursive: true, force: true }); }
   });
 
   test("searches precise fields literally, filters before limiting and deduplicates across accounts", async () => {
@@ -115,12 +200,72 @@ describe("indexed mailbox search", () => {
     const failed=await service.queryMessages(query);expect(failed.messages[0]?.subject).toBe("Cached match");expect(failed.coverage.sources[0]?.fallback).toBe("failed");
   });
 
+  test("unavailable fallback bodies preserve cached matches and their original expiry", async () => {
+    let now = 1000;
+    const { service, store, account, providerForAccount } = await createTestHarness({ synchronization: { now: () => now } });
+    close.push(() => store.close());
+    const sync = store.synchronization;
+    const cached = message(account.id, 700, { searchBody: "Needle cached", preview: "", subject: "Cached match" });
+    sync.observe({ tenantId: tenant, accountId: account.id, provider: "imap" }, [cached], now);
+    sync.configureRetention({ maxAgeDays: 1, maxContentBytes: 100000 });
+    const provider = providerForAccount(account.id)!;
+    provider.searchMessages = async () => [{ ...cached, searchBody: null }];
+    const query = { sources: [{ accountId: account.id, mailbox: "INBOX" }], query: "needle" };
+    now += 1000;
+    expect((await service.queryMessages(query)).messages).toHaveLength(1);
+    provider.searchMessages = async () => { throw new Error("offline"); };
+    expect((await service.queryMessages(query)).messages).toHaveLength(1);
+    now = 1000 + 86_400_000;
+    expect((await service.queryMessages(query)).messages).toHaveLength(0);
+  });
+
+  test.each(["", "needle"])("bounds fallback waiting and ignores late results for query '%s'", async query => {
+    const { service, store, account, providerForAccount } = await createTestHarness();
+    close.push(() => store.close());
+    store.synchronization.observe({ tenantId: tenant, accountId: account.id, provider: "imap" },
+      [message(account.id, 700, { subject: "Needle cached" })], Date.now());
+    const provider = providerForAccount(account.id)!;
+    const started = Promise.withResolvers<void>();
+    const result = Promise.withResolvers<ProviderMessageSummary[]>();
+    provider.searchMessages = () => { started.resolve(); return result.promise; };
+    provider.listMessagePage = () => { started.resolve(); return result.promise.then(messages => ({ messages, complete: false })); };
+    const timer = spyOn(globalThis, "setTimeout");
+    try {
+      const pending = service.queryMessages({ sources: [{ accountId: account.id, mailbox: "INBOX" }, { accountId: account.id, mailbox: "Other" }], query });
+      await started.promise;
+      const expire = timer.mock.calls.find(call => call[1] === 5000)?.[0];
+      if (typeof expire !== "function") throw new Error("Fallback deadline was not scheduled");
+      expire();
+      const page = await pending;
+      expect(page.messages.some(item => item.subject === "Needle cached")).toBe(true);
+      expect(page.coverage.sources.map(source => source.fallback)).toEqual(["failed", "not-requested"]);
+      result.resolve([message(account.id, 999, { subject: "Needle late" })]);
+      await result.promise;
+      await Promise.resolve();
+      expect(store.synchronization.query(tenant, { sources: [{ accountId: account.id, mailbox: "INBOX" }], query: "Needle late" }).messages).toHaveLength(0);
+    } finally { timer.mockRestore(); }
+  });
+
+  test("caps total fallback calls across many incomplete sources", async () => {
+    const { service, store, account, providerForAccount } = await createTestHarness();
+    close.push(() => store.close());
+    let calls = 0;
+    providerForAccount(account.id)!.searchMessages = async () => { calls++; return []; };
+    const page = await service.queryMessages({ query: "needle", sources: Array.from({ length: 1000 }, (_, index) => ({ accountId: account.id, mailbox: `Folder-${index}` })) });
+    expect(calls).toBe(10);
+    expect(page.coverage.sources.filter(source => source.fallback === "limited")).toHaveLength(10);
+    expect(page.coverage.sources.filter(source => source.fallback === "not-requested")).toHaveLength(990);
+  });
+
   test("confirmed actions and undo update indexed locations and flags without waiting for synchronization", async () => {
     const {service,store,account,messages}=await createTestHarness();close.push(()=>store.close());
     const sources=[{accountId:account.id,mailbox:"INBOX"}];
     const first=await service.queryMessages({sources});const target=first.messages.find(m=>!m.read)!;
+    store.synchronization.observe({ tenantId: tenant, accountId: account.id, provider: "imap" },
+      [{ ...target, ref: { ...target.ref, mailbox: "Other" } }], Date.now());
     const marked=await service.applyDirectActions({accountId:account.id,items:[{message:target.ref,subject:target.subject,action:{type:"mark_read"}}]});
     expect(store.synchronization.query(tenant,{sources}).messages.find(m=>m.canonicalId===target.canonicalId)?.read).toBe(true);
+    expect(store.synchronization.query(tenant, { sources: [{ accountId: account.id, mailbox: "Other" }] }).messages[0]?.read).toBe(false);
     await service.undoBatch(marked.id);
     expect(store.synchronization.query(tenant,{sources}).messages.find(m=>m.canonicalId===target.canonicalId)?.read).toBe(false);
     const current=(await service.listMessages({accountId:account.id,mailbox:"INBOX",limit:50})).find(m=>m.ref.uid===messages[0]!.ref.uid)!;

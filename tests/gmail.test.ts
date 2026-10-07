@@ -155,6 +155,49 @@ async function gmailPayload(raw: string) {
 }
 
 describe("Gmail compatibility", () => {
+  test("confirmed read and undo update indexed queries across Gmail labels", async () => {
+    let labels = ["INBOX", "Label_1", "UNREAD"];
+    let history = 1;
+    const request: HttpFetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.hostname === "oauth2.googleapis.com") return json({ access_token: "fixture", expires_in: 3600 });
+      if (url.pathname.endsWith("/modify")) {
+        const change = z.object({ addLabelIds: z.array(z.string()), removeLabelIds: z.array(z.string()) }).parse(JSON.parse(String(init?.body)));
+        labels = [...new Set([...labels.filter(label => !change.removeLabelIds.includes(label)), ...change.addLabelIds])];
+        history++;
+      }
+      if (url.pathname.endsWith("/messages")) return json({ messages: [{ id: "shared" }] });
+      if (url.pathname.includes("/messages/shared")) return json({ id: "shared", threadId: "thread", labelIds: labels,
+        historyId: String(history), internalDate: "1788000000000", payload: { headers: [
+          { name: "Message-ID", value: "<shared@gmail.test>" }, { name: "Subject", value: "Shared label message" },
+        ] } });
+      throw new Error(`Unexpected fixture path: ${url.pathname}`);
+    };
+    const { store, service } = await createConversationService(request);
+    try {
+      const messages = (await Promise.all(["INBOX", "Label_1"].map(mailbox => service.listMessages({ accountId: account.id, mailbox, limit: 50 })))).flat();
+      const sync = store.synchronization;
+      const now = Date.now();
+      sync.schedule("tenant-a", account.id, now);
+      const claim = sync.claim("tenant-a", now, 100000)!;
+      sync.discover(claim, [{ kind: "account" }], now, 10);
+      sync.commit(claim, { kind: "account" }, { messages, removed: [], cursor: "complete", hasMore: false, coverage: "complete" }, now, 10000, 100);
+      sync.finish(claim, now, 10000);
+      const unread = (mailbox: string) => service.queryMessages({ sources: [{ accountId: account.id, mailbox }], filter: "unread" });
+      expect((await unread("INBOX")).messages).toHaveLength(1);
+      expect((await unread("Label_1")).messages).toHaveLength(1);
+      const target = messages[0]!;
+      const batch = await service.applyDirectActions({ accountId: account.id, items: [{ message: target.ref, subject: target.subject, action: { type: "mark_read" } }] });
+      expect(labels).not.toContain("UNREAD");
+      expect((await unread("INBOX")).messages).toHaveLength(0);
+      expect((await unread("Label_1")).messages).toHaveLength(0);
+      await service.undoBatch(batch.id);
+      expect(labels).toContain("UNREAD");
+      expect((await unread("INBOX")).messages).toHaveLength(1);
+      expect((await unread("Label_1")).messages).toHaveLength(1);
+    } finally { store.close(); }
+  });
+
   test("lists ordinary files from MIME metadata and fetches bytes only on download", async () => {
     const requests: string[] = [];
     const external = Buffer.from("file!");

@@ -14,6 +14,11 @@ The system SHALL serve indexed cursor pages of 1–100 canonical summaries (defa
 ### Requirement: Search within a folder
 Search SHALL match literal case-insensitive text in SQLite-indexed sender, recipients, subject, headers, preview and bounded body text within selected mailbox sources. Search SHALL NOT interpret Gmail query syntax. Provider search SHALL supplement incomplete indexed coverage, with its limitations reported.
 
+#### Scenario: Bounded provider fallback
+- **WHEN** index coverage is incomplete across many sources or a provider hangs
+- **THEN** the query attempts at most 10 fallback calls and waits at most five seconds in total
+- **AND** timed-out calls report failure, skipped sources report that fallback was not requested, and late results do not update the index
+
 #### Scenario: Literal search
 - **WHEN** a person searches for invoice
 - **THEN** only indexed fields containing invoice or reported provider fallback matches are returned
@@ -38,21 +43,26 @@ The unified view SHALL send its matching account/mailbox sources to one backend 
 - **THEN** one cursor pages the combined canonical results
 
 ### Requirement: Filter the visible list
-All, Unread and Flagged filters SHALL apply before pagination to every indexed message in the selected sources. Mutable flags SHALL come from a representative matching location.
+All, Unread and Flagged filters SHALL apply before pagination to every indexed message in the selected sources. Mutable flags SHALL come from a representative matching location. Confirmed Gmail read changes and their undo SHALL update all locations of the same tenant/account/provider message; IMAP flags SHALL remain location-specific.
 
 #### Scenario: Unread filter
 - **WHEN** Unread is selected in a synchronized folder
 - **THEN** unread messages beyond the initial 100 messages remain reachable
 
 ### Requirement: Sort the visible list
-Newest and Oldest SHALL order the complete indexed selection by received timestamp, Sender by first sender name or address, and Subject by subject. Every order SHALL use canonical identity as a deterministic tie-break.
+Newest and Oldest SHALL order by the first indexed canonical received timestamp, Sender by its first sender name or address, and Subject by its subject. Later duplicate observations SHALL preserve those sort keys. Every order SHALL use canonical identity as a deterministic tie-break; displayed summaries and flags SHALL use a matching location.
+
+#### Scenario: Duplicate arrives between pages
+- **WHEN** another account or location synchronizes an existing canonical message with different headers between cursor pages
+- **THEN** its sort position remains anchored to the first indexed copy, independently of which matching location is displayed
+- **AND** canonical identity merges preserve the retained identity’s anchor; merges and deletions are not a frozen-snapshot guarantee
 
 #### Scenario: Oldest first
 - **WHEN** Oldest is selected
 - **THEN** the earliest indexed messages are returned first across cursor pages
 
 ### Requirement: Load more messages with cursors
-The UI SHALL load 50 messages initially and follow nextCursor with Load 50 more until no cursor remains. Changing source, search, filter or sort SHALL restart paging. Newly synchronized messages SHALL NOT shift the keyset position. Results are not a frozen snapshot.
+The UI SHALL load 50 messages initially and follow nextCursor with Load 50 more until no cursor remains. Changing source, search, filter or sort SHALL restart paging, including when returning to a previously loaded view. Newly synchronized messages SHALL NOT shift the keyset position. Results are not a frozen snapshot.
 
 #### Scenario: Third page
 - **WHEN** a person loads twice more in a synchronized folder of 300 messages
@@ -87,7 +97,7 @@ The UI SHALL show placeholders, actionable request errors and existing empty/cou
 ## ADDED Requirements
 
 ### Requirement: Bounded searchable content during synchronization
-Synchronization SHALL index bounded body text without requiring messages to be opened. Retained preview and body text SHALL obey the account retention policy. Missing or expired content SHALL be reported separately from metadata synchronization coverage; bounds SHALL be disclosed.
+Synchronization SHALL index bounded body text without requiring messages to be opened. Retained preview and body text SHALL obey the account retention policy. Unavailable body observations SHALL preserve retained body text and its original expiry age. Missing or expired content SHALL be reported separately from metadata synchronization coverage; bounds SHALL be disclosed.
 
 #### Scenario: Unopened message
 - **WHEN** a message with available bounded body text synchronizes

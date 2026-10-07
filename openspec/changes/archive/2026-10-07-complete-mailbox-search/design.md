@@ -5,7 +5,7 @@ Existing SyncStore retains bounded summary JSON and exact mutable locations. IMA
 Use existing tenant/canonical/location model; no frozen snapshot or Gmail language promise. No live mail tests.
 ## Decisions
 - One POST query takes validated explicit account/mailbox sources, query, filter and sort. This lets the backend own unified ordering while reusing UI folder discovery.
-- Keyset value plus canonical ID prevents offset shifts; cursors bind the normalized query and tenant. Existing account GET remains first-page compatible.
+- Keyset value plus canonical ID prevents offset shifts; cursors bind the normalized query and tenant. First-indexed date/sender/subject fields remain in the indexed JSON. The earliest canonical row supplies sort keys independently of the matching location; later duplicate copies cannot move that anchor. Canonical merges retain the surviving identity’s keys. A tenant/message index bounds anchor lookup. Existing account GET remains first-page compatible.
 - SQLite FTS5 trigram index covers normalized exact fields. Literal substring confirmation prevents token-language surprises; short queries use exact field scans.
 - Search-only fields stay in existing indexed JSON, with trigger-maintained FTS and content accounting so canonical merges retain coherent indexes.
 - IMAP bounded MIME parsing and Gmail bounded full payload ingestion populate body text during synchronization. Missing/oversized text is explicit; no on-demand-only claim. Retention clears both preview and body.

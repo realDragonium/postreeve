@@ -379,22 +379,33 @@ export class PostreeveService {
     const now = this.synchronization.now();
     for (const accountId of accounts.keys()) sync.enforceRetention(this.#context.tenantId, accountId, now);
     const coverage = sync.coverage(this.#context.tenantId, input.sources);
-    for (const source of coverage.sources) {
-      const needsFallback = !source.synchronized || (input.query !== "" && source.bodiesAvailable < source.indexedMessages);
-      if (!needsFallback) { source.fallback = "not-needed"; continue; }
-      if (input.cursor || fallbackIds.length >= 1000) continue;
-      try {
-        const account = accounts.get(source.accountId)!;
-        const provider = this.#providers.forAccount(source.accountId);
-        const messages = input.query
-          ? await provider.searchMessages(source.accountId, source.mailbox, input.query, 100)
-          : (await provider.listMessagePage(source.accountId, source.mailbox, 100)).messages;
-        if (messages.some(message => message.ref.mailbox !== source.mailbox || message.ref.accountId !== source.accountId)) throw new Error("Provider result crossed mailbox scope");
-        const observed = sync.observe({ tenantId: this.#context.tenantId, accountId: account.id, provider: account.kind }, messages, now);
-        if (input.query) fallbackIds.push(...observed.slice(0, 1000 - fallbackIds.length));
-        source.fallback = "limited";
-      } catch { source.fallback = "failed"; }
-    }
+    let fallbackCalls = 0;
+    let expired = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timeout = setTimeout(() => { expired = true; reject(new Error("Provider fallback timed out")); }, 5_000);
+    });
+    try {
+      for (const source of coverage.sources) {
+        const needsFallback = !source.synchronized || (input.query !== "" && source.bodiesAvailable < source.indexedMessages);
+        if (!needsFallback) { source.fallback = "not-needed"; continue; }
+        if (input.cursor || fallbackIds.length >= 1000 || fallbackCalls >= 10 || expired) continue;
+        try {
+          const account = accounts.get(source.accountId)!;
+          const provider = this.#providers.forAccount(source.accountId);
+          fallbackCalls++;
+          const pending = input.query
+            ? provider.searchMessages(source.accountId, source.mailbox, input.query, 100)
+            : provider.listMessagePage(source.accountId, source.mailbox, 100).then(page => page.messages);
+          const messages = await Promise.race([pending, deadline]);
+          if (expired) throw new Error("Provider fallback timed out");
+          if (messages.some(message => message.ref.mailbox !== source.mailbox || message.ref.accountId !== source.accountId)) throw new Error("Provider result crossed mailbox scope");
+          const observed = sync.observe({ tenantId: this.#context.tenantId, accountId: account.id, provider: account.kind }, messages, now);
+          if (input.query) fallbackIds.push(...observed.slice(0, 1000 - fallbackIds.length));
+          source.fallback = "limited";
+        } catch { source.fallback = "failed"; }
+      }
+    } finally { clearTimeout(timeout); }
     const refreshed = sync.coverage(this.#context.tenantId, input.sources);
     refreshed.sources.forEach((source, index) => { source.fallback = coverage.sources[index]!.fallback; });
     return { ...sync.query(this.#context.tenantId, input, fallbackIds), coverage: refreshed };

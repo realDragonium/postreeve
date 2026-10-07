@@ -177,6 +177,7 @@ function App() {
   const messageQueryKey = ["messages", sources, query, filter, sort, limit];
   const messageResults = useInfiniteQuery({
     queryKey: messageQueryKey,
+    gcTime: 0,
     initialPageParam: null as string | null,
     queryFn: ({ pageParam, signal }) => api.queryMessages({ sources: [...sources], query, filter, sort, limit,
       ...(pageParam ? { cursor: pageParam } : {}) }, signal),
@@ -193,6 +194,7 @@ function App() {
     `${coverage.sources.reduce((total, source) => total + source.bodiesAvailable, 0)} of ${coverage.sources.reduce((total, source) => total + source.indexedMessages, 0)} indexed bodies available; body search is limited to ${coverage.bodyTextLimit.toLocaleString()} characters per message and retained content.`,
     messageResults.data?.pages.some(page => page.coverage.sources.some(source => source.fallback === "failed")) ? "Provider fallback failed; cached results remain available." : "",
     messageResults.data?.pages.some(page => page.coverage.sources.some(source => source.fallback === "limited")) ? "Provider fallback is limited and may omit matches." : "",
+    messageResults.data?.pages[0]?.coverage.sources.some(source => source.fallback === "not-requested") ? "Provider fallback was skipped for some incomplete sources." : "",
   ].filter(Boolean).join(" ") : null;
 
   const openMessage = messages.find((message) => messageMatchesKey(message, openKey)) ?? null;

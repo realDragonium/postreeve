@@ -272,6 +272,11 @@ export class SynchronizationStore {
       this.reconcile({ ...account, mailbox: current.mailbox, authoritative: false,
         observations: [toCanonicalObservation(account.tenantId, account.provider,
           { ...summary, ref: current, read: read ?? row.read === 1, flagged: row.flagged === 1 })] });
+      if (account.provider === "gmail" && current.providerId && read !== undefined) {
+        this.sqlite.query(`UPDATE message_locations SET read=?,sync_revision=sync_revision+1
+          WHERE tenant_id=? AND account_id=? AND provider='gmail' AND provider_id=?`)
+          .run(read, account.tenantId, account.accountId, current.providerId);
+      }
       if (previous.mailbox !== current.mailbox || previous.uidValidity !== current.uidValidity || previous.uid !== current.uid) this.#remove(account, previous);
     }).immediate();
   }
@@ -302,15 +307,20 @@ export class SynchronizationStore {
     const addresses = (items: typeof content.from) => items.slice(0, 100).map(a => ({ name: a.name.slice(0,256), address: a.address.slice(0,512) }));
     const retained = this.sqlite.query("SELECT content FROM indexed_messages WHERE tenant_id=? AND account_id=? AND message_id=?")
       .get(claim.tenantId, claim.accountId, id) as { content: string } | null;
-    const prior = retained ? z.object({ searchBody: z.string().nullable().optional(), searchBodyAt: z.number().nullable().optional(), searchHeaders: z.string().optional() }).parse(JSON.parse(retained.content)) : null;
+    const prior = retained ? z.object({ searchBody: z.string().nullable().optional(), searchBodyAt: z.number().nullable().optional(), searchHeaders: z.string().optional(),
+      sortReceivedAt: z.string().optional(), sortSender: z.string().optional(), sortSubject: z.string().optional() }).parse(JSON.parse(retained.content)) : null;
     const bounded = { ...content,
-      searchBodyAt: message.searchBody === undefined ? prior?.searchBodyAt ?? null : message.searchBody === null ? null : now,
-      searchBody: message.searchBody === undefined ? prior?.searchBody ?? null : message.searchBody?.toLowerCase().slice(0, SEARCH_BODY_LIMIT) ?? null,
+      searchBodyAt: message.searchBody == null ? prior?.searchBodyAt ?? null : now,
+      searchBody: message.searchBody == null ? prior?.searchBody ?? null : message.searchBody.toLowerCase().slice(0, SEARCH_BODY_LIMIT),
       searchHeaders: (message.searchHeaders ?? prior?.searchHeaders ?? [content.messageId, content.inReplyTo ?? "", ...(content.references ?? [])].join("\n")).toLowerCase().slice(0, SEARCH_HEADERS_LIMIT), subject: content.subject.slice(0,2048), preview: content.preview.slice(0,4096),
       from: addresses(content.from), to: addresses(content.to), cc: content.cc ? addresses(content.cc) : undefined,
       replyTo: content.replyTo ? addresses(content.replyTo) : undefined, deliveredTo: content.deliveredTo?.slice(0,100),
       references: content.references?.slice(-100), messageId: content.messageId.slice(0,1024), inReplyTo: content.inReplyTo?.slice(0,2048) };
-    const serialized = JSON.stringify({ ...bounded, ...searchFields(bounded) });
+    const searchable = searchFields(bounded);
+    const serialized = JSON.stringify({ ...bounded, ...searchable,
+      sortReceivedAt: prior?.sortReceivedAt ?? bounded.receivedAt,
+      sortSender: prior?.sortSender ?? searchable.searchSenderSort,
+      sortSubject: prior?.sortSubject ?? searchable.searchSubject });
     if (serialized.length > 256 * 1024) throw new Error("Indexed summary exceeds content limit");
     this.sqlite.query(`INSERT INTO indexed_messages(tenant_id,account_id,message_id,received_at,content,updated_at) VALUES(?,?,?,?,?,?)
       ON CONFLICT(tenant_id,account_id,message_id) DO UPDATE SET received_at=excluded.received_at,content=excluded.content,updated_at=excluded.updated_at`)
