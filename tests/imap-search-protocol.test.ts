@@ -7,6 +7,8 @@ import { Store } from "../src/server/db/store";
 // This fixture exercises the installed client's command parser and public log
 // hook; adapter-level doubles cannot expose information discarded by ImapFlow.
 async function protocolFixture(esearch = false) {
+  let validity = 101;
+  let fetches = 0;
   const capabilities = `IMAP4rev1${esearch ? " ESEARCH" : ""}`;
   let searchResponse: string | undefined = "* SEARCH 1 2 3\r\n";
   const sockets = new Set<Socket>();
@@ -27,10 +29,11 @@ async function protocolFixture(esearch = false) {
         const command = line.slice(separator + 1);
         if (command.startsWith("CAPABILITY")) socket.write(`* CAPABILITY ${capabilities}\r\n`);
         else if (command.startsWith("LIST")) socket.write('* LIST () "/" "INBOX"\r\n');
-        else if (command.startsWith("EXAMINE")) socket.write("* FLAGS (\\Seen)\r\n* 3 EXISTS\r\n* OK [UIDVALIDITY 101] valid\r\n* OK [UIDNEXT 4] next\r\n");
+        else if (command.startsWith("EXAMINE")) socket.write(`* FLAGS (\\Seen)\r\n* 3 EXISTS\r\n* OK [UIDVALIDITY ${validity}] valid\r\n* OK [UIDNEXT 4] next\r\n`);
         else if (command.startsWith("UID SEARCH")) {
           if (searchResponse !== undefined) socket.write(searchResponse.replaceAll("$TAG", tag));
         } else if (command.startsWith("UID FETCH")) {
+          fetches++;
           const range = command.slice(10).split(" ")[0]!;
           for (const uid of [1, 2, 3].filter(uid => range.split(",").some(part => {
             const [first, last] = part.split(":").map(Number);
@@ -55,6 +58,8 @@ async function protocolFixture(esearch = false) {
   const provider = new ImapMailProvider({ accountId: "fixture", host: "127.0.0.1", port: address.port, secure: false, username: "fixture", password: "fake" });
   return {
     provider,
+    validity(value: number) { validity = value; },
+    fetches() { return fetches; },
     response(value: string | undefined) { searchResponse = value; },
     async close() {
       for (const socket of sockets) socket.destroy();
@@ -96,6 +101,10 @@ describe("installed ImapFlow SEARCH evidence", () => {
       }
       fixture.response('* ESEARCH (TAG "$TAG") UID ALL 1:3\r\n');
       expect((await fetch()).messages).toHaveLength(3);
+      for (const valid of ["* SEARCH 1 2 3 (MODSEQ 7)\r\n", "* SEARCH 1 2\r\n* SEARCH 2 3\r\n"]) {
+        fixture.response(valid);
+        expect((await fetch()).messages.map(message => message.ref.uid)).toEqual([1, 2, 3]);
+      }
       fixture.response("* SEARCH\r\n");
       const empty = await fetch();
       store.synchronization.commit(claim, scope, empty, 0, 10, 100);
@@ -120,6 +129,61 @@ describe("installed ImapFlow SEARCH evidence", () => {
       fixture.response(undefined);
       await expect(fetch()).rejects.toThrow("invalid-data");
     } finally { await fixture.close(); }
+  });
+
+  test.each([false, true])("checks raw ESEARCH membership before normalization (negotiated=%s)", async negotiated => {
+    const fixture = await protocolFixture(negotiated);
+    const store = new Store(":memory:");
+    const account = { tenantId: "tenant", accountId: "fixture", provider: "imap" as const };
+    const scope = { kind: "mailbox" as const, mailbox: "INBOX" };
+    try {
+      await store.insertAccount({ id: "fixture", kind: "imap", name: "Fixture", email: "fixture@example.test", encryptedCredentials: null });
+      store.synchronization.schedule(account.tenantId, account.accountId, 0);
+      const claim = store.synchronization.claim(account.tenantId, 0, 100)!;
+      store.synchronization.discover(claim, [scope], 0, 10);
+      const fetch = () => fixture.provider.synchronization.fetchPage({ account, scope,
+        cursor: store.synchronization.scopes(account)[0]!.cursor, limit: 100, signal: new AbortController().signal });
+      const respond = (body: string) => fixture.response(`* ESEARCH (TAG "$TAG") UID ${body}\r\n`);
+      respond("ALL 1:3 COUNT 3");
+      store.synchronization.commit(claim, scope, await fetch(), 0, 10, 100);
+      const checkpoint = store.synchronization.scopes(account)[0]!.cursor;
+      const cached = store.synchronization.indexed(account.tenantId, account.accountId, "INBOX");
+      expect(cached).toHaveLength(3);
+      for (const validity of [101, 900]) {
+        fixture.validity(validity);
+        for (const invalid of [
+          "COUNT 3", "ALL 1 COUNT 3", "ALL 1 COUNT 0", "ALL 1:3 COUNT 2",
+          "ALL 1:3 COUNT 3 MIN 2", "ALL 1:3 COUNT 3 MAX 4", "COUNT 0 MIN 1",
+          "ALL 1,1 COUNT 2", "ALL 1:3 COUNT 3 COUNT 3", "ALL 1:3 COUNT 3 PARTIAL 1:3",
+        ]) {
+          respond(invalid);
+          const fetched = fixture.fetches();
+          await expect(fetch()).rejects.toThrow("invalid-data");
+          expect(fixture.fetches()).toBe(fetched);
+          expect(store.synchronization.scopes(account)[0]!.cursor).toBe(checkpoint);
+          expect(store.synchronization.indexed(account.tenantId, account.accountId, "INBOX")).toEqual(cached);
+        }
+      }
+      fixture.validity(101);
+      for (const valid of ["ALL 3:1 COUNT 3 MIN 1 MAX 3", "ALL 1:2,2:3 COUNT 3", "ALL 1,1,2,3 COUNT 3"]) {
+        respond(valid);
+        expect((await fetch()).messages.map(message => message.ref.uid)).toEqual([1, 2, 3]);
+      }
+      respond("ALL 1:3,3 COUNT 3");
+      if (negotiated) expect((await fetch()).messages).toHaveLength(3);
+      else await expect(fetch()).rejects.toThrow("invalid-data"); // ImapFlow reports fallback expansion truncation.
+      respond("ALL 1:3");
+      if (negotiated) await expect(fetch()).rejects.toThrow("invalid-data");
+      else expect((await fetch()).messages).toHaveLength(3);
+      respond("COUNT 0");
+      const empty = await fetch();
+      store.synchronization.commit(claim, scope, empty, 0, 10, 100);
+      expect(empty.coverage).toBe("complete");
+      expect(store.synchronization.indexed(account.tenantId, account.accountId, "INBOX")).toEqual([]);
+    } finally {
+      store.close();
+      await fixture.close();
+    }
   });
 
   test("unrelated response or warning cannot establish SEARCH coverage", () => {

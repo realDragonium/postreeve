@@ -38,6 +38,14 @@ A missing, duplicate, unexpected or incomplete fetched summary SHALL NOT advance
 - **WHEN** the client discards malformed SEARCH tokens, truncates results or receives no SEARCH response before command completion
 - **THEN** synchronization rejects the command using protocol-level evidence even if normalized ALL and COUNT agree
 
+#### Scenario: Fallback ESEARCH preserves semantic coverage proof
+- **WHEN** an ESEARCH response has positive COUNT without ALL, a count inconsistent with unique ALL membership, or inconsistent MIN/MAX
+- **THEN** synchronization rejects the raw evidence before client normalization, whether or not ESEARCH was negotiated, including during mailbox resets
+
+#### Scenario: Plain SEARCH retains supported metadata
+- **WHEN** complete plain SEARCH results contain duplicate UIDs across response lines or a valid MODSEQ suffix
+- **THEN** synchronization accepts unique UID membership without treating validated MODSEQ metadata as a discarded UID
+
 #### Scenario: Confirmed empty plain SEARCH
 - **WHEN** a server without ESEARCH returns an explicit empty SEARCH response and successful completion
 - **THEN** synchronization may complete an empty snapshot and reconcile removals
