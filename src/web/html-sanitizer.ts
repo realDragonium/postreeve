@@ -1,4 +1,5 @@
 import DOMPurify from "dompurify";
+import { filterInlineStyle } from "../shared/inline-styles";
 
 const remoteResourceAttributes = ["src", "srcset", "poster", "background", "data-src", "data-srcset", "data-original", "data-lazy-src"] as const;
 const blockElements = new Set([
@@ -26,8 +27,9 @@ export function isSafeLink(value: string): boolean {
 }
 
 /**
- * HTML allowed into the compose editor: the reader's rules without style sheets, and without any
- * resource the browser would fetch, so composing never contacts a remote server.
+ * HTML allowed into the compose editor: the reader's rules without style sheets, inline styles limited
+ * to the outgoing allowlist, and without any resource the browser would fetch, so composing never
+ * contacts a remote server.
  */
 export function sanitizeComposeHtml(html: string): string {
   const parsed = new DOMParser().parseFromString(sanitizeEmailHtml(html, true), "text/html");
@@ -44,8 +46,10 @@ export function sanitizeComposeHtml(html: string): string {
       }
     }
     const style = element.getAttribute("style");
-    if (style && /url\s*\(|@import|expression\s*\(/i.test(style)) {
-      element.setAttribute("style", style.split(";").filter((declaration) => !/url\s*\(|@import|expression\s*\(/i.test(declaration)).join(";"));
+    if (style !== null) {
+      const kept = filterInlineStyle(style);
+      if (kept) element.setAttribute("style", kept);
+      else element.removeAttribute("style");
     }
     const href = element.getAttribute("href");
     if (href !== null && !isSafeLink(href)) element.removeAttribute("href");

@@ -246,8 +246,12 @@ A compose form opened without a saved draft SHALL insert the From address's sign
 - **THEN** the response is 400 and nothing is dispatched
 
 ### Requirement: Rich-text replies and forwards quote the source HTML
-In rich-text mode the quote or forwarded message SHALL be the source's HTML, sanitized with the reader's rules and stripped of style sheets and remote resources, or the source's text, escaped, when it has no HTML.
+In rich-text mode the quote or forwarded message SHALL be the source's HTML, sanitized with the reader's rules and stripped of style sheets and remote resources, with inline styles limited to the same property and value allowlist as outgoing HTML, or the source's text, escaped, when it has no HTML. Placing the quote in the editor MUST NOT fetch any remote resource.
 
 #### Scenario: Reply to an HTML message
 - **WHEN** a user replies to a message whose HTML contains a table, a script and a remote image
 - **THEN** the quote keeps the table, contains no script, and no request is made for the remote image
+
+#### Scenario: Reply to an HTML message with a remote image in an inline style
+- **WHEN** a user replies to a message whose HTML has `style="color: red; background-image: image-set('https://tracker.example/x.png' 1x)"`, or the same image written with a CSS escape such as `u\72l(...)`
+- **THEN** the quote keeps `color:red`, drops the background image, and no request is made to `tracker.example`

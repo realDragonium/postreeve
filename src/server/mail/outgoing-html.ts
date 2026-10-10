@@ -1,11 +1,6 @@
 import { convert } from "html-to-text";
 import sanitizeHtml from "sanitize-html";
-
-const cssLength = /^(?:0|-?\d+(?:\.\d+)?(?:px|em|rem|%|pt))(?:\s+(?:0|-?\d+(?:\.\d+)?(?:px|em|rem|%|pt))){0,3}$/i;
-const cssColor = /^(?:#[0-9a-f]{3,8}|[a-z]+|rgba?\(\s*[\d.\s,%]+\))$/i;
-const cssKeyword = /^[a-z-]+$/i;
-const cssFontFamily = /^[\w\s,'"-]+$/;
-const cssBorder = /^[\w\s#.%(),-]+$/i;
+import { allowedInlineStyles } from "../../shared/inline-styles";
 
 const outgoingHtmlOptions: sanitizeHtml.IOptions = {
   allowedTags: [
@@ -32,30 +27,7 @@ const outgoingHtmlOptions: sanitizeHtml.IOptions = {
   allowedSchemesByTag: { img: ["data"] },
   allowedSchemesAppliedToAttributes: ["href", "src"],
   allowProtocolRelative: false,
-  allowedStyles: {
-    "*": {
-      color: [cssColor],
-      "background-color": [cssColor],
-      "font-weight": [cssKeyword, /^\d{3}$/],
-      "font-style": [cssKeyword],
-      "font-size": [cssLength, cssKeyword],
-      "font-family": [cssFontFamily],
-      "text-decoration": [/^[a-z\s-]+$/i],
-      "text-align": [cssKeyword],
-      "line-height": [cssLength, /^\d+(?:\.\d+)?$/],
-      "white-space": [cssKeyword],
-      "vertical-align": [cssKeyword],
-      margin: [cssLength],
-      "margin-top": [cssLength], "margin-right": [cssLength], "margin-bottom": [cssLength], "margin-left": [cssLength],
-      padding: [cssLength],
-      "padding-top": [cssLength], "padding-right": [cssLength], "padding-bottom": [cssLength], "padding-left": [cssLength],
-      border: [cssBorder],
-      "border-left": [cssBorder],
-      "border-collapse": [cssKeyword],
-      width: [cssLength, cssKeyword],
-      height: [cssLength, cssKeyword],
-    },
-  },
+  allowedStyles: { "*": allowedInlineStyles },
   exclusiveFilter: (frame) => frame.tag === "img" && !/^data:image\//i.test(frame.attribs.src ?? ""),
 };
 
