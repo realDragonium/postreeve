@@ -9,6 +9,7 @@ import {
   createDraftInputSchema,
   createFolderInputSchema,
   createIdentityInputSchema,
+  putSignatureInputSchema,
   createProposalInputSchema,
   deleteFolderInputSchema,
   discoverAccountInputSchema,
@@ -157,6 +158,14 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         const { identity, created } = await service.addIdentity(context.req.valid("param").accountId, context.req.valid("json"));
         return context.json(identity, created ? 201 : 200);
       },
+    )
+    .get("/accounts/:accountId/signatures", zValidator("param", accountParamsSchema), async (context) =>
+      context.json(await service.listSignatures(context.req.valid("param").accountId)))
+    .put(
+      "/accounts/:accountId/signatures",
+      zValidator("param", accountParamsSchema),
+      zValidator("json", putSignatureInputSchema),
+      async (context) => context.json(await service.putSignature(context.req.valid("param").accountId, context.req.valid("json"))),
     )
     .delete("/accounts/:accountId/identities/:identityId", zValidator("param", identityParamsSchema), async (context) => {
       const { accountId, identityId } = context.req.valid("param");

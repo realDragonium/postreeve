@@ -31,6 +31,7 @@ import {
 } from "../../src/server/mail/provider";
 import {
   MailSenderRegistry,
+  outgoingBody,
   type ConversationSendContext,
   type MailSender,
   type OutgoingMessage,
@@ -557,7 +558,11 @@ class TestMailSender implements MailSender {
   }
 
   async send(rawInput: OutgoingMessage, context?: ConversationSendContext, content?: OutgoingContent): Promise<SentMessage> {
-    const input: OutgoingMessage = { ...sendMessageInputSchema.parse(rawInput), ...(rawInput.from ? { from: rawInput.from } : {}) };
+    const input: OutgoingMessage = {
+      ...sendMessageInputSchema.parse(rawInput),
+      ...(rawInput.from ? { from: rawInput.from } : {}),
+      ...(rawInput.html === undefined ? {} : { html: rawInput.html }),
+    };
     if (input.accountId !== this.#account.id) throw new Error("Account isolation violation");
     this.#behavior.onAttempt(input, content);
     await this.#behavior.wait;
@@ -586,7 +591,7 @@ class TestMailSender implements MailSender {
       subject: input.subject,
       ...(reply?.inReplyTo ? { inReplyTo: reply.inReplyTo } : {}),
       ...(reply && reply.references.length > 0 ? { references: [...reply.references] } : {}),
-    }, input.text);
+    }, outgoingBody(input));
     if (receipt.accepted.length > 0) await this.#onSent(input, receipt, context);
     return { receipt, mime };
   }

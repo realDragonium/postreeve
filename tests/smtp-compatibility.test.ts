@@ -278,7 +278,7 @@ test("actual SMTP recipient refusal is retryable while a lost DATA response rema
     const account = await harness.service.createAccount(testAccountInput());
     let draft = await harness.service.createDraft({
       accountId: account.id, mode: "new", to: "recipient@example.test", cc: "", bcc: "",
-      subject: "Synthetic refusal", body: "Retain this draft and file",
+      subject: "Synthetic refusal", format: "plain", body: "Retain this draft and file",
       identity: { name: "Sender", address: account.email }, attachments: [],
     });
     const fileId = crypto.randomUUID();

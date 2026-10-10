@@ -32,6 +32,7 @@ export const drafts = sqliteTable("drafts", {
   recipientsCc: text("recipients_cc", { mode: "json" }).$type<DraftRecipientField>().notNull(),
   recipientsBcc: text("recipients_bcc", { mode: "json" }).$type<DraftRecipientField>().notNull(),
   subject: text("subject").notNull(),
+  bodyFormat: text("body_format", { enum: ["plain", "html"] }).notNull().default("plain"),
   body: text("body").notNull(),
   identity: text("identity", { mode: "json" }).$type<OutboundAddress>().notNull(),
   source: text("source", { mode: "json" }).$type<ConversationSendSource>(),

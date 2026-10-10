@@ -73,6 +73,7 @@ describe("sent copies for IMAP accounts", () => {
       cc: [],
       bcc: [],
       subject: "Delivered anyway",
+      format: "plain",
       body: "The send must stand.",
       identity: { name: account.name, address: account.email },
       attachments: [],

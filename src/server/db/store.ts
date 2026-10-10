@@ -14,6 +14,7 @@ import type {
   Draft,
   DraftContent,
   Identity,
+  Signature,
   MailProviderKind,
   MessageRef,
   OperationBatch,
@@ -147,6 +148,7 @@ export class Store {
       if (sending) throw new AccountConflictError();
       this.#sqlite.query("DELETE FROM drafts WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM identities WHERE account_id = ?").run(accountId);
+      this.#sqlite.query("DELETE FROM signatures WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM draft_tombstones WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_provider_conversations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_locations WHERE account_id = ?").run(accountId);
@@ -185,7 +187,34 @@ export class Store {
   }
 
   async removeIdentity(tenantId: string, accountId: string, id: string): Promise<void> {
-    this.#sqlite.query("DELETE FROM identities WHERE tenant_id = ? AND account_id = ? AND id = ?").run(tenantId, accountId, id);
+    this.#sqlite.transaction(() => {
+      const removed = this.#sqlite.query(`
+        DELETE FROM identities WHERE tenant_id = ? AND account_id = ? AND id = ? RETURNING address
+      `).get(tenantId, accountId, id) as { address: string } | null;
+      if (removed) {
+        this.#sqlite.query("DELETE FROM signatures WHERE tenant_id = ? AND account_id = ? AND address = ?")
+          .run(tenantId, accountId, removed.address);
+      }
+    }).immediate();
+  }
+
+  async listSignatures(tenantId: string, accountId: string): Promise<Signature[]> {
+    return this.#sqlite.query(`
+      SELECT address, html FROM signatures WHERE tenant_id = ? AND account_id = ? ORDER BY address
+    `).all(tenantId, accountId) as Signature[];
+  }
+
+  /** A blank signature removes the stored one. */
+  async putSignature(tenantId: string, accountId: string, signature: Signature, updatedAt: string): Promise<void> {
+    if (!signature.html.trim()) {
+      this.#sqlite.query("DELETE FROM signatures WHERE tenant_id = ? AND account_id = ? AND address = ?")
+        .run(tenantId, accountId, signature.address);
+      return;
+    }
+    this.#sqlite.query(`
+      INSERT INTO signatures (tenant_id, account_id, address, html, updated_at) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (tenant_id, account_id, address) DO UPDATE SET html = excluded.html, updated_at = excluded.updated_at
+    `).run(tenantId, accountId, signature.address, signature.html, updatedAt);
   }
 
   async insertDraft(tenantId: string, draft: Draft): Promise<Draft> {
@@ -204,10 +233,10 @@ export class Store {
       this.#sqlite.query(`
         INSERT INTO drafts (
           id, tenant_id, account_id, mode, recipients_to, recipients_cc, recipients_bcc,
-          subject, body, identity, source, attachments, delivery_status, delivery_receipt, delivery_error,
+          subject, body_format, body, identity, source, attachments, delivery_status, delivery_receipt, delivery_error,
           claimed_at, claim_owner, settled_at, mirror_status, mirror_ref, mirrored_version,
           mirror_error, created_at, updated_at, version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL,
           'pending', NULL, NULL, NULL, ?, ?, ?)
       `).run(
         draft.id,
@@ -218,6 +247,7 @@ export class Store {
         JSON.stringify(draft.cc),
         JSON.stringify(draft.bcc),
         draft.subject,
+        draft.format,
         draft.body,
         JSON.stringify(draft.identity),
         draft.source ? JSON.stringify(draft.source) : null,
@@ -350,7 +380,7 @@ export class Store {
   ): Draft {
     const row = this.#sqlite.query(`
       UPDATE drafts SET
-        mode = ?, recipients_to = ?, recipients_cc = ?, recipients_bcc = ?, subject = ?, body = ?,
+        mode = ?, recipients_to = ?, recipients_cc = ?, recipients_bcc = ?, subject = ?, body_format = ?, body = ?,
         identity = ?, source = ?, delivery_status = 'editable', delivery_receipt = NULL,
         attachments = ?,
         delivery_error = NULL, claimed_at = NULL, claim_owner = NULL, settled_at = NULL,
@@ -365,6 +395,7 @@ export class Store {
       JSON.stringify(content.cc),
       JSON.stringify(content.bcc),
       content.subject,
+      content.format,
       content.body,
       JSON.stringify(content.identity),
       content.source ? JSON.stringify(content.source) : null,
@@ -783,10 +814,10 @@ export class Store {
       this.#sqlite.query(`
         INSERT INTO drafts (
           id, tenant_id, account_id, mode, recipients_to, recipients_cc, recipients_bcc,
-          subject, body, identity, source, attachments, delivery_status, delivery_receipt, delivery_error,
+          subject, body_format, body, identity, source, attachments, delivery_status, delivery_receipt, delivery_error,
           claimed_at, claim_owner, settled_at, mirror_status, mirror_ref, mirrored_version,
           mirror_error, created_at, updated_at, version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'editable', NULL, NULL, NULL, NULL, NULL,
           'pending', NULL, NULL, NULL, ?, ?, 1)
       `).run(
         copyId,
@@ -797,6 +828,7 @@ export class Store {
         source.recipients_cc,
         source.recipients_bcc,
         source.subject,
+        source.body_format,
         source.body,
         source.identity,
         source.source,
@@ -1514,6 +1546,7 @@ export class Store {
     `);
     this.#migrateDraftTombstones();
     this.#migrateDraftTombstoneCleanup();
+    this.#migrateDraftBodyFormat();
     this.#sqlite.exec(`
       CREATE TABLE IF NOT EXISTS identities (
         tenant_id TEXT NOT NULL, id TEXT NOT NULL,
@@ -1521,6 +1554,12 @@ export class Store {
         name TEXT NOT NULL, address TEXT NOT NULL, created_at TEXT NOT NULL,
         PRIMARY KEY (tenant_id, id),
         UNIQUE (tenant_id, account_id, address)
+      );
+      CREATE TABLE IF NOT EXISTS signatures (
+        tenant_id TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES accounts(id),
+        address TEXT NOT NULL, html TEXT NOT NULL, updated_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, account_id, address)
       );
     `);
     const accountsTable = this.#sqlite.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
@@ -1655,6 +1694,17 @@ export class Store {
         CREATE INDEX draft_tombstones_tenant_account_idx
           ON draft_tombstones(tenant_id, account_id);
         INSERT INTO schema_migrations (version, applied_at) VALUES (480002, CURRENT_TIMESTAMP);
+      `);
+    });
+    migrate();
+  }
+
+  #migrateDraftBodyFormat(): void {
+    if (this.#sqlite.query("SELECT 1 FROM schema_migrations WHERE version = 480004").get()) return;
+    const migrate = this.#sqlite.transaction(() => {
+      this.#sqlite.exec(`
+        ALTER TABLE drafts ADD COLUMN body_format TEXT NOT NULL DEFAULT 'plain' CHECK (body_format IN ('plain', 'html'));
+        INSERT INTO schema_migrations (version, applied_at) VALUES (480004, CURRENT_TIMESTAMP);
       `);
     });
     migrate();
@@ -2063,6 +2113,7 @@ interface DraftRow {
   recipients_cc: string;
   recipients_bcc: string;
   subject: string;
+  body_format: Draft["format"];
   body: string;
   identity: string;
   source: string | null;
@@ -2174,6 +2225,7 @@ function toDraft(row: DraftRow): Draft {
     cc: parseJson(row.recipients_cc),
     bcc: parseJson(row.recipients_bcc),
     subject: row.subject,
+    format: row.body_format,
     body: row.body,
     identity: parseJson(row.identity),
     ...(row.source ? { source: parseJson(row.source) } : {}),

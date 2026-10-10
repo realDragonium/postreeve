@@ -10,6 +10,7 @@ import {
   type OutgoingAttachment,
 } from "../mail/outgoing-content";
 import { buildProviderDraftMessage } from "../mail/provider-draft";
+import { htmlToPlainText, sanitizeOutgoingHtml } from "../mail/outgoing-html";
 import type {
   Account,
   AccountSettings,
@@ -27,6 +28,8 @@ import type {
   DraftVersionInput,
   Folder,
   Identity,
+  PutSignatureInput,
+  Signature,
   CreateIdentityInput,
   ListMessagesInput,
   MessageRef,
@@ -47,6 +50,7 @@ import {
   createFolderInputSchema,
   createDraftInputSchema,
   createIdentityInputSchema,
+  putSignatureInputSchema,
   createProposalInputSchema,
   deleteFolderInputSchema,
   directActionInputSchema,
@@ -583,6 +587,22 @@ export class PostreeveService {
     await this.#store.removeIdentity(this.#context.tenantId, accountId, id);
   }
 
+  async listSignatures(accountId: string): Promise<Signature[]> {
+    await this.#requireAccount(accountId);
+    return this.#store.listSignatures(this.#context.tenantId, accountId);
+  }
+
+  async putSignature(accountId: string, rawInput: PutSignatureInput): Promise<Signature> {
+    const input = putSignatureInputSchema.parse(rawInput);
+    const account = await this.#requireAccount(accountId);
+    const own = input.address === account.email.toLowerCase()
+      || (await this.#store.listIdentities(this.#context.tenantId, accountId)).some(({ address }) => address === input.address);
+    if (!own) throw new Error("Signatures can only be set for the account's own addresses");
+    const signature = { address: input.address, html: input.html.trim() ? input.html : "" };
+    await this.#store.putSignature(this.#context.tenantId, accountId, signature, new Date().toISOString());
+    return signature;
+  }
+
   async sendMessage(rawInput: SendMessageInput): Promise<SendReceipt> {
     const input = sendMessageInputSchema.parse(rawInput);
     return this.#dispatchMessageSend(await this.#prepareMessageSend(input));
@@ -769,17 +789,18 @@ export class PostreeveService {
         ? { type: draft.mode, source: draft.source }
         : null;
     if (!intent) throw new Error("Conversation draft source was not found");
+    const html = draft.format === "html" ? sanitizeOutgoingHtml(draft.body) : undefined;
     const input = sendMessageInputSchema.parse({
       accountId,
       to: draftRecipientsForSend(draft.to),
       cc: draftRecipientsForSend(draft.cc),
       bcc: draftRecipientsForSend(draft.bcc),
       subject: draft.subject,
-      text: draft.body,
+      text: html === undefined ? draft.body : htmlToPlainText(html),
       intent,
     });
     const files = await this.#store.draftFiles(this.#context.tenantId, accountId, draft);
-    const prepared = await this.#prepareMessageSend(input, from);
+    const prepared = await this.#prepareMessageSend(input, from, html);
     const claim = await this.#store.claimDraftSend(
       this.#context.tenantId,
       accountId,
@@ -1180,9 +1201,13 @@ export class PostreeveService {
     return { name: identity.name || storedName, address: identity.address };
   }
 
-  async #prepareMessageSend(sendInput: SendMessageInput, from?: OutboundAddress): Promise<PreparedMessageSend> {
+  async #prepareMessageSend(sendInput: SendMessageInput, from?: OutboundAddress, html?: string): Promise<PreparedMessageSend> {
     const account = await this.#requireAccount(sendInput.accountId);
-    const input: OutgoingMessage = { ...sendInput, from: from ?? { name: account.name, address: account.email } };
+    const input: OutgoingMessage = {
+      ...sendInput,
+      from: from ?? { name: account.name, address: account.email },
+      ...(html === undefined ? {} : { html }),
+    };
     const sender = this.#senders.forAccount(input.accountId);
     const intent = input.intent ?? { type: "new" as const };
     if (intent.type === "new") return { account, input, sender };

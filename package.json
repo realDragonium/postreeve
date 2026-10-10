@@ -28,11 +28,13 @@
     "dompurify": "latest",
     "drizzle-orm": "latest",
     "hono": "latest",
+    "html-to-text": "^10.0.1",
     "imapflow": "latest",
     "mailparser": "latest",
     "nodemailer": "^9.0.6",
     "react": "latest",
     "react-dom": "latest",
+    "sanitize-html": "^2.18.0",
     "tailwindcss": "latest",
     "zod": "^4.0.0"
   },
@@ -41,10 +43,12 @@
     "@playwright/test": "latest",
     "@types/bun": "latest",
     "@types/dompurify": "latest",
+    "@types/html-to-text": "^9.0.4",
     "@types/mailparser": "latest",
     "@types/nodemailer": "^8.0.1",
     "@types/react": "latest",
     "@types/react-dom": "latest",
+    "@types/sanitize-html": "^2.16.2",
     "@vitejs/plugin-react": "latest",
     "drizzle-kit": "latest",
     "electron": "^44.1.0",
@@ -56,17 +60,27 @@
     "appId": "nl.dragonium.postreeve",
     "productName": "Postreeve",
     "asar": true,
-    "directories": { "output": "release" },
+    "directories": {
+      "output": "release"
+    },
     "files": ["build/electron/**", "package.json"],
     "extraResources": [
-      { "from": "dist", "to": "dist" },
-      { "from": "build/server", "to": "server" }
+      {
+        "from": "dist",
+        "to": "dist"
+      },
+      {
+        "from": "build/server",
+        "to": "server"
+      }
     ],
     "mac": {
       "category": "public.app-category.productivity",
       "target": ["dmg", "zip"]
     },
-    "win": { "target": ["nsis"] },
+    "win": {
+      "target": ["nsis"]
+    },
     "linux": {
       "category": "Office",
       "target": ["AppImage"]

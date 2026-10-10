@@ -113,6 +113,7 @@ describe("Store migrations", () => {
       cc: [],
       bcc: [],
       subject: "Preserved subject",
+      format: "plain",
       body: "Preserved body",
       identity: { name: "Draft owner", address: "owner@example.test" },
       attachments: [{ name: "legacy.txt", size: 7, type: "text/plain" }],
