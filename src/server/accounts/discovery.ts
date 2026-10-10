@@ -74,7 +74,7 @@ export function lookupDomain(email: string): string | null {
 
 const labelPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
-function isDnsName(value: string): boolean {
+export function isDnsName(value: string): boolean {
   if (value.length > 253) return false;
   const labels = value.split(".");
   if (labels.length < 2 || !labels.every((label) => labelPattern.test(label))) return false;

@@ -1,5 +1,5 @@
-import DOMPurify from "dompurify";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { isSafeLink, sanitizeEmailHtml } from "./html-sanitizer";
 
 interface EmailBodyProps {
   readonly html: string | null;
@@ -34,11 +34,6 @@ function normalizeRemoteUrls(value: string): string {
   return value.replace(remoteUrlInValuePattern, (url) => normalizeRemoteUrl(url));
 }
 
-function isSafeLink(value: string): boolean {
-  const normalized = value.trim();
-  return normalized.startsWith("#") || /^(?:https?:|mailto:|tel:)/i.test(normalized);
-}
-
 function markUnavailableImage(element: Element): void {
   if (element.tagName !== "IMG") return;
   element.removeAttribute("srcset");
@@ -47,13 +42,7 @@ function markUnavailableImage(element: Element): void {
 }
 
 function prepareEmail(html: string, allowRemoteResources: boolean): PreparedEmail {
-  const cleaned = DOMPurify.sanitize(html, {
-    USE_PROFILES: { html: true },
-    FORCE_BODY: true,
-    SANITIZE_NAMED_PROPS: true,
-    FORBID_TAGS: ["script", "iframe", "object", "embed", "form", "input", "button", "textarea", "select", "option", "base", "link", "meta"],
-    FORBID_ATTR: ["srcdoc", "action", "formaction", "ping"],
-  });
+  const cleaned = sanitizeEmailHtml(html);
   const parsed = new DOMParser().parseFromString(cleaned, "text/html");
   let blockedRemoteResources = 0;
 

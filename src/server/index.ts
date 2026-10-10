@@ -15,6 +15,7 @@ import { SmtpMailSender } from "./mail/smtp";
 import { CredentialVault } from "./security/credentials";
 import { desktopApiAuthentication } from "./security/desktop-auth";
 import { postreeveSecureHeaders } from "./security/headers";
+import { allowedHostGuard, sameOriginGuard } from "./security/request-origin";
 
 const store = new Store();
 const providers = new MailProviderRegistry();
@@ -95,21 +96,27 @@ await service.recoverInterruptedDraftSends();
 await service.initialize();
 service.synchronization.start();
 
+const desktopToken = process.env.POSTREEVE_DESKTOP_TOKEN;
 const app = new Hono();
 app.use("*", postreeveSecureHeaders);
-app.use("/api/*", desktopApiAuthentication(process.env.POSTREEVE_DESKTOP_TOKEN));
+app.use("*", allowedHostGuard(serverConfig.hostname));
+// With a desktop token every API write is already authenticated, and the protocol proxy forwards a postreeve:// Origin.
+if (!desktopToken?.trim()) app.use("/api/*", sameOriginGuard());
+app.use("/api/*", desktopApiAuthentication(desktopToken));
 app.route("/", createApi(service, googleOAuth, {
   oauthReturnUrl: process.env.POSTREEVE_DESKTOP_URL,
 }));
 app.use("/*", serveStatic({ root: "./dist" }));
 app.get("/*", serveStatic({ path: "./dist/index.html" }));
 
-const server = Bun.serve({ hostname: serverConfig.hostname, port: serverConfig.port, fetch: app.fetch });
+// The mailbox event stream sends a keep-alive every 15 seconds, so idle connections must outlive that.
+const server = Bun.serve({ hostname: serverConfig.hostname, port: serverConfig.port, idleTimeout: 60, fetch: app.fetch });
 console.info(`Postreeve listening on http://${server.hostname}:${server.port}`);
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
-    void service.synchronization.stop().finally(() => { server.stop(); store.close(); });
+    // Open mailbox event streams never finish, so shutdown closes active connections instead of waiting for them.
+    void service.synchronization.stop().finally(() => { server.stop(true); store.close(); });
   });
 }
 

@@ -92,6 +92,8 @@ export interface AppliedMailAction {
   previousRead: boolean;
   /** Recorded by `flag` and `unflag`, the only actions whose undo needs it. */
   previousFlagged?: boolean;
+  /** Recorded by Gmail moves, whose undo restores `INBOX` when the message carried it. */
+  previousInInbox?: boolean;
 }
 
 export interface ProviderLocationMove {
@@ -119,8 +121,14 @@ export interface ProviderDraftScope {
 
 export type ProviderDraftInput = Draft & OutgoingContent;
 
+export interface ProviderWatch {
+  stop(): void;
+}
+
 export interface MailProvider {
   readonly synchronization?: MailSynchronization;
+  /** Reports provider-side mailbox changes as they happen; synchronization still owns ingestion. */
+  watchChanges?(onChange: (mailbox: string) => void): ProviderWatch;
   verifyConnection(): Promise<void>;
   listFolders(accountId: string): Promise<Folder[]>;
   createFolder(accountId: string, name: string): Promise<void>;
@@ -157,6 +165,8 @@ export class MailProviderRegistry {
   }
 
   has(accountId: string): boolean { return this.#providers.has(accountId); }
+
+  get(accountId: string): MailProvider | undefined { return this.#providers.get(accountId); }
 
   forAccount(accountId: string): MailProvider {
     const provider = this.#providers.get(accountId);

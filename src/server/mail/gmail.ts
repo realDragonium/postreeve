@@ -1,6 +1,6 @@
 import { gmailSynchronization, gmailLocationMailboxes, GmailHttpError } from "./gmail-synchronization";
 import type { MailSynchronization } from "./synchronization";
-import { composeMime, outgoingMessageId, type OutgoingContent } from "./outgoing-content";
+import { composeMime, outgoingMessageId, type OutgoingBody, type OutgoingContent } from "./outgoing-content";
 import type { ProviderDraftInput } from "./provider";
 import { simpleParser, type AddressObject, type EmailAddress, type ParsedMail } from "mailparser";
 import { z, type ZodType } from "zod";
@@ -34,7 +34,8 @@ import type {
 import { safeAttachmentFilename, safeAttachmentMediaType } from "../core/attachment-reference";
 import { buildProviderDraftMessage, parseProviderDraftMarkers } from "./provider-draft";
 import { normalizeIdentificationFields, normalizeReferenceSequences } from "./message-id";
-import { MailSendPreDispatchError, type ConversationSendContext, type MailSender, type OutgoingMessage, type SentMessage } from "./sender";
+import { MailSendPreDispatchError, outgoingBody, type ConversationSendContext, type MailSender, type OutgoingMessage, type SentMessage } from "./sender";
+import { unsubscribeOptions } from "./unsubscribe";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -432,10 +433,11 @@ export class GmailMailClient implements MailProvider, MailSender {
         break;
       case "move": {
         const add = action.destination === GMAIL_ARCHIVE ? [] : [action.destination];
-        const remove = reference.mailbox === GMAIL_ARCHIVE
+        // Like Gmail's own Report spam, spam keeps user labels and only leaves the inbox.
+        const remove = reference.mailbox === GMAIL_ARCHIVE || action.destination === "SPAM"
           ? []
           : [reference.mailbox];
-        if (action.destination === GMAIL_ARCHIVE && !remove.includes("INBOX")) remove.push("INBOX");
+        if ((action.destination === GMAIL_ARCHIVE || action.destination === "SPAM") && !remove.includes("INBOX")) remove.push("INBOX");
         after = await this.#modify(id, add, remove.filter((label) => !add.includes(label)));
         mailbox = action.destination;
         break;
@@ -448,6 +450,7 @@ export class GmailMailClient implements MailProvider, MailSender {
       action,
       previousRead,
       ...(action.type === "flag" || action.type === "unflag" ? { previousFlagged: before.labelIds.includes("STARRED") } : {}),
+      ...(action.type === "move" ? { previousInInbox: before.labelIds.includes("INBOX") } : {}),
     };
   }
 
@@ -471,7 +474,7 @@ export class GmailMailClient implements MailProvider, MailSender {
       case "move": {
         const add = applied.previous.mailbox === GMAIL_ARCHIVE ? [] : [applied.previous.mailbox];
         const remove = applied.current.mailbox === GMAIL_ARCHIVE ? [] : [applied.current.mailbox];
-        if (applied.current.mailbox === GMAIL_ARCHIVE && applied.previous.mailbox === "INBOX") add.push("INBOX");
+        if ((applied.previousInInbox ?? applied.previous.mailbox === "INBOX") && !add.includes("INBOX")) add.push("INBOX");
         await this.#modify(id, add, remove.filter((label) => !add.includes(label)));
         return null;
       }
@@ -489,7 +492,7 @@ export class GmailMailClient implements MailProvider, MailSender {
     const messageId = outgoingMessageId(from.address);
     let raw: Buffer;
     try {
-      raw = await buildMessage(from, input, messageId, submittedAt, reply, content);
+      raw = await buildMessage(from, input, outgoingBody(rawInput), messageId, submittedAt, reply, content);
     } catch (error) {
       throw preDispatchError(error);
     }
@@ -824,9 +827,11 @@ function toDetail(
   parsedHeaders: ParsedMail,
 ): ProviderMessageDetail {
   const summary = toSummary(accountId, mailbox, message);
+  const unsubscribe = unsubscribeOptions(parsedHeaders.headerLines);
   return {
     ...summary,
     ...rendered,
+    ...(unsubscribe ? { unsubscribe } : {}),
     subject: parsedHeaders.subject ?? summary.subject,
     from: flattenAddresses(parsedHeaders.from).map(toAddress),
     replyTo: flattenAddresses(parsedHeaders.replyTo).map(toAddress),
@@ -1072,6 +1077,7 @@ async function gmailDraftMessage(scope: ProviderDraftScope, draft: ProviderDraft
 async function buildMessage(
   from: OutboundAddress,
   input: SendMessageInput,
+  body: OutgoingBody,
   messageId: string,
   submittedAt: string,
   context?: Extract<ConversationSendContext, { type: "reply" | "reply_all" }>,
@@ -1092,7 +1098,7 @@ async function buildMessage(
     ...(context && context.references.length > 0 ? { references: [...context.references] } : {}),
     disableFileAccess: true,
     disableUrlAccess: true,
-  }, input.text, content, true);
+  }, body, content, true);
 }
 
 function toBase64Url(value: Buffer): string {

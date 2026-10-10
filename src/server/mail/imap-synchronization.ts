@@ -69,6 +69,30 @@ export function imapSynchronization(operations: ImapSyncOperations): MailSynchro
           version: 1, accountId: account.accountId, mailbox: scope.mailbox,
           uidValidity: mailbox.uidValidity.toString(), modseq: null, through: 0, scan: null,
         };
+        const fetchSummaries = async (uids: number[]): Promise<ProviderMessageSummary[]> => {
+          const messages = uids.length ? await operations.summaries(client, mailbox, uids) : [];
+          const expected = new Set(uids);
+          for (const message of messages) {
+            if (message.ref.accountId !== account.accountId || message.ref.mailbox !== scope.mailbox
+              || message.ref.uidValidity !== checkpoint.uidValidity || !expected.delete(message.ref.uid)) {
+              throw new Error("IMAP FETCH returned unexpected or duplicate UID");
+            }
+          }
+          if (expected.size) throw new Error("IMAP FETCH did not cover every requested UID");
+          signal.throwIfAborted();
+          return messages;
+        };
+        // New mail sits above the last completed scan; ingest it before rescanning the whole mailbox.
+        if (checkpoint.scan === null && checkpoint.through > 0 && mailbox.uidNext - 1 > checkpoint.through) {
+          const ceiling = mailbox.uidNext - 1;
+          const found = await searchPage(client, { uid: `${checkpoint.through + 1}:${ceiling}` }, limit + 1, checkpoint.through + 1, ceiling);
+          const uids = found.slice(0, limit);
+          const messages = await fetchSummaries(uids);
+          return largestFittingPage(uids.length, length => ({
+            messages: messages.slice(0, length), removed: [], hasMore: true, coverage: "complete",
+            cursor: JSON.stringify({ ...checkpoint, through: length === found.length ? ceiling : uids[length - 1]! }),
+          }));
+        }
         const starting = checkpoint.scan === null;
         const scan = checkpoint.scan ?? { generation: randomUUID(), last: 0, ceiling: mailbox.uidNext - 1, modseq };
         const selected = scan.last < scan.ceiling
@@ -85,16 +109,7 @@ export function imapSynchronization(operations: ImapSyncOperations): MailSynchro
           const modified = new Set(modifications);
           changed = uids.filter(uid => uid > checkpoint.through || modified.has(uid));
         }
-        const messages = changed.length ? await operations.summaries(client, mailbox, changed) : [];
-        const expected = new Set(changed);
-        for (const message of messages) {
-          if (message.ref.accountId !== account.accountId || message.ref.mailbox !== scope.mailbox
-            || message.ref.uidValidity !== checkpoint.uidValidity || !expected.delete(message.ref.uid)) {
-            throw new Error("IMAP FETCH returned unexpected or duplicate UID");
-          }
-        }
-        if (expected.size) throw new Error("IMAP FETCH did not cover every requested UID");
-        signal.throwIfAborted();
+        const messages = await fetchSummaries(changed);
         const pageForPrefix = (length: number): SyncPage => {
           const emitted = uids.slice(0, length);
           const last = emitted.at(-1) ?? scan.last;
@@ -113,20 +128,7 @@ export function imapSynchronization(operations: ImapSyncOperations): MailSynchro
             }],
           };
         };
-        const full = pageForPrefix(uids.length);
-        if (pageFits(full)) return full;
-        let fitting: SyncPage | undefined;
-        let low = 1;
-        let high = uids.length - 1;
-        while (low <= high) {
-          const middle = Math.floor((low + high) / 2);
-          const candidate = pageForPrefix(middle);
-          if (pageFits(candidate)) { fitting = candidate; low = middle + 1; }
-          else high = middle - 1;
-        }
-        // Skipping or trimming an unrepresentable message would lose identity or falsely advance coverage.
-        if (!fitting) throw new SynchronizationError("invalid-data");
-        return fitting;
+        return largestFittingPage(uids.length, pageForPrefix);
       }, signal);
     },
   };
@@ -141,6 +143,23 @@ function parseCursor(serialized: string | null, accountId: string, mailbox: stri
     if (cursor.scan && (cursor.scan.last >= cursor.scan.ceiling || cursor.scan.ceiling < cursor.through)) return null;
     return cursor;
   } catch { return null; }
+}
+
+function largestFittingPage(length: number, pageForPrefix: (length: number) => SyncPage): SyncPage {
+  const full = pageForPrefix(length);
+  if (pageFits(full)) return full;
+  let fitting: SyncPage | undefined;
+  let low = 1;
+  let high = length - 1;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = pageForPrefix(middle);
+    if (pageFits(candidate)) { fitting = candidate; low = middle + 1; }
+    else high = middle - 1;
+  }
+  // Skipping or trimming an unrepresentable message would lose identity or falsely advance coverage.
+  if (!fitting) throw new SynchronizationError("invalid-data");
+  return fitting;
 }
 
 function pageFits(page: SyncPage): boolean {

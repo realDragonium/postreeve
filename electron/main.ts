@@ -161,6 +161,8 @@ async function proxyBackendRequest(request: Request, session: DesktopSession): P
     headers,
     method: request.method,
     redirect: "manual",
+    // Ends the sidecar request, such as the mailbox event stream, when the renderer abandons it.
+    signal: request.signal,
   };
   if (methodHasBody) requestInit.body = await request.arrayBuffer();
   return net.fetch(backendUrl.toString(), requestInit);

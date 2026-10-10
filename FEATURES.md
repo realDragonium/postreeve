@@ -37,7 +37,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Show total and unread folder counts | Complete | Complete | Returned by `list_folders`. |
 | Open Inbox, Sent, Drafts, Spam, Trash, and custom folders | Complete | Complete | `list_messages` opens the same account and folder in the UI. |
 | Manually refresh the mailbox | Complete | Equivalent | List/search query the synchronized index and report coverage; incomplete coverage uses bounded provider fallback. Full reads request provider data. |
-| Detect changed folder counts in the open UI | Complete | Equivalent | The UI polls folder metadata; an agent can call `list_folders` again. |
+| Detect changed folder counts in the open UI | Complete | Equivalent | Synchronization pushes mailbox-change events to the page, which refetches lists and counts; the UI also polls folder metadata every 15 seconds. An agent can call `list_folders` again. |
 | Load more messages | Complete, cursor pages | Complete, cursor pages | `list_messages.cursor` / `search_messages.cursor`; one backend cursor across unified sources. |
 | Create provider folders or Gmail labels | Complete | Complete | `create_folder` updates the provider and the open UI. |
 | Rename custom provider folders or Gmail labels | Complete | Complete | `rename_folder` preserves an IMAP folder's parent path and updates the open UI. |
@@ -60,6 +60,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Render sanitized HTML mail | Complete | Equivalent | WebMCP receives message content rather than rendering it. |
 | Block remote images in displayed HTML | Complete | Equivalent | This is a UI privacy control; WebMCP does not load message images. |
 | Show plain-text mail | Complete | Complete | Returned by `read_messages`. |
+| Unsubscribe from a mailing list | Complete | Not available | The reader offers Unsubscribe from `List-Unsubscribe`: RFC 8058 one-click POST, an email from the delivered identity, or opening the link, always after a human confirmation. Agents can see the options in `read_messages` but cannot unsubscribe, because that confirmation cannot pass through WebMCP. |
 
 ## Message selection and actions
 
@@ -70,6 +71,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Mark as read | Complete | Complete | `apply_message_actions` with `mark_read`. |
 | Mark as unread | Complete | Complete | `apply_message_actions` with `mark_unread`. |
 | Archive | Complete | Complete | Move to the account's archive folder. |
+| Report spam or mark not spam | Complete | Complete | `apply_message_actions` with `move` to the account's junk folder, or from it to the inbox. The UI offers Spam / Not spam buttons and the `!` shortcut. No `$Junk` keywords are set. |
 | Move to another folder | Complete | Complete | `apply_message_actions` with `move`. |
 | Move to Trash | Complete | Complete | `apply_message_actions` with `trash`. |
 | Permanently delete mail | Not available | Not available | Not implemented. Trash currently means moving to the provider's Trash folder. |
@@ -87,6 +89,7 @@ Every WebMCP mutation revalidates the stable message reference, records an audit
 | Add Cc recipients | Complete | Complete | `send_message.cc` |
 | Add Bcc recipients | Complete | Complete | `send_message.bcc` |
 | Validate recipient addresses | Complete | Complete | UI and WebMCP inputs reject invalid addresses. |
+| Suggest recipients from mail history | Complete | Not covered | To, Cc and Bcc suggest addresses from synchronized headers across all accounts, ranked by sends, then received mail and recency, without your own addresses. Arrow keys move, Enter or Tab accepts, Escape closes. Local data only; `send_message` takes explicit addresses. |
 | Show accepted and rejected recipients | Complete | Complete | Returned in the send receipt. |
 | Keep a copy of IMAP/SMTP sends in Sent | Complete | Complete | `send_message` uses the same send path. The per-account **Save a copy to Sent** setting is UI-only and starts off for Gmail and Outlook hosts, which file sent mail themselves. |
 | Require approval before an agent sends real mail | Not applicable | Complete contract requirement | The `send_message` description requires explicit approval of recipients, subject, and message before invocation. |
@@ -95,6 +98,8 @@ Every WebMCP mutation revalidates the stable message reference, records an audit
 | Forward | Partial | Not available | The editor builds forwarded content, but sending is blocked. |
 | Send from an alternate identity or catch-all alias | Complete | Not available | Drafts send from a stored identity over SMTP and Gmail. Gmail requires the address under Send mail as. Replies default to the identity the message was delivered to. `send_message` sends from the primary address only. |
 | Add attachments | Partial | Not available | The UI records local attachment metadata, but files are not uploaded or sent. |
+| Compose rich text (bold, italic, links, lists, quotes) | Complete | Not available | Sent as `multipart/alternative`: HTML sanitized by the server against an allowlist plus a generated plain-text part. A plain-text mode remains. `send_message` stays plain text so agent-approved messages are exactly the text the person reviewed. |
+| Quote the original HTML in replies and forwards | Complete | Not available | Quoted with the reader's sanitizer; style sheets and remote images are dropped, so composing never fetches remote content. |
 
 Sending is a real external side effect. WebMCP exposes the same basic send operation as the UI, but it does not send drafts, replies, forwards, attachments, or alternate identities that the UI itself cannot send.
 
@@ -109,6 +114,7 @@ Sending is a real external side effect. WebMCP exposes the same basic send opera
 | Synchronize provider drafts | Not available | Not available | No IMAP or Gmail draft implementation exists. |
 | Add or remove an identity | Complete | Not available | Stored per account on the server; browser-local identities migrate once. |
 | Select an alternate From identity | Complete | Not available | Sending is disabled for an address that is not an identity of the account. |
+| Per-identity signatures | Complete | Not available | One signature per sending address, edited in the identity sheet and stored on the server. Compose inserts it and swaps it when From changes, unless the signature was edited. |
 
 These features are not provider-backed today. Whether and how they should be exposed through WebMCP remains an open product decision.
 
@@ -138,7 +144,9 @@ These features are not provider-backed today. Whether and how they should be exp
 | Inspect account synchronization health and retention policy | Complete | Complete | `inspect_synchronization`; reads local evidence. |
 | Retry account synchronization safely | Complete | Complete | `retry_synchronization`; does not mutate provider mail. |
 | Request human reauthorization instructions | Complete | Complete | `request_reauthorization`; consent and credentials stay in the human authorization flow. |
-| Bounded preview/body retention | Complete | Complete | Defaults to 30 days since refresh and 100 MiB per account. Retained preview and searchable body text expire together. Headers, locations, canonical identities and workflow history remain retained; this is not a total database-size limit. |
+| Receive new mail promptly | Complete | Not applicable | IMAP accounts hold one IDLE connection on INBOX and synchronize it as soon as the server reports a change, falling back to the 60-second poll without IDLE. Gmail history is polled every 20 seconds. |
+| Desktop notifications for new mail | Complete | Not applicable | **Settings → Notifications** turns notifications on and mutes accounts. Unread Inbox arrivals notify while the window is in the background; clicking opens the message. Backfill and repair do not notify. Page-local presentation, not an agent workflow. |
+| Bounded preview/body retention | Complete | Complete | Defaults to 30 days since refresh and 100 MiB per account. Retained preview and searchable body text expire together. Headers, locations, canonical identities and workflow history remain retained, so recipient suggestions survive preview expiry and disappear only when the message leaves the index or its account is removed; this is not a total database-size limit. |
 
 ## Current WebMCP tool set
 

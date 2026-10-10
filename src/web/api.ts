@@ -13,10 +13,13 @@ import {
   canonicalConversationSchema,
   draftSchema,
   identitySchema,
+  signatureSchema,
   outgoingMailLimitsSchema,
   operationBatchSchema,
   proposalSchema,
+  recipientSuggestionSchema,
   sendReceiptSchema,
+  unsubscribeResultSchema,
   type Account,
   type AccountDiscovery,
   type AccountSettings,
@@ -25,9 +28,13 @@ import {
   type CreateProposalInput,
   type DeleteFolderInput,
   type DirectActionInput,
+  type UnsubscribeInput,
+  type UnsubscribeResult,
   type Folder,
   type CreateIdentityInput,
   type Identity,
+  type PutSignatureInput,
+  type Signature,
   type CanonicalMessageDetail,
   type CanonicalMessageSummary,
   type CanonicalConversation,
@@ -38,6 +45,7 @@ import {
   type ReceivedAttachment,
   type OperationBatch,
   type Proposal,
+  type RecipientSuggestion,
   type RenameFolderInput,
   type SendMessageInput,
   type SendReceipt,
@@ -193,11 +201,21 @@ export const api = {
       ...jsonBody({ path: input.path }),
       ...withSignal(signal),
     }),
+  recipientSuggestions: (query: string, signal?: AbortSignal): Promise<RecipientSuggestion[]> =>
+    request(`/recipient-suggestions?${new URLSearchParams({ q: query })}`, recipientSuggestionSchema.array(), withSignal(signal)),
   identities: (accountId: string, signal?: AbortSignal): Promise<Identity[]> =>
     request(`/accounts/${encodeURIComponent(accountId)}/identities`, identitySchema.array(), withSignal(signal)),
   addIdentity: (accountId: string, input: CreateIdentityInput, signal?: AbortSignal): Promise<Identity> =>
     request(`/accounts/${encodeURIComponent(accountId)}/identities`, identitySchema, {
       method: "POST",
+      ...jsonBody(input),
+      ...withSignal(signal),
+    }),
+  signatures: (accountId: string, signal?: AbortSignal): Promise<Signature[]> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/signatures`, signatureSchema.array(), withSignal(signal)),
+  putSignature: (accountId: string, input: PutSignatureInput, signal?: AbortSignal): Promise<Signature> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/signatures`, signatureSchema, {
+      method: "PUT",
       ...jsonBody(input),
       ...withSignal(signal),
     }),
@@ -292,6 +310,8 @@ export const api = {
       ...jsonBody(input),
       ...withSignal(signal),
     }),
+  unsubscribe: (input: UnsubscribeInput): Promise<UnsubscribeResult> =>
+    request("/messages/unsubscribe", unsubscribeResultSchema, { method: "POST", ...jsonBody(input) }),
   applyDirectActions: (input: DirectActionInput, signal?: AbortSignal): Promise<OperationBatch> =>
     request("/messages/actions", operationBatchSchema, {
       method: "POST",

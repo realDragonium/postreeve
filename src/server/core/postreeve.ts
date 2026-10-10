@@ -10,6 +10,7 @@ import {
   type OutgoingAttachment,
 } from "../mail/outgoing-content";
 import { buildProviderDraftMessage } from "../mail/provider-draft";
+import { htmlToPlainText, sanitizeOutgoingHtml } from "../mail/outgoing-html";
 import type {
   Account,
   AccountSettings,
@@ -27,6 +28,10 @@ import type {
   DraftVersionInput,
   Folder,
   Identity,
+  RecipientSuggestion,
+  RecipientSuggestionQuery,
+  PutSignatureInput,
+  Signature,
   CreateIdentityInput,
   ListMessagesInput,
   MessageRef,
@@ -36,6 +41,8 @@ import type {
   Proposal,
   TriageAction,
   ProviderDraftRef,
+  UnsubscribeInput,
+  UnsubscribeResult,
   RenameFolderInput,
   SendMessageInput,
   SendReceipt,
@@ -47,6 +54,7 @@ import {
   createFolderInputSchema,
   createDraftInputSchema,
   createIdentityInputSchema,
+  putSignatureInputSchema,
   createProposalInputSchema,
   deleteFolderInputSchema,
   directActionInputSchema,
@@ -56,6 +64,7 @@ import {
   renameFolderInputSchema,
   sendMessageInputSchema,
   sendReceiptSchema,
+  unsubscribeInputSchema,
   updateDraftInputSchema,
   updateProposalInputSchema,
 } from "../../shared/contracts";
@@ -88,6 +97,8 @@ import {
   safeAttachmentMediaType,
 } from "./attachment-reference";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
+import { mailtoUnsubscribe, postOneClickUnsubscribe, type UnsubscribeFetch } from "../mail/unsubscribe";
+import { defaultFromAddress } from "../../shared/identities";
 import {
   CredentialVault,
   type AccountCredentials,
@@ -109,6 +120,8 @@ export interface PostreeveContext {
   maxUploadBytes?: number;
   maxMessageBytes?: number;
   synchronization?: SynchronizationOptions;
+  /** Performs RFC 8058 one-click POSTs; defaults to the global fetch. */
+  unsubscribeFetch?: UnsubscribeFetch;
 }
 
 export const DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -560,6 +573,10 @@ export class PostreeveService {
     };
   }
 
+  recipientSuggestions(query: RecipientSuggestionQuery): RecipientSuggestion[] {
+    return this.#store.recipientSuggestions(this.#context.tenantId, query, new Date());
+  }
+
   async listIdentities(accountId: string): Promise<Identity[]> {
     await this.#requireAccount(accountId);
     return this.#store.listIdentities(this.#context.tenantId, accountId);
@@ -583,9 +600,27 @@ export class PostreeveService {
     await this.#store.removeIdentity(this.#context.tenantId, accountId, id);
   }
 
+  async listSignatures(accountId: string): Promise<Signature[]> {
+    await this.#requireAccount(accountId);
+    return this.#store.listSignatures(this.#context.tenantId, accountId);
+  }
+
+  async putSignature(accountId: string, rawInput: PutSignatureInput): Promise<Signature> {
+    const input = putSignatureInputSchema.parse(rawInput);
+    const account = await this.#requireAccount(accountId);
+    const own = input.address === account.email.toLowerCase()
+      || (await this.#store.listIdentities(this.#context.tenantId, accountId)).some(({ address }) => address === input.address);
+    if (!own) throw new Error("Signatures can only be set for the account's own addresses");
+    const signature = { address: input.address, html: input.html.trim() ? input.html : "" };
+    await this.#store.putSignature(this.#context.tenantId, accountId, signature, new Date().toISOString());
+    return signature;
+  }
+
   async sendMessage(rawInput: SendMessageInput): Promise<SendReceipt> {
     const input = sendMessageInputSchema.parse(rawInput);
-    return this.#dispatchMessageSend(await this.#prepareMessageSend(input));
+    const prepared = await this.#prepareMessageSend(input);
+    const dispatched = await this.#dispatchMessageSend(prepared);
+    return this.#saveSentCopy(prepared.account, dispatched.receipt, dispatched.mime);
   }
 
   async createDraft(rawInput: CreateDraftInput): Promise<Draft> {
@@ -769,17 +804,18 @@ export class PostreeveService {
         ? { type: draft.mode, source: draft.source }
         : null;
     if (!intent) throw new Error("Conversation draft source was not found");
+    const html = draft.format === "html" ? sanitizeOutgoingHtml(draft.body) : undefined;
     const input = sendMessageInputSchema.parse({
       accountId,
       to: draftRecipientsForSend(draft.to),
       cc: draftRecipientsForSend(draft.cc),
       bcc: draftRecipientsForSend(draft.bcc),
       subject: draft.subject,
-      text: draft.body,
+      text: html === undefined ? draft.body : htmlToPlainText(html),
       intent,
     });
     const files = await this.#store.draftFiles(this.#context.tenantId, accountId, draft);
-    const prepared = await this.#prepareMessageSend(input, from);
+    const prepared = await this.#prepareMessageSend(input, from, html);
     const claim = await this.#store.claimDraftSend(
       this.#context.tenantId,
       accountId,
@@ -791,8 +827,9 @@ export class PostreeveService {
     if (claim.kind === "sent") return claim.receipt;
 
     let receipt: SendReceipt;
+    let mime: Buffer;
     try {
-      receipt = await this.#dispatchMessageSend(prepared, files);
+      ({ receipt, mime } = await this.#dispatchMessageSend(prepared, files));
     } catch (error) {
       const failedAt = new Date().toISOString();
       try {
@@ -834,8 +871,9 @@ export class PostreeveService {
         receipt,
         draftClaimOwner,
       );
+      const settledReceipt = await this.#saveSettledSentCopy(prepared.account, settled, receipt, mime);
       const warning = await this.#cleanupProviderDraft(settled);
-      return warning ? withReceiptWarning(receipt, warning) : receipt;
+      return warning ? withReceiptWarning(settledReceipt, warning) : settledReceipt;
     } catch (settlementError) {
       const recoveredAt = new Date().toISOString();
       let recoveryError: unknown;
@@ -865,13 +903,14 @@ export class PostreeveService {
         recoveryError = error;
       }
       const recovered = await this.#store.getDraft(this.#context.tenantId, accountId, id);
+      const copied = await this.#saveSentCopy(prepared.account, receipt, mime);
       const cleanupWarning = receipt.accepted.length > 0 && recovered
         ? await this.#cleanupProviderDraft(recovered)
         : undefined;
       return sendReceiptSchema.parse({
         ...receipt,
         warning: [
-          receipt.warning,
+          copied.warning,
           `Delivery completed, but the local draft receipt could not be stored: ${errorMessage(settlementError)}.`,
           recoveryError
             ? `Its recoverable delivery state also could not be stored: ${errorMessage(recoveryError)}. Automatic retry remains blocked.`
@@ -1180,9 +1219,13 @@ export class PostreeveService {
     return { name: identity.name || storedName, address: identity.address };
   }
 
-  async #prepareMessageSend(sendInput: SendMessageInput, from?: OutboundAddress): Promise<PreparedMessageSend> {
+  async #prepareMessageSend(sendInput: SendMessageInput, from?: OutboundAddress, html?: string): Promise<PreparedMessageSend> {
     const account = await this.#requireAccount(sendInput.accountId);
-    const input: OutgoingMessage = { ...sendInput, from: from ?? { name: account.name, address: account.email } };
+    const input: OutgoingMessage = {
+      ...sendInput,
+      from: from ?? { name: account.name, address: account.email },
+      ...(html === undefined ? {} : { html }),
+    };
     const sender = this.#senders.forAccount(input.accountId);
     const intent = input.intent ?? { type: "new" as const };
     if (intent.type === "new") return { account, input, sender };
@@ -1280,7 +1323,10 @@ export class PostreeveService {
     return { account, input, sender, context };
   }
 
-  async #dispatchMessageSend(prepared: PreparedMessageSend, files: readonly OutgoingAttachment[] = []): Promise<SendReceipt> {
+  async #dispatchMessageSend(
+    prepared: PreparedMessageSend,
+    files: readonly OutgoingAttachment[] = [],
+  ): Promise<{ receipt: SendReceipt; mime: Buffer }> {
     const sent = await prepared.sender.send(prepared.input, prepared.context, {
       files, maxMessageBytes: this.outgoingMailLimits.maxMessageBytes,
     });
@@ -1288,15 +1334,26 @@ export class PostreeveService {
     if (receipt.accountId !== prepared.input.accountId) {
       throw new Error("Mail sender returned a receipt for another account");
     }
-    if (receipt.accepted.length === 0) return receipt;
+    if (receipt.accepted.length === 0) return { receipt, mime: sent.mime };
     const recorded = prepared.context
       ? await this.#recordConversationSend(prepared.input.accountId, prepared.account.kind, receipt, prepared.context)
       : receipt;
-    return this.#saveSentCopy(prepared.account, recorded, sent.mime);
+    return { receipt: recorded, mime: sent.mime };
+  }
+
+  async #saveSettledSentCopy(account: StoredAccount, settled: Draft, receipt: SendReceipt, mime: Buffer): Promise<SendReceipt> {
+    const copied = await this.#saveSentCopy(account, receipt, mime);
+    if (copied.warning === receipt.warning || settled.delivery.status !== "sent") return copied;
+    try {
+      await this.#store.updateSentDraftReceipt(this.#context.tenantId, settled.accountId, settled.id, copied);
+    } catch {
+      // The response still carries the warning; the draft itself is already recorded as sent.
+    }
+    return copied;
   }
 
   async #saveSentCopy(account: StoredAccount, receipt: SendReceipt, mime: Buffer): Promise<SendReceipt> {
-    if (account.kind !== "imap") return receipt;
+    if (account.kind !== "imap" || receipt.accepted.length === 0) return receipt;
     try {
       const credentials = this.#credentialsFor(account);
       if (credentials.kind !== "imap" || !credentials.smtp || !savesSentCopy(credentials.imap.host, credentials.smtp)) {
@@ -1316,6 +1373,33 @@ export class PostreeveService {
     } catch (error) {
       return withReceiptWarning(receipt, `Message was sent, but a copy could not be saved to Sent: ${errorMessage(error)}`);
     }
+  }
+
+  /** Acts only on the re-read message's own `List-Unsubscribe` options; the UI confirms with the person first. */
+  async unsubscribe(rawInput: UnsubscribeInput): Promise<UnsubscribeResult> {
+    const input = unsubscribeInputSchema.parse(rawInput);
+    const [detail] = await this.readMessages([input.message]);
+    const options = detail?.unsubscribe;
+    if (input.method === "one_click") {
+      if (!options?.oneClick || !options.https) throw new Error("This message does not offer one-click unsubscribe");
+      await postOneClickUnsubscribe(this.#context.unsubscribeFetch ?? fetch, options.https);
+      return { method: "one_click", target: options.https };
+    }
+    if (!detail || !options?.mailto) throw new Error("This message does not offer email unsubscribe");
+    const mail = mailtoUnsubscribe(options.mailto);
+    const accountId = input.message.accountId;
+    const account = await this.#requireAccount(accountId);
+    const identities = await this.#store.listIdentities(this.#context.tenantId, accountId);
+    const from = await this.#draftSender(accountId, { name: "", address: defaultFromAddress(detail, account, identities) });
+    const prepared = await this.#prepareMessageSend(sendMessageInputSchema.parse({
+      accountId,
+      to: [{ name: "", address: mail.address }],
+      subject: mail.subject,
+      text: mail.body,
+    }), from);
+    const dispatched = await this.#dispatchMessageSend(prepared);
+    const receipt = await this.#saveSentCopy(prepared.account, dispatched.receipt, dispatched.mime);
+    return { method: "mailto", target: mail.address, receipt };
   }
 
   async applyDirectActions(rawInput: DirectActionInput): Promise<OperationBatch> {

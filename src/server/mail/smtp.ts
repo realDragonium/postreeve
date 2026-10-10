@@ -10,7 +10,7 @@ import {
   sendMessageInputSchema,
   sendReceiptSchema,
 } from "../../shared/contracts";
-import type { ConversationSendContext, MailSender, OutgoingMessage, SentMessage } from "./sender";
+import { outgoingBody, type ConversationSendContext, type MailSender, type OutgoingMessage, type SentMessage } from "./sender";
 
 const smtpAccountConfigSchema = z.object({
   accountId: z.string().min(1),
@@ -100,7 +100,7 @@ export class SmtpMailSender implements MailSender {
         ...(reply && reply.references.length > 0 ? { references: [...reply.references] } : {}),
         disableFileAccess: true,
         disableUrlAccess: true,
-      }, input.text, content);
+      }, outgoingBody(rawInput), content);
     } catch (error) {
       throw new MailSendPreDispatchError(error instanceof Error ? error.message : "Mail preparation failed", { cause: error });
     }

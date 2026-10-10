@@ -1,7 +1,7 @@
 import type { Folder, MessageSummary, TriageAction } from "../shared/contracts";
 import type { MessageFilter, MessageSort } from "./mail-ui-state";
 import { formatListTime } from "./format";
-import { messageIsSelected, messageKey, messageMatchesKey, senderName } from "./mail-view";
+import { messageIsSelected, messageKey, messageMatchesKey, planFolderAction, senderName, spamToggle, type FolderIntent } from "./mail-view";
 import type { MessageProvenance } from "./provenance";
 import { provenanceKey } from "./provenance";
 import { railFor } from "./theme";
@@ -18,6 +18,8 @@ export interface MessageListProps {
   messages: readonly MessageSummary[];
   provenance: ReadonlyMap<string, MessageProvenance>;
   folders: readonly Folder[];
+  /** Archive and Spam resolve their destination from each selected message's own account. */
+  foldersByAccount: ReadonlyMap<string, readonly Folder[]>;
   loading: boolean;
   error: string | null;
   focus: number;
@@ -36,6 +38,7 @@ export interface MessageListProps {
   onOpen: (message: MessageSummary) => void;
   onSelect: (message: MessageSummary, modifiers: { toggle: boolean; range: boolean }) => void;
   onBulk: (action: TriageAction) => void;
+  onFolderAction: (intent: FolderIntent) => void;
   onAcceptProposal: (proposalId: string) => void;
   onCompose: () => void;
   onLoadMore: () => void;
@@ -51,10 +54,15 @@ export function MessageList(props: MessageListProps) {
 
   const focused = props.messages[props.focus];
   const focusedProposal = focused ? props.provenance.get(provenanceKey(focused.ref)) : undefined;
-  const selectionCount = props.messages.filter((message) => messageIsSelected(message, props.selected)).length;
-  const archive = props.folders.find((folder) => folder.specialUse === "archive");
+  const selection = props.messages.filter((message) => messageIsSelected(message, props.selected));
+  const selectionCount = selection.length;
+  const archive = planFolderAction(selection, "archive", props.foldersByAccount);
   const destinations = props.folders.filter((folder) => folder.specialUse !== "trash");
   const hasTrash = props.folders.some((folder) => folder.specialUse === "trash");
+  const firstSelected = selection[0];
+  const spamLabel = firstSelected ? spamToggle(firstSelected, props.foldersByAccount.get(firstSelected.ref.accountId) ?? []).label : null;
+  const spamIntent: FolderIntent = spamLabel === "Not spam" ? "not_spam" : "spam";
+  const spam = planFolderAction(selection, spamIntent, props.foldersByAccount);
 
   return <>
     <div className="scope">
@@ -73,7 +81,8 @@ export function MessageList(props: MessageListProps) {
           <button className="btn" onClick={() => props.onAcceptProposal(focusedProposal.proposalId!)}>Accept proposal</button>
         ) : null}
         {selectionCount > 0 ? <>
-          <button className="chip" disabled={props.busy || !archive} title={archive ? undefined : "This account has no Archive folder"} onClick={() => archive && props.onBulk({ type: "move", destination: archive.path })}>Archive</button>
+          <button className="chip" disabled={props.busy || archive.items.length === 0} title={archive.items.length === 0 && archive.missingFolder > 0 ? "This account has no Archive folder" : undefined} onClick={() => props.onFolderAction("archive")}>Archive</button>
+          {spamLabel ? <button className="chip" disabled={props.busy || spam.items.length === 0} title={spam.items.length === 0 && spam.missingFolder > 0 ? "This account has no Junk folder" : undefined} onClick={() => props.onFolderAction(spamIntent)}>{spamLabel}</button> : null}
           <button className="chip" disabled={props.busy} onClick={() => props.onBulk({ type: "mark_read" })}>Mark read</button>
           <button className="chip" disabled={props.busy} onClick={() => props.onBulk({ type: "mark_unread" })}>Unread</button>
           <button className="chip" disabled={props.busy} onClick={() => props.onBulk({ type: "flag" })}>Flag</button>
@@ -143,7 +152,7 @@ export function MessageList(props: MessageListProps) {
     </div>
 
     <div className="hintbar">
-      <span className="t-dim">click or ↵ open · j k move · x multi-select · ⌘-click add · shift-click range · e archive · u unread · s flag · / search · ⌘Z undo</span>
+      <span className="t-dim">click or ↵ open · j k move · x multi-select · ⌘-click add · shift-click range · e archive · ! spam · u unread · s flag · / search · ⌘Z undo</span>
     </div>
   </>;
 }

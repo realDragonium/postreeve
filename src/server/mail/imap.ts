@@ -1,5 +1,6 @@
 import type { ProviderDraftInput } from "./provider";
 import { imapSynchronization } from "./imap-synchronization";
+import { defaultIdleClientFactory, watchImapInbox, type IdleClientFactory } from "./imap-idle";
 import { ImapSearchEvidence } from "./imap-search-evidence";
 import {
   ImapFlow,
@@ -36,6 +37,7 @@ import type {
   MailProvider,
   ProviderLocationMove,
   ProviderMessageDetail,
+  ProviderWatch,
   ProviderMessageSummary,
   ProviderDraft,
   ProviderDraftScope,
@@ -46,6 +48,7 @@ import type {
 import { safeAttachmentFilename, safeAttachmentMediaType } from "../core/attachment-reference";
 import { buildProviderDraftMessage, parseProviderDraftMarkers } from "./provider-draft";
 import { normalizeIdentificationFields, normalizeReferenceSequences } from "./message-id";
+import { unsubscribeOptions } from "./unsubscribe";
 
 export interface ImapAccountConfig {
   accountId: string;
@@ -131,21 +134,43 @@ const providerDraftMarkerHeaders: string[] = [
 
 type ListedProviderDraft = ProviderDraft & { readonly deleted: boolean };
 
-const defaultClientFactory: ImapClientFactory = (options) => new ImapFlow(options);
+type ImapTimeouts = Pick<ImapFlowOptions, "connectionTimeout" | "greetingTimeout" | "socketTimeout">;
+// A send has already been delivered when its copy is appended, so a stalled server must not hold it for imapflow's five-minute default.
+const SENT_COPY_TIMEOUTS: ImapTimeouts = { connectionTimeout: 30_000, greetingTimeout: 16_000, socketTimeout: 60_000 };
+
+const defaultClientFactory: ImapClientFactory = (options) => {
+  const client = new ImapFlow(options);
+  // A connection error such as a socket timeout closes the client, which rejects the pending command; an unhandled
+  // 'error' event would instead crash the server.
+  client.on("error", () => {});
+  return client;
+};
 
 export class ImapMailProvider implements MailProvider {
   readonly #config: ImapAccountConfig;
   readonly #createClient: ImapClientFactory;
+  readonly #createIdleClient: IdleClientFactory;
   readonly synchronization;
 
-  constructor(config: ImapAccountConfig, createClient: ImapClientFactory = defaultClientFactory) {
+  constructor(config: ImapAccountConfig, createClient: ImapClientFactory = defaultClientFactory,
+    createIdleClient: IdleClientFactory = defaultIdleClientFactory) {
     if (!config.accountId) throw new Error("An IMAP account ID is required");
     this.#config = { ...config };
     this.#createClient = createClient;
+    this.#createIdleClient = createIdleClient;
     this.synchronization = imapSynchronization({
       accountId: config.accountId,
       withClient: (operation, signal) => this.#withClient(operation, signal),
       summaries: (client, mailbox, uids) => this.#fetchSummaries(client, mailbox, uids, true),
+    });
+  }
+
+  watchChanges(onChange: (mailbox: string) => void): ProviderWatch {
+    return watchImapInbox({
+      connection: { host: this.#config.host, port: this.#config.port, secure: this.#config.secure,
+        auth: { user: this.#config.username, pass: this.#config.password } },
+      createClient: this.#createIdleClient,
+      onChange,
     });
   }
 
@@ -212,7 +237,7 @@ export class ImapMailProvider implements MailProvider {
       if (opened.uidValidity !== appended.uidValidity) return null;
       const [summary] = await this.#fetchSummaries(client, opened, [appended.uid], true);
       return summary ?? null;
-    });
+    }, undefined, SENT_COPY_TIMEOUTS);
   }
 
   async createDraft(scope: ProviderDraftScope, draft: ProviderDraftInput): Promise<ProviderDraftRef> {
@@ -742,7 +767,11 @@ export class ImapMailProvider implements MailProvider {
     return summaries;
   }
 
-  async #withClient<T>(operation: (client: ImapClient) => Promise<T>, signal?: AbortSignal): Promise<T> {
+  async #withClient<T>(
+    operation: (client: ImapClient) => Promise<T>,
+    signal?: AbortSignal,
+    timeouts: ImapTimeouts = {},
+  ): Promise<T> {
     signal?.throwIfAborted();
     const searchEvidence = signal ? new ImapSearchEvidence() : undefined;
     const client = this.#createClient({
@@ -752,6 +781,7 @@ export class ImapMailProvider implements MailProvider {
       auth: { user: this.#config.username, pass: this.#config.password },
       logger: searchEvidence?.logger ?? false,
       qresync: true,
+      ...timeouts,
     });
 
     if (searchEvidence) {
@@ -1073,9 +1103,11 @@ function toDetail(
   parsed: ParsedMail,
   rendered: { text: string; html: string | null; attachments: ProviderAttachment[] },
 ): ProviderMessageDetail {
+  const unsubscribe = unsubscribeOptions(parsed.headerLines);
   return {
     ...toSummary(accountId, mailboxPath, mailbox, message, parsed),
     ...rendered,
+    ...(unsubscribe ? { unsubscribe } : {}),
   };
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
   Account,
@@ -6,10 +6,12 @@ import type {
   CreateAccountInput,
   Draft,
   DraftAttachment,
+  DraftBodyFormat,
   DraftContent,
   Folder,
   Identity,
   OutboundAddress,
+  Signature,
   SendReceipt,
   UpdateAccountInput,
 } from "../shared/contracts";
@@ -27,6 +29,10 @@ import {
 import type { ComposeMode } from "./mail-ui-state";
 import { defaultFromAddress, ownAddresses } from "./identities";
 import { DraftSaveQueue } from "./draft-state";
+import { RecipientInput } from "./RecipientInput";
+import { htmlForward, htmlReplyQuote, plainForward, swapPlainSignature, swapRichSignature, textToHtml } from "./compose-body";
+import { htmlToText, sanitizeComposeHtml } from "./html-sanitizer";
+import { RichTextEditor } from "./RichTextEditor";
 
 export interface ComposeIntent {
   readonly mode: ComposeMode;
@@ -126,7 +132,30 @@ export function IdentitySheet({ account, identities, onChange, onClose }: {
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [signatureOpen, setSignatureOpen] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const signatures = useQuery({ queryKey: ["signatures", account.id], queryFn: () => api.signatures(account.id) });
   const valid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  function signatureToggle(address: string) {
+    const open = signatureOpen === address;
+    return <button type="button" className="btn-underline" style={{ marginLeft: "auto" }} aria-expanded={open} aria-label={`Signature for ${address}`} onClick={() => setSignatureOpen(open ? null : address)}>Signature</button>;
+  }
+  function signatureEditor(address: string) {
+    if (signatureOpen !== address || !signatures.data) return null;
+    return <SignatureEditor
+      key={address}
+      initial={signatures.data.find((signature) => signature.address === address.toLowerCase())?.html ?? ""}
+      busy={busy}
+      onSave={(html) => void run(async () => {
+        const stored = await api.putSignature(account.id, { address, html });
+        queryClient.setQueryData<Signature[]>(["signatures", account.id], (current = []) => [
+          ...current.filter((signature) => signature.address !== stored.address),
+          ...stored.html ? [stored] : [],
+        ]);
+        setSignatureOpen(null);
+      })}
+    />;
+  }
   async function run(operation: () => Promise<void>): Promise<void> {
     setBusy(true);
     setError(null);
@@ -149,14 +178,18 @@ export function IdentitySheet({ account, identities, onChange, onClose }: {
     <div>
       <div style={{ display: "flex", gap: 12, borderTop: "1px solid var(--div)", padding: "10px 0" }}>
         <span className="t-ink">{account.name}</span><span className="t-dim">{account.email} · primary</span>
+        {signatureToggle(account.email)}
       </div>
+      {signatureEditor(account.email)}
       {identities.map((identity) => <div key={identity.id} style={{ display: "flex", alignItems: "center", gap: 12, borderTop: "1px solid var(--div)", padding: "10px 0" }}>
         <span className="t-ink">{identity.name}</span><span className="t-dim">{identity.address}</span>
-        <button className="btn-danger" style={{ marginLeft: "auto" }} disabled={busy} aria-label={`Remove identity ${identity.address}`} onClick={() => void run(async () => {
+        {signatureToggle(identity.address)}
+        <button className="btn-danger" disabled={busy} aria-label={`Remove identity ${identity.address}`} onClick={() => void run(async () => {
           await api.removeIdentity(account.id, identity.id);
           onChange(identities.filter(({ id }) => id !== identity.id));
+          await queryClient.invalidateQueries({ queryKey: ["signatures", account.id] });
         })}>Remove</button>
-      </div>)}
+      </div>).flatMap((row, index) => [row, signatureEditor(identities[index]!.address)])}
     </div>
     <form
       className="field-grid"
@@ -178,6 +211,14 @@ export function IdentitySheet({ account, identities, onChange, onClose }: {
     </form>
     {error ? <div className="alert error">{error}</div> : null}
   </Sheet>;
+}
+
+function SignatureEditor({ initial, busy, onSave }: { initial: string; busy: boolean; onSave: (html: string) => void }) {
+  const [html, setHtml] = useState(initial);
+  return <div style={{ display: "grid", gap: 6, paddingBottom: 10 }}>
+    <RichTextEditor label="Signature" html={html} disabled={busy} onChange={setHtml} />
+    <button type="button" className="chip" style={{ justifySelf: "start" }} disabled={busy} onClick={() => onSave(htmlToText(html).trim() ? html : "")}>Save signature</button>
+  </div>;
 }
 
 export function FolderSheet({ account, folders, onChange, onClose }: {
@@ -314,17 +355,28 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
         && all.findIndex((candidate) => candidate.toLowerCase() === address.toLowerCase()) === index)
       .join(", ")
     : "";
-  const initialBody = source
-    ? effectiveMode === "forward"
-      ? `\n\n---------- Forwarded message ----------\nFrom: ${addressList(source.from)}\nDate: ${formatDate(source.receivedAt, true)}\nSubject: ${source.subject}\nTo: ${addressList(source.to)}\n\n${source.text}`
-      : quotedMessage(source)
-    : "";
+  const [format, setFormat] = useState<DraftBodyFormat>(saved?.format ?? "html");
+  const plainQuote = source ? effectiveMode === "forward" ? plainForward(source) : quotedMessage(source) : "";
+  const [initialBody] = useState(() => {
+    if (saved) return saved.body;
+    if (format === "plain") return plainQuote;
+    const lines = "<div><br></div><div><br></div>";
+    if (!source) return lines;
+    const sourceHtml = source.html?.trim() ? sanitizeComposeHtml(source.html) : null;
+    return `${lines}${effectiveMode === "forward" ? htmlForward(source, sourceHtml) : htmlReplyQuote(source, sourceHtml)}`;
+  });
   const [from, setFrom] = useState(saved?.identity.address ?? (source ? defaultFromAddress(source, account, identities) : account.email));
   const [to, setTo] = useState(saved ? draftRecipientsText(saved.to) : source && effectiveMode !== "forward" ? addressList(replyRecipients) : "");
   const [cc, setCc] = useState(saved ? draftRecipientsText(saved.cc) : effectiveMode === "reply_all" ? replyAllCc : "");
   const [bcc, setBcc] = useState(saved ? draftRecipientsText(saved.bcc) : "");
   const [subject, setSubject] = useState(saved?.subject ?? (source ? effectiveMode === "forward" ? forwardSubject(source.subject) : replySubject(source.subject) : ""));
-  const [body, setBody] = useState(saved?.body ?? initialBody);
+  const [body, setBody] = useState(initialBody);
+  const bodyHasText = useMemo(() => (format === "html" ? htmlToText(body) : body).trim().length > 0, [body, format]);
+  const signatures = useQuery({ queryKey: ["signatures", account.id], queryFn: () => api.signatures(account.id) });
+  /** The address whose signature the body is believed to hold; null until a new form has inserted one. */
+  const signatureAddress = useRef<string | null>(saved ? saved.identity.address : null);
+  /** The untouched body of a new message, which is not worth saving as a draft. */
+  const pristineBody = useRef<string | null>(!saved && !source ? initialBody : null);
   const [attachments, setAttachments] = useState<DraftAttachment[]>(saved?.attachments ?? []);
   const [pendingFiles, setPendingFiles] = useState<{ id: string; file: File }[]>([]);
   const [uploading, setUploading] = useState(false);
@@ -366,9 +418,46 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       cc: saved && !edited.current.cc ? saved.cc : cc,
       bcc: saved && !edited.current.bcc ? saved.bcc : bcc,
       subject,
+      format,
       body,
       attachments,
     };
+  }
+
+  function isPristine(content: DraftContent): boolean {
+    return pristineBody.current === content.body
+      && [content.to, content.cc, content.bcc].every((field) => typeof field === "string" && !field.trim())
+      && !content.subject.trim()
+      && content.attachments.length === 0;
+  }
+
+  function hasUnsavedChanges(content: DraftContent): boolean {
+    return !isPristine(content) && saver.current!.isDirty(content);
+  }
+
+  function signatureFor(address: string | null, bodyFormat: DraftBodyFormat): string {
+    const html = address === null ? "" : signatures.data?.find((signature) => signature.address === address.toLowerCase())?.html ?? "";
+    if (!html.trim()) return "";
+    const sanitized = sanitizeComposeHtml(html);
+    return bodyFormat === "html" ? sanitized : htmlToText(sanitized);
+  }
+
+  function applySignature(previousAddress: string | null, nextAddress: string): void {
+    signatureAddress.current = nextAddress;
+    const previous = signatureFor(previousAddress, format);
+    const next = signatureFor(nextAddress, format);
+    const swapped = format === "html"
+      ? swapRichSignature(body, previous, next)
+      : swapPlainSignature(body, previous, next, plainQuote);
+    if (swapped === null || swapped === body) return;
+    if (pristineBody.current === body) pristineBody.current = swapped;
+    setBody(swapped);
+  }
+
+  function changeFormat(next: DraftBodyFormat): void {
+    if (next === format) return;
+    setBody(next === "plain" ? htmlToText(body) : textToHtml(body));
+    setFormat(next);
   }
 
   async function saveCurrent(force = false): Promise<Draft> {
@@ -407,8 +496,13 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   }, []);
 
   useEffect(() => {
+    if (saved || signatureAddress.current !== null || !signatures.data) return;
+    applySignature(null, from);
+  }, [signatures.data]);
+
+  useEffect(() => {
     if (autosaveSuppressed.current) return;
-    if (!saver.current!.isDirty(currentDraft())) return;
+    if (!hasUnsavedChanges(currentDraft())) return;
     const timeout = window.setTimeout(() => {
       void saveCurrent().catch(() => undefined);
     }, 700);
@@ -417,7 +511,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       window.clearTimeout(timeout);
       if (autosaveTimeout.current === timeout) autosaveTimeout.current = null;
     };
-  }, [attachments, bcc, body, cc, effectiveMode, from, subject, to]);
+  }, [attachments, bcc, body, cc, effectiveMode, format, from, subject, to]);
 
   const mutation = useMutation({
     mutationFn: async (content: DraftContent) => {
@@ -585,7 +679,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       setUploadError("Retry or remove the files that have not uploaded before closing this draft");
       return;
     }
-    if (!saver.current!.isDirty(currentDraft())) {
+    if (!hasUnsavedChanges(currentDraft())) {
       onClose();
       return;
     }
@@ -655,24 +749,38 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
             ? `Draft saved ${formatDate(savedAt, true)}`
             : "Drafts autosave to the backend"}</span>
       <button type="button" className="chip push" disabled={saving || formBusy} onClick={() => void saveCurrent(true).catch(() => undefined)}>Save draft</button>
-      <button className="btn" disabled={mutation.isPending || !body.trim() || backendPending} title={backendPending ? "Resolve draft status and pending file uploads before sending" : undefined}>
+      <button className="btn" disabled={mutation.isPending || !bodyHasText || backendPending} title={backendPending ? "Resolve draft status and pending file uploads before sending" : undefined}>
         {mutation.isPending ? "Sending…" : "Send message"}
       </button>
     </>}
   >
     <label className="field"><span className="field-label">From</span>
-      <select className="input" aria-label="From identity" value={from} disabled={formBusy} onChange={(event) => { edited.current.from = true; setFrom(event.target.value); }}>
+      <select className="input" aria-label="From identity" value={from} disabled={formBusy} onChange={(event) => {
+        edited.current.from = true;
+        setFrom(event.target.value);
+        if (signatures.data && signatureAddress.current !== null) applySignature(signatureAddress.current, event.target.value);
+      }}>
         <option value={account.email}>{account.email}</option>
         {identityOptions.map((identity) => <option value={identity.address} key={identity.address}>{identity.name} · {identity.address}</option>)}
       </select>
     </label>
-    <label className="field"><span className="field-label">To</span><input className="input" autoFocus required aria-label="To" placeholder="person@example.com, team@example.com" value={to} disabled={formBusy} onChange={(event) => { edited.current.to = true; setTo(event.target.value); }} /></label>
+    <RecipientInput label="To" autoFocus required placeholder="person@example.com, team@example.com" value={to} disabled={formBusy} onChange={(value) => { edited.current.to = true; setTo(value); }} />
     <div className="field-grid">
-      <label className="field"><span className="field-label">Cc</span><input className="input" aria-label="Cc" value={cc} disabled={formBusy} onChange={(event) => { edited.current.cc = true; setCc(event.target.value); }} /></label>
-      <label className="field"><span className="field-label">Bcc</span><input className="input" aria-label="Bcc" value={bcc} disabled={formBusy} onChange={(event) => { edited.current.bcc = true; setBcc(event.target.value); }} /></label>
+      <RecipientInput label="Cc" value={cc} disabled={formBusy} onChange={(value) => { edited.current.cc = true; setCc(value); }} />
+      <RecipientInput label="Bcc" value={bcc} disabled={formBusy} onChange={(value) => { edited.current.bcc = true; setBcc(value); }} />
     </div>
     <label className="field"><span className="field-label">Subject</span><input className="input" maxLength={998} aria-label="Subject" value={subject} disabled={formBusy} onChange={(event) => setSubject(event.target.value)} /></label>
-    <label className="field"><span className="field-label">Message</span><textarea className="input" required rows={12} maxLength={2_000_000} aria-label="Message" value={body} disabled={formBusy} onChange={(event) => setBody(event.target.value)} /></label>
+    <div className="field">
+      <div style={{ display: "flex", alignItems: "baseline", gap: 12 }}>
+        <span className="field-label">Message</span>
+        <button type="button" className="btn-underline" style={{ marginLeft: "auto" }} disabled={formBusy} title={format === "html" ? "Formatting is removed" : undefined} onClick={() => changeFormat(format === "html" ? "plain" : "html")}>
+          {format === "html" ? "Plain text" : "Rich text"}
+        </button>
+      </div>
+      {format === "html"
+        ? <RichTextEditor label="Message" html={body} disabled={formBusy} onChange={setBody} />
+        : <textarea className="input" required rows={12} maxLength={2_000_000} aria-label="Message" value={body} disabled={formBusy} onChange={(event) => setBody(event.target.value)} />}
+    </div>
     <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
       <label className="chip" aria-disabled={formBusy || pendingFiles.length > 0}>Add attachments<input type="file" multiple disabled={formBusy || pendingFiles.length > 0} style={{ display: "none" }} onChange={(event) => {
         const selected = [...(event.target.files ?? [])].map((file) => ({ id: crypto.randomUUID(), file }));

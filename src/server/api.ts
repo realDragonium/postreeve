@@ -1,6 +1,7 @@
 import { mailboxQuerySchema } from "../shared/mailbox-query";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import {
   accountIdSchema,
@@ -9,6 +10,7 @@ import {
   createDraftInputSchema,
   createFolderInputSchema,
   createIdentityInputSchema,
+  putSignatureInputSchema,
   createProposalInputSchema,
   deleteFolderInputSchema,
   discoverAccountInputSchema,
@@ -19,8 +21,10 @@ import {
   listMessagesInputSchema,
   messageRefSchema,
   proposalIdSchema,
+  recipientSuggestionQuerySchema,
   renameFolderInputSchema,
   sendMessageInputSchema,
+  unsubscribeInputSchema,
   updateDraftInputSchema,
   updateProposalInputSchema,
   updateAccountInputSchema,
@@ -51,6 +55,9 @@ const messageQuerySchema = z.object({
 const accountQuerySchema = z.object({ accountId: accountIdSchema });
 const readMessagesSchema = z.object({ references: z.array(messageRefSchema).min(1).max(100) });
 
+// Below Bun's configured idle timeout so a quiet event stream is not closed.
+const EVENT_KEEP_ALIVE_MS = 15_000;
+
 export interface ApiOptions {
   readonly oauthReturnUrl?: string | undefined;
   readonly discoverAccount?: DiscoverAccount;
@@ -77,12 +84,29 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         return context.redirect(oauthResultUrl(options.oauthReturnUrl, "error"));
       }
     })
+    .get("/events", (context) => streamSSE(context, async (stream) => {
+      const ignore = () => undefined;
+      const unsubscribe = service.synchronization.events.subscribe(event => {
+        void stream.writeSSE({ data: JSON.stringify(event) }).catch(ignore);
+      });
+      const keepAlive = setInterval(() => { void stream.write(": keep-alive\n\n").catch(ignore); }, EVENT_KEEP_ALIVE_MS);
+      keepAlive.unref();
+      try {
+        await stream.write(": connected\n\n");
+        await new Promise<void>(resolve => stream.onAbort(resolve));
+      } finally {
+        clearInterval(keepAlive);
+        unsubscribe();
+      }
+    }))
     .get("/synchronization", async (context) => context.json(await service.synchronizationStatus()))
     .post("/accounts/:accountId/synchronization/retry", zValidator("param", accountParamsSchema), async (context) =>
       context.json(await service.retrySynchronization(context.req.valid("param").accountId)))
     .post("/accounts/:accountId/reauthorization", zValidator("param", accountParamsSchema), async (context) =>
       context.json(await service.requestReauthorization(context.req.valid("param").accountId)))
     .get("/accounts", async (context) => context.json(await service.listAccounts()))
+    .get("/recipient-suggestions", zValidator("query", recipientSuggestionQuerySchema), (context) =>
+      context.json(service.recipientSuggestions(context.req.valid("query"))))
     .post("/accounts/discover", zValidator("json", discoverAccountInputSchema), async (context) =>
       context.json(await discoverAccount(context.req.valid("json").email)))
     .post("/accounts/test", zValidator("json", createAccountInputSchema), async (context) => {
@@ -157,6 +181,14 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         const { identity, created } = await service.addIdentity(context.req.valid("param").accountId, context.req.valid("json"));
         return context.json(identity, created ? 201 : 200);
       },
+    )
+    .get("/accounts/:accountId/signatures", zValidator("param", accountParamsSchema), async (context) =>
+      context.json(await service.listSignatures(context.req.valid("param").accountId)))
+    .put(
+      "/accounts/:accountId/signatures",
+      zValidator("param", accountParamsSchema),
+      zValidator("json", putSignatureInputSchema),
+      async (context) => context.json(await service.putSignature(context.req.valid("param").accountId, context.req.valid("json"))),
     )
     .delete("/accounts/:accountId/identities/:identityId", zValidator("param", identityParamsSchema), async (context) => {
       const { accountId, identityId } = context.req.valid("param");
@@ -299,6 +331,8 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         context.req.valid("query").accountId)))
     .post("/messages/send", zValidator("json", sendMessageInputSchema), async (context) =>
       context.json(await service.sendMessage(context.req.valid("json")), 201))
+    .post("/messages/unsubscribe", zValidator("json", unsubscribeInputSchema), async (context) =>
+      context.json(await service.unsubscribe(context.req.valid("json"))))
     .post("/messages/actions", zValidator("json", directActionInputSchema), async (context) =>
       context.json(await service.applyDirectActions(context.req.valid("json"))))
     .get("/proposals", zValidator("query", accountQuerySchema), async (context) =>

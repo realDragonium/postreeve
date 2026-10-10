@@ -73,6 +73,7 @@ describe("sent copies for IMAP accounts", () => {
       cc: [],
       bcc: [],
       subject: "Delivered anyway",
+      format: "plain",
       body: "The send must stand.",
       identity: { name: account.name, address: account.email },
       attachments: [],
@@ -85,6 +86,37 @@ describe("sent copies for IMAP accounts", () => {
     const stored = await service.getDraft(account.id, draft.id);
     expect(stored.delivery).toMatchObject({ status: "sent", receipt: { warning } });
     expect(sendAttempts).toHaveLength(1);
+    store.close();
+  });
+
+  test("records a delivered draft as sent before its copy is appended", async () => {
+    let statusDuringCopy: string | undefined;
+    let draftId = "";
+    let accountId = "";
+    const { store, service } = await createEmptyTestHarness({
+      beforeSentCopy: async () => {
+        statusDuringCopy = (await service.getDraft(accountId, draftId)).delivery.status;
+      },
+    });
+    const account = await service.createAccount(testAccountInput());
+    const draft = await service.createDraft({
+      accountId: account.id,
+      mode: "new",
+      to: [{ name: "Recipient", address: "recipient@example.test" }],
+      cc: [],
+      bcc: [],
+      subject: "Settled first",
+      body: "Durable before the copy.",
+      format: "plain",
+      identity: { name: account.name, address: account.email },
+      attachments: [],
+    });
+    accountId = account.id;
+    draftId = draft.id;
+
+    await service.sendDraft(account.id, draft.id, { version: draft.version });
+
+    expect(statusDuringCopy).toBe("sent");
     store.close();
   });
 

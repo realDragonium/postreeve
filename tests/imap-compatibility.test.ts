@@ -107,6 +107,10 @@ describe("Bun IMAP compatibility", () => {
     if (!htmlPart) throw new Error("Expected HTML body part");
     htmlPart.size = Buffer.byteLength(html);
     message.bodyParts.set("1.2", Buffer.from(html));
+    message.source = Buffer.concat([
+      Buffer.from("List-Unsubscribe: <https://list.example.test/u>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n"),
+      message.source ?? Buffer.alloc(0),
+    ]);
     const pdf = Buffer.from("pdf bytes").toString("base64");
     const quotedPrintable = "keep=0D=0Abytes=3D";
     message.bodyStructure.childNodes.push(
@@ -156,6 +160,7 @@ describe("Bun IMAP compatibility", () => {
     const [detail] = await provider.readMessages(config.accountId, [reference]);
     expect(detail?.text).toBe("Newest plain text body");
     expect(detail?.text).not.toContain("hidden attached text");
+    expect(detail?.unsubscribe).toEqual({ https: "https://list.example.test/u", mailto: null, oneClick: true });
     expect(detail?.attachments.map(({ filename, sizeIsEstimate }) => ({ filename, sizeIsEstimate }))).toEqual([
       { filename: "logo.png", sizeIsEstimate: true },
       { filename: "report.pdf", sizeIsEstimate: true },
@@ -1063,6 +1068,7 @@ describe("Bun IMAP compatibility", () => {
       cc: "",
       bcc: "",
       subject: "Provider cleanup",
+      format: "plain",
       body: "Version one",
       identity: { name: "Human", address: config.username },
       attachments: [],
@@ -1078,6 +1084,7 @@ describe("Bun IMAP compatibility", () => {
       cc: created.cc,
       bcc: created.bcc,
       subject: created.subject,
+      format: "plain",
       body: "Authoritative version two",
       identity: created.identity,
       attachments: created.attachments,
@@ -1130,6 +1137,7 @@ describe("Bun IMAP compatibility", () => {
       cc: "",
       bcc: "",
       subject: "Provider cleanup",
+      format: "plain",
       body: "Keep backend authority",
       identity: { name: "Human", address: config.username },
       attachments: [],
@@ -1362,6 +1370,9 @@ describe("IMAP sent copies", () => {
       subject: "Sent copy",
       read: true,
     });
+    expect(state.options).toEqual([
+      expect.objectContaining({ connectionTimeout: 30_000, greetingTimeout: 16_000, socketTimeout: 60_000 }),
+    ]);
   });
 
   test("leaves indexing to synchronization when the server reports no UID", async () => {
@@ -1429,10 +1440,32 @@ describe("IMAP synchronization", () => {
     inbox.messages.set(4, fakeMessage(4, 15n, "Arrived", "New", new Set()));
     inbox.nextUid = 5;
     inbox.highestModseq = 15n;
-    const changed = await page(provider, unchanged.cursor);
+    const arrived = await page(provider, unchanged.cursor);
+    expect(arrived.messages.map(message => message.ref.uid)).toEqual([4]);
+    expect(arrived.snapshots ?? []).toEqual([]);
+    const changed = await page(provider, arrived.cursor);
     expect(changed.messages.map(message => message.ref.uid)).toEqual([2, 4]);
     expect(changed.messages[0]).toMatchObject({ read: true, flagged: true });
-    expect(state.fetchRanges).toEqual([[2, 4]]);
+    expect(state.fetchRanges).toEqual([[4], [2, 4]]);
+  });
+
+  test("ingests new mail above a completed scan before rescanning the mailbox", async () => {
+    const state = fakeState();
+    const inbox = state.mailboxes.get("INBOX")!;
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    let cursor: string | null = null;
+    do cursor = (await page(provider, cursor, 1)).cursor;
+    while (JSON.parse(cursor!).scan !== null);
+    for (const uid of [4, 5, 6]) inbox.messages.set(uid, fakeMessage(uid, 20n, "Arrived", `New ${uid}`, new Set()));
+    inbox.nextUid = 7;
+    const first = await page(provider, cursor, 2);
+    expect(first.messages.map(message => message.ref.uid)).toEqual([4, 5]);
+    expect(first).toMatchObject({ hasMore: true, coverage: "complete" });
+    const second = await page(provider, first.cursor, 2);
+    expect(second.messages.map(message => message.ref.uid)).toEqual([6]);
+    const scan = await page(provider, second.cursor, 2);
+    expect(scan.messages.map(message => message.ref.uid)).toEqual([1, 2]);
+    expect(scan.snapshots?.[0]?.phase).toBe("start");
   });
 
   test.each(["absent", "nomodseq", "lost"])("falls back to summaries when MODSEQ is %s", async mode => {
@@ -2430,6 +2463,7 @@ function providerDraft(version: number, changes: Partial<Draft> = {}): Draft {
     cc: "",
     bcc: "",
     subject: "Provider draft",
+    format: "plain",
     body: "Body",
     identity: { name: "Human", address: config.username },
     attachments: [],

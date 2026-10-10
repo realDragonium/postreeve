@@ -1,4 +1,4 @@
-import type { Folder, MessageSummary } from "../shared/contracts";
+import type { Folder, MessageSummary, TriageAction } from "../shared/contracts";
 import type { MessageFilter, MessageSort } from "./mail-ui-state";
 
 export type SpecialUse = NonNullable<Folder["specialUse"]>;
@@ -17,6 +17,101 @@ const specialUseNames: Record<SpecialUse, string> = {
 
 export function specialUseName(specialUse: SpecialUse): string {
   return specialUseNames[specialUse];
+}
+
+export interface SpamToggle {
+  readonly label: "Spam" | "Not spam";
+  /** Null when the account has no folder to move the message to. */
+  readonly action: Extract<TriageAction, { type: "move" }> | null;
+}
+
+/** Spam moves a message to the account's junk folder; Not spam moves it from there to the inbox. */
+export function spamToggle(message: Pick<MessageSummary, "ref">, folders: readonly Folder[]): SpamToggle {
+  const junk = folders.find((folder) => folder.specialUse === "junk");
+  if (junk && junk.path === message.ref.mailbox) {
+    const inbox = folders.find((folder) => folder.specialUse === "inbox");
+    return { label: "Not spam", action: inbox ? { type: "move", destination: inbox.path } : null };
+  }
+  return { label: "Spam", action: junk ? { type: "move", destination: junk.path } : null };
+}
+
+/** Moves whose destination is a special-use folder, which each account names differently. */
+export type FolderIntent = "archive" | "spam" | "not_spam";
+
+export interface PlannedAction {
+  readonly message: MessageSummary;
+  readonly action: TriageAction;
+}
+
+export interface FolderActionPlan {
+  readonly items: readonly PlannedAction[];
+  /** Targets whose account lacks the folder the intent needs. */
+  readonly missingFolder: number;
+}
+
+const intentFolder: Record<FolderIntent, SpecialUse> = { archive: "archive", spam: "junk", not_spam: "inbox" };
+
+/**
+ * Resolves the destination per message from its own account's folders, and
+ * drops messages for which the intent is a no-op: already archived, already
+ * in Junk for Spam, or not in Junk for Not spam.
+ */
+export function planFolderAction(
+  targets: readonly MessageSummary[],
+  intent: FolderIntent,
+  foldersByAccount: ReadonlyMap<string, readonly Folder[]>,
+): FolderActionPlan {
+  const items: PlannedAction[] = [];
+  let missingFolder = 0;
+  for (const message of targets) {
+    const folders = foldersByAccount.get(message.ref.accountId) ?? [];
+    const junk = folders.find((folder) => folder.specialUse === "junk");
+    const inJunk = junk !== undefined && junk.path === message.ref.mailbox;
+    if (intent === "spam" && inJunk) continue;
+    if (intent === "not_spam" && !inJunk) continue;
+    const destination = folders.find((folder) => folder.specialUse === intentFolder[intent]);
+    if (!destination) {
+      missingFolder++;
+      continue;
+    }
+    if (destination.path === message.ref.mailbox) continue;
+    items.push({ message, action: { type: "move", destination: destination.path } });
+  }
+  return { items, missingFolder };
+}
+
+export function folderIntentLabel(intent: FolderIntent, count: number): string {
+  return `Moved ${count} to ${specialUseName(intentFolder[intent])}`;
+}
+
+export interface AccountBatches<T> {
+  readonly applied: readonly { readonly batch: T; readonly count: number }[];
+  readonly failures: readonly string[];
+}
+
+/**
+ * Sends one request per account and settles them independently, so a failing
+ * account cannot hide the batches the other accounts already applied.
+ */
+export async function applyPerAccount<T>(
+  items: readonly PlannedAction[],
+  send: (accountId: string, items: readonly PlannedAction[]) => Promise<T>,
+): Promise<AccountBatches<T>> {
+  const byAccount = new Map<string, PlannedAction[]>();
+  for (const item of items) {
+    const group = byAccount.get(item.message.ref.accountId) ?? [];
+    group.push(item);
+    byAccount.set(item.message.ref.accountId, group);
+  }
+  const groups = [...byAccount];
+  const results = await Promise.allSettled(groups.map(([accountId, group]) => send(accountId, group)));
+  const applied: { batch: T; count: number }[] = [];
+  const failures: string[] = [];
+  results.forEach((result, index) => {
+    if (result.status === "fulfilled") applied.push({ batch: result.value, count: groups[index]?.[1].length ?? 0 });
+    else failures.push(result.reason instanceof Error ? result.reason.message : String(result.reason));
+  });
+  return { applied, failures };
 }
 
 /**

@@ -28,9 +28,28 @@ export const identitySchema = z.object({
   createdAt: z.iso.datetime(),
 });
 
+export const signatureSchema = z.object({
+  address: z.email(),
+  html: z.string().max(100_000),
+});
+export const putSignatureInputSchema = z.object({
+  address: z.email().transform((address) => address.toLowerCase()),
+  html: z.string().max(100_000),
+});
+
 export const createIdentityInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
   address: z.email().transform((address) => address.toLowerCase()),
+});
+
+export const recipientSuggestionSchema = z.object({
+  name: z.string(),
+  address: z.string().min(1),
+});
+
+export const recipientSuggestionQuerySchema = z.object({
+  q: z.string().trim().min(1).max(100),
+  limit: z.coerce.number().int().min(1).max(20).default(8),
 });
 
 export const folderSchema = z.object({
@@ -141,10 +160,18 @@ export const canonicalMessageSchema = z.object({
   updatedAt: z.iso.datetime(),
 });
 
+/** A message's own `List-Unsubscribe` targets; `oneClick` means RFC 8058 POST to `https`. */
+export const unsubscribeOptionsSchema = z.object({
+  https: z.url({ protocol: /^https$/ }).nullable(),
+  mailto: z.string().startsWith("mailto:").nullable(),
+  oneClick: z.boolean(),
+});
+
 export const messageDetailSchema = messageSummarySchema.extend({
   text: z.string(),
   html: z.string().nullable(),
   attachments: z.array(receivedAttachmentSchema),
+  unsubscribe: unsubscribeOptionsSchema.optional(),
 });
 
 export const canonicalMessageDetailSchema = messageDetailSchema.required({ canonicalId: true }).extend({
@@ -312,7 +339,18 @@ export const sendReceiptSchema = z.object({
   warning: z.string().min(1).optional(),
 });
 
+export const unsubscribeInputSchema = z.object({
+  message: messageRefSchema,
+  method: z.enum(["one_click", "mailto"]),
+});
+
+export const unsubscribeResultSchema = z.discriminatedUnion("method", [
+  z.object({ method: z.literal("one_click"), target: z.string() }),
+  z.object({ method: z.literal("mailto"), target: z.string(), receipt: sendReceiptSchema }),
+]);
+
 export const draftComposeModeSchema = z.enum(["new", "reply", "reply_all", "forward"]);
+export const draftBodyFormatSchema = z.enum(["plain", "html"]);
 export const draftRecipientFieldSchema = z.union([
   z.string(),
   z.array(outboundAddressSchema).max(100),
@@ -341,6 +379,7 @@ export const draftContentSchema = z.object({
   cc: draftRecipientFieldSchema,
   bcc: draftRecipientFieldSchema,
   subject: z.string().max(998),
+  format: draftBodyFormatSchema.default("plain"),
   body: z.string().max(2_000_000),
   identity: outboundAddressSchema,
   source: conversationSendSourceSchema.optional(),
@@ -453,6 +492,9 @@ export type MessageRef = z.infer<typeof messageRefSchema>;
 export type MessageSummary = z.infer<typeof messageSummarySchema>;
 export type CanonicalMessageSummary = z.infer<typeof canonicalMessageSummarySchema>;
 export type MessageDetail = z.infer<typeof messageDetailSchema>;
+export type UnsubscribeOptions = z.infer<typeof unsubscribeOptionsSchema>;
+export type UnsubscribeInput = z.infer<typeof unsubscribeInputSchema>;
+export type UnsubscribeResult = z.infer<typeof unsubscribeResultSchema>;
 export type CanonicalMessageDetail = z.infer<typeof canonicalMessageDetailSchema>;
 export type ReceivedAttachment = z.infer<typeof receivedAttachmentSchema>;
 export type MailProviderKind = z.infer<typeof mailProviderKindSchema>;
@@ -474,7 +516,12 @@ export type AccountDiscovery = z.infer<typeof accountDiscoverySchema>;
 export type ConnectionTestResult = z.infer<typeof connectionTestResultSchema>;
 export type OutboundAddress = z.infer<typeof outboundAddressSchema>;
 export type Identity = z.infer<typeof identitySchema>;
+export type Signature = z.infer<typeof signatureSchema>;
+export type PutSignatureInput = z.input<typeof putSignatureInputSchema>;
+export type DraftBodyFormat = z.infer<typeof draftBodyFormatSchema>;
 export type CreateIdentityInput = z.input<typeof createIdentityInputSchema>;
+export type RecipientSuggestion = z.infer<typeof recipientSuggestionSchema>;
+export type RecipientSuggestionQuery = z.input<typeof recipientSuggestionQuerySchema>;
 export type ConversationSendSource = z.infer<typeof conversationSendSourceSchema>;
 export type SendMessageIntent = z.infer<typeof sendMessageIntentSchema>;
 export type SendMessageInput = z.infer<typeof sendMessageInputSchema>;

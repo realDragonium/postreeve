@@ -29,6 +29,8 @@ Open [http://127.0.0.1:3000](http://127.0.0.1:3000). A new installation starts e
 
 Postreeve binds to `127.0.0.1` by default because the web interface does not have authentication yet. Do not expose it to a public or shared network.
 
+To block pages that rebind their own domain to your machine, the server only answers requests addressed to `127.0.0.1`, `localhost` or `[::1]` (on any port), plus the address in `POSTREEVE_HOST` when it names one, and it rejects API writes sent from another site. Binding to `0.0.0.0` therefore still accepts only loopback names; set `POSTREEVE_HOST` to the exact address or hostname you browse to if you deliberately serve it elsewhere.
+
 ## Desktop app
 
 Run Postreeve as a desktop application without starting the server manually:
@@ -71,6 +73,8 @@ Passwords are encrypted with AES-256-GCM before they are stored in the local SQL
 The backend maintains a local summary index through durable account synchronization jobs, even with no mailbox view open. Jobs retain checkpoints across restart, back off after failures, and reject results from canceled or disconnected accounts. The compatibility ingestion path records partial coverage and preserves unseen locations; offline mailbox views are a separate capability.
 
 IMAP synchronization resumes bounded mailbox scans after reconnect, uses negotiated QRESYNC and MODSEQ when available, and falls back to full summary observations otherwise. Incomplete fetches keep the prior checkpoint and cached locations. UIDVALIDITY resets rebuild only the affected mailbox while preserving canonical messages and conversation identity. Large summary batches are split into bounded pages. An individual summary that exceeds the 2 MiB ingestion limit is reported as invalid data and keeps its checkpoint unchanged.
+
+New mail arrives without waiting for the poll. Each IMAP account keeps one extra connection idling on INBOX (when the server supports IDLE) and synchronizes the Inbox as soon as the server reports a change. It re-IDLEs every 25 minutes and reconnects with backoff up to 15 minutes. Without IDLE, the 60-second poll still applies. Gmail account history is polled every 20 seconds. A new scan of an IMAP mailbox ingests messages above its last completed scan first. The server pushes mailbox-change and new-mail events to the open page over `GET /api/events` (Server-Sent Events), so lists and folder counts refresh straight away. **Settings → Notifications** enables desktop notifications for unread Inbox arrivals (off by default; the browser or operating system asks for permission) and mutes individual accounts. Notifications appear only while the window is in the background, are summarized when more than three arrive at once, and open the message when clicked. Initial synchronization and repairs never notify.
 
 Synchronization health is available in **Settings → Sync & storage**, including safe retry and human reauthorization instructions. Health distinguishes healthy, catching up, degraded, disconnected and reauthorization required. Authentication failures pause automatic retries; failures contain fixed actionable guidance, never raw provider responses.
 

@@ -21,7 +21,13 @@ import {
   messageMatchesKey,
   mergeMessages,
   scopeSources,
+  applyPerAccount,
+  folderIntentLabel,
+  planFolderAction,
+  spamToggle,
   specialUseName,
+  type FolderIntent,
+  type PlannedAction,
   type Scope,
 } from "./mail-view";
 import {
@@ -37,8 +43,24 @@ import {
 import { migrateLocalDraftsOnce } from "./draft-state";
 import { migrateLocalIdentitiesOnce } from "./identities";
 import { useTheme } from "./theme";
+import type { MailboxEvent } from "../shared/mailbox-events";
+import { subscribeToMailboxEvents } from "./mailbox-events";
+import {
+  loadNotificationPreferences,
+  notificationsFor,
+  storeNotificationPreferences,
+  type NotificationAccess,
+  type NotificationPreferences,
+  type PlannedNotification,
+} from "./notifications";
 
 const folderPollIntervalMs = 15_000;
+/** Synchronization can commit several pages in a burst; refetch once per burst. */
+const mailboxEventCoalesceMs = 1_000;
+
+function notificationAccess(): NotificationAccess {
+  return typeof Notification === "undefined" ? "unsupported" : Notification.permission;
+}
 /** Below this the sidebar covers the list, so choosing a folder closes it again. */
 const narrowWidth = 900;
 const tabs = [["Mailbox", "mail"], ["Activity", "activity"], ["Settings", "settings"]] as const;
@@ -90,6 +112,9 @@ function App() {
   const [hiddenTools, setHiddenTools] = useState<ReadonlySet<string>>(loadHiddenTools);
   const [overlay, setOverlay] = useState<Overlay>(null);
   useEffect(() => storeHiddenTools(hiddenTools), [hiddenTools]);
+  const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>(() => loadNotificationPreferences(localStorage));
+  const [notificationPermission, setNotificationPermission] = useState<NotificationAccess>(notificationAccess);
+  useEffect(() => storeNotificationPreferences(localStorage, notificationPreferences), [notificationPreferences]);
 
   const toastTimer = useRef<number>(0);
   function flash(text: string): void {
@@ -250,30 +275,21 @@ function App() {
   }
 
   const actionMutation = useMutation({
-    mutationFn: async ({ targets, action }: { targets: readonly MessageSummary[]; action: TriageAction }) => {
-      const byAccount = new Map<string, MessageSummary[]>();
-      for (const message of targets) {
-        const group = byAccount.get(message.ref.accountId) ?? [];
-        group.push(message);
-        byAccount.set(message.ref.accountId, group);
-      }
-      return Promise.all([...byAccount].map(([accountId, group]) => api.applyDirectActions({
+    mutationFn: async ({ items }: { items: readonly PlannedAction[]; label: (count: number) => string; closesReader: boolean }) => {
+      const outcome = await applyPerAccount(items, (accountId, group) => api.applyDirectActions({
         accountId,
-        items: group.map((message) => ({ message: message.ref, subject: message.subject, action })),
-      })));
+        items: group.map(({ message, action }) => ({ message: message.ref, subject: message.subject, action })),
+      }));
+      if (outcome.applied.length === 0) throw new Error(outcome.failures.join(" "));
+      return outcome;
     },
-    onSuccess: async (created, { targets, action }) => {
-      for (const batch of created) recordUserBatch(batch.id);
-      const label = action.type === "move" ? `Moved ${targets.length} to ${action.destination}`
-        : action.type === "trash" ? `Moved ${targets.length} to Trash`
-        : action.type === "mark_read" ? `Marked ${targets.length} read`
-        : action.type === "flag" ? `Flagged ${targets.length}`
-        : action.type === "unflag" ? `Unflagged ${targets.length}`
-        : `Marked ${targets.length} unread`;
-      setUndoStack((current) => [{ label, batchIds: created.map(({ id }) => id) }, ...current].slice(0, 8));
+    onSuccess: async ({ applied, failures }, { label, closesReader }) => {
+      for (const { batch } of applied) recordUserBatch(batch.id);
+      const status = label(applied.reduce((total, { count }) => total + count, 0));
+      setUndoStack((current) => [{ label: status, batchIds: applied.map(({ batch }) => batch.id) }, ...current].slice(0, 8));
       setSelected(new Set());
-      if (action.type === "move" || action.type === "trash") setOpenKey(null);
-      flash(label);
+      if (closesReader) setOpenKey(null);
+      flash(failures.length ? `${status}. Failed for ${failures.length} account${failures.length === 1 ? "" : "s"}: ${failures.join(" ")}` : status);
       await refresh();
     },
     onError: (error) => flash(error.message),
@@ -315,7 +331,32 @@ function App() {
 
   function applyTo(targets: readonly MessageSummary[], action: TriageAction): void {
     if (targets.length === 0) return;
-    actionMutation.mutate({ targets, action });
+    const label = (count: number): string => action.type === "move" ? `Moved ${count} to ${action.destination}`
+      : action.type === "trash" ? `Moved ${count} to Trash`
+      : action.type === "mark_read" ? `Marked ${count} read`
+      : action.type === "flag" ? `Flagged ${count}`
+      : action.type === "unflag" ? `Unflagged ${count}`
+      : `Marked ${count} unread`;
+    actionMutation.mutate({
+      items: targets.map((message) => ({ message, action })),
+      label,
+      closesReader: action.type === "move" || action.type === "trash",
+    });
+  }
+
+  function applyFolderAction(targets: readonly MessageSummary[], intent: FolderIntent): void {
+    const plan = planFolderAction(targets, intent, foldersByAccount);
+    if (plan.items.length > 0) {
+      actionMutation.mutate({ items: plan.items, label: (count) => folderIntentLabel(intent, count), closesReader: true });
+    } else if (plan.missingFolder > 0) {
+      flash(intent === "archive" ? "This account has no Archive folder."
+        : intent === "spam" ? "This account has no Junk folder."
+        : "This account has no Inbox folder.");
+    }
+  }
+
+  function spamIntent(message: MessageSummary): FolderIntent {
+    return spamToggle(message, foldersByAccount.get(message.ref.accountId) ?? []).label === "Not spam" ? "not_spam" : "spam";
   }
 
   function openRow(message: MessageSummary): void {
@@ -343,6 +384,58 @@ function App() {
     setSelected(new Set());
     setLimit(50);
   }
+
+  async function enableNotifications(enabled: boolean): Promise<void> {
+    if (!enabled) {
+      setNotificationPreferences((current) => ({ ...current, enabled: false }));
+      return;
+    }
+    if (typeof Notification === "undefined") {
+      setNotificationPermission("unsupported");
+      return;
+    }
+    const permission = Notification.permission === "default" ? await Notification.requestPermission() : Notification.permission;
+    setNotificationPermission(permission);
+    if (permission === "granted") setNotificationPreferences((current) => ({ ...current, enabled: true }));
+  }
+
+  function openNotification({ accountId, mailbox, canonicalId }: PlannedNotification["open"]): void {
+    window.focus();
+    changeScope({ kind: "account", accountId, path: mailbox });
+    setQueryDraft("");
+    setQuery("");
+    setFilter("all");
+    if (canonicalId) setOpenKey(canonicalId);
+  }
+
+  // ── Mailbox events ──────────────────────────────────────────────────
+  const changedAccounts = useRef(new Set<string>());
+  const changeTimer = useRef<number>(0);
+  const handleMailboxEvent = useRef<(event: MailboxEvent) => void>(() => undefined);
+  handleMailboxEvent.current = (event) => {
+    changedAccounts.current.add(event.accountId);
+    window.clearTimeout(changeTimer.current);
+    changeTimer.current = window.setTimeout(() => {
+      const accountIds = [...changedAccounts.current];
+      changedAccounts.current.clear();
+      void queryClient.invalidateQueries({ queryKey: ["messages"] });
+      void queryClient.invalidateQueries({ queryKey: ["conversation"] });
+      for (const accountId of accountIds) void queryClient.invalidateQueries({ queryKey: ["folders", accountId] });
+    }, mailboxEventCoalesceMs);
+    const account = accounts.find(({ id }) => id === event.accountId);
+    if (!account) return;
+    const planned = notificationsFor(event, notificationPreferences, {
+      access: notificationAccess(), focused: document.hasFocus(), accountLabel: account.email,
+    });
+    for (const { title, body, tag, open } of planned) {
+      const notification = new Notification(title, { body, tag });
+      notification.onclick = () => {
+        notification.close();
+        openNotification(open);
+      };
+    }
+  };
+  useEffect(() => subscribeToMailboxEvents((event) => handleMailboxEvent.current(event)), []);
 
   // ── WebMCP ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -462,11 +555,11 @@ function App() {
       }
       if (event.key === "e") {
         event.preventDefault();
-        const targets = targetsFor(current);
-        const folders = foldersByAccount.get(targets[0]?.ref.accountId ?? "") ?? [];
-        const archive = folders.find((folder) => folder.specialUse === "archive");
-        if (archive) applyTo(targets, { type: "move", destination: archive.path });
-        else flash("This account has no Archive folder.");
+        applyFolderAction(targetsFor(current), "archive");
+      }
+      if (event.key === "!") {
+        event.preventDefault();
+        applyFolderAction(targetsFor(current), spamIntent(current));
       }
       if (event.key === "u") {
         event.preventDefault();
@@ -570,6 +663,7 @@ function App() {
               messages={messages}
               provenance={provenance}
               folders={scopeFolders}
+              foldersByAccount={foldersByAccount}
               loading={messagesLoading}
               error={messagesError}
               focus={focus}
@@ -604,6 +698,7 @@ function App() {
                 });
               }}
               onBulk={(action) => applyTo(targetsFor(messages[focus]), action)}
+              onFolderAction={(intent) => applyFolderAction(targetsFor(messages[focus]), intent)}
               onAcceptProposal={(proposalId) => acceptMutation.mutate(proposalId)}
               onCompose={() => composeAccountId && setOverlay({ kind: "compose", accountId: composeAccountId, intent: { mode: "new" } })}
               onLoadMore={() => void messageResults.fetchNextPage()}
@@ -657,6 +752,15 @@ function App() {
           themeMode={theme.mode}
           hiddenTools={hiddenTools}
           onThemePreference={theme.setPreference}
+          notificationPreferences={notificationPreferences}
+          notificationPermission={notificationPermission}
+          onEnableNotifications={(enabled) => void enableNotifications(enabled)}
+          onMuteAccount={(accountId, muted) => setNotificationPreferences((current) => ({
+            ...current,
+            mutedAccountIds: muted
+              ? [...new Set([...current.mutedAccountIds, accountId])]
+              : current.mutedAccountIds.filter((id) => id !== accountId),
+          }))}
           onToolExposure={(name, isExposed) => setHiddenTools((current) => {
             const next = new Set(current);
             if (isExposed) next.delete(name);

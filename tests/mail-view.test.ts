@@ -1,15 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import type { Folder, MessageSummary } from "../src/shared/contracts";
 import {
+  applyPerAccount,
   countLine,
   filterMessages,
   mergeMessages,
+  planFolderAction,
   messageIsSelected,
   messageKey,
   messageMatchesKey,
   scopeSources,
   senderName,
   sortMessages,
+  spamToggle,
   unifiedFolders,
 } from "../src/web/mail-view";
 
@@ -238,5 +241,64 @@ describe("countLine", () => {
   test("stays to plain counts when nothing is narrowing it", () => {
     expect(countLine([message({ uid: 1 }), message({ uid: 2 })], { query: "", filter: "all", awaiting: 0 }))
       .toBe("2 messages · 0 unread");
+  });
+});
+
+describe("spamToggle", () => {
+  const folder = (path: string, specialUse: Folder["specialUse"]): Folder => ({ path, name: path, specialUse, total: 0, unread: 0 });
+  const folders = [folder("INBOX", "inbox"), folder("Junk", "junk")];
+
+  test("moves an inbox message to the junk folder", () => {
+    expect(spamToggle(message({ uid: 1 }), folders)).toEqual({ label: "Spam", action: { type: "move", destination: "Junk" } });
+  });
+
+  test("moves a junk message back to the inbox", () => {
+    const junk = message({ uid: 2 });
+    expect(spamToggle({ ref: { ...junk.ref, mailbox: "Junk" } }, folders))
+      .toEqual({ label: "Not spam", action: { type: "move", destination: "INBOX" } });
+  });
+
+  test("has no action without a junk folder", () => {
+    expect(spamToggle(message({ uid: 3 }), [folder("INBOX", "inbox")])).toEqual({ label: "Spam", action: null });
+  });
+});
+
+describe("planFolderAction", () => {
+  const folders = new Map<string, readonly Folder[]>([
+    ["gmail", [folder({ path: "INBOX", specialUse: "inbox" }), folder({ path: "SPAM", specialUse: "junk" }), folder({ path: "__archive__", specialUse: "archive" })]],
+    ["imap", [folder({ path: "INBOX", specialUse: "inbox" }), folder({ path: "Junk", specialUse: "junk" })]],
+  ]);
+  const gmail = message({ uid: 1, accountId: "gmail" });
+  const imap = message({ uid: 2, accountId: "imap" });
+  const destinations = (plan: ReturnType<typeof planFolderAction>) =>
+    plan.items.map(({ message: item, action }) => [item.ref.accountId, action.type === "move" ? action.destination : action.type]);
+
+  test("resolves the spam folder from each message's own account", () => {
+    expect(destinations(planFolderAction([gmail, imap], "spam", folders))).toEqual([["gmail", "SPAM"], ["imap", "Junk"]]);
+  });
+
+  test("Spam skips messages already in Junk and Not spam skips messages outside it", () => {
+    const junk = message({ uid: 3, accountId: "imap" });
+    const inJunk = { ...junk, ref: { ...junk.ref, mailbox: "Junk" } };
+    expect(destinations(planFolderAction([inJunk, gmail], "spam", folders))).toEqual([["gmail", "SPAM"]]);
+    expect(destinations(planFolderAction([inJunk, gmail], "not_spam", folders))).toEqual([["imap", "INBOX"]]);
+  });
+
+  test("counts messages whose account lacks the folder instead of moving them", () => {
+    const plan = planFolderAction([gmail, imap], "archive", folders);
+    expect(destinations(plan)).toEqual([["gmail", "__archive__"]]);
+    expect(plan.missingFolder).toBe(1);
+  });
+});
+
+describe("applyPerAccount", () => {
+  test("keeps the batches of accounts that succeeded when another fails", async () => {
+    const items = [message({ uid: 1, accountId: "a" }), message({ uid: 2, accountId: "b" }), message({ uid: 3, accountId: "a" })]
+      .map((item) => ({ message: item, action: { type: "mark_read" } as const }));
+    const outcome = await applyPerAccount(items, async (accountId, group) => {
+      if (accountId === "b") throw new Error("Folder SPAM does not exist");
+      return `${accountId}:${group.length}`;
+    });
+    expect(outcome).toEqual({ applied: [{ batch: "a:2", count: 2 }], failures: ["Folder SPAM does not exist"] });
   });
 });
