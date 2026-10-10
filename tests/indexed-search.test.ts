@@ -275,4 +275,18 @@ describe("indexed mailbox search", () => {
     await service.undoBatch(moved.id);
     expect(store.synchronization.query(tenant,{sources}).messages.some(m=>m.canonicalId===current.canonicalId)).toBe(true);
   });
+
+  test("confirmed flag and undo update the flagged filter without waiting for synchronization", async () => {
+    const {service,store,account}=await createTestHarness();close.push(()=>store.close());
+    const sources=[{accountId:account.id,mailbox:"INBOX"}];
+    const flagged=()=>service.queryMessages({sources,filter:"flagged"}).then(page=>page.messages.map(m=>m.canonicalId));
+    const target=(await service.queryMessages({sources})).messages.find(m=>!m.flagged)!;
+    const before=await flagged();
+    const batch=await service.applyDirectActions({accountId:account.id,items:[{message:target.ref,subject:target.subject,action:{type:"flag"}}]});
+    expect(batch.operations[0]?.status).toBe("applied");
+    expect(await flagged()).toContain(target.canonicalId);
+    expect((await service.queryMessages({sources})).messages.find(m=>m.canonicalId===target.canonicalId)?.read).toBe(target.read);
+    await service.undoBatch(batch.id);
+    expect(await flagged()).toEqual(before);
+  });
 });

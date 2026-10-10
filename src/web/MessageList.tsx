@@ -76,6 +76,8 @@ export function MessageList(props: MessageListProps) {
           <button className="chip" disabled={props.busy || !archive} title={archive ? undefined : "This account has no Archive folder"} onClick={() => archive && props.onBulk({ type: "move", destination: archive.path })}>Archive</button>
           <button className="chip" disabled={props.busy} onClick={() => props.onBulk({ type: "mark_read" })}>Mark read</button>
           <button className="chip" disabled={props.busy} onClick={() => props.onBulk({ type: "mark_unread" })}>Unread</button>
+          <button className="chip" disabled={props.busy} onClick={() => props.onBulk({ type: "flag" })}>Flag</button>
+          <button className="chip" disabled={props.busy} onClick={() => props.onBulk({ type: "unflag" })}>Unflag</button>
           <select
             className="input"
             style={{ width: "auto", height: 26 }}
@@ -128,7 +130,7 @@ export function MessageList(props: MessageListProps) {
           <span className={`row-dot ${message.read ? "" : "unread"}`} />
           <span className="row-sender truncate">{senderName(message)}</span>
           <span className="row-subject truncate">{message.subject || "(No subject)"}</span>
-          <span className="row-mark" style={{ fontSize: proposed ? 10 : 11, lineHeight: 1, color: proposed ? "var(--ink)" : "var(--dim)" }}>{entry?.mark ?? ""}</span>
+          <span className="row-mark" style={{ fontSize: proposed ? 10 : 11, lineHeight: 1, color: proposed ? "var(--ink)" : "var(--dim)" }}>{entry?.mark ?? (message.flagged ? <span aria-label="Flagged">⚑</span> : "")}</span>
           <span className="row-lead-wrap">
             {entry ? <span className={`row-lead ${proposed ? "propose" : ""}`}>{entry.lead}{proposed ? "" : " · "}</span> : null}
             {proposed ? null : <span className="row-snippet truncate">{message.preview}</span>}
@@ -141,7 +143,7 @@ export function MessageList(props: MessageListProps) {
     </div>
 
     <div className="hintbar">
-      <span className="t-dim">click or ↵ open · j k move · x multi-select · ⌘-click add · shift-click range · e archive · u unread · / search · ⌘Z undo</span>
+      <span className="t-dim">click or ↵ open · j k move · x multi-select · ⌘-click add · shift-click range · e archive · u unread · s flag · / search · ⌘Z undo</span>
     </div>
   </>;
 }

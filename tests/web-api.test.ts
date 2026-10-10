@@ -143,3 +143,14 @@ test("web API preserves typed lifecycle error codes and HTTP status", async () =
   expect(accountConflict.code).toBe("account_conflict");
   expect(accountConflict.status).toBe(409);
 });
+
+test("web API requests account settings discovery for an address", async () => {
+  const requested: Array<{ url: string; method: string; body: unknown }> = [];
+  fetchSpy.mockImplementation(Object.assign(async (input: string | URL | Request, init?: RequestInit) => {
+    requested.push({ url: String(input), method: init?.method ?? "GET", body: JSON.parse(String(init?.body)) });
+    return Response.json({ provider: "outlook", source: "provider", settings: null });
+  }, { preconnect: globalThis.fetch.preconnect }));
+
+  expect(await api.discoverAccount("person@hotmail.com")).toEqual({ provider: "outlook", source: "provider", settings: null });
+  expect(requested).toEqual([{ url: "/api/accounts/discover", method: "POST", body: { email: "person@hotmail.com" } }]);
+});

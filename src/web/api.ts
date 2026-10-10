@@ -3,6 +3,7 @@ import { accountHealthSchema, reauthorizationSchema, synchronizationStatusSchema
 import type { ZodType } from "zod";
 import { z } from "zod";
 import {
+  accountDiscoverySchema,
   accountSchema,
   accountSettingsSchema,
   connectionTestResultSchema,
@@ -11,11 +12,13 @@ import {
   canonicalMessageSummarySchema,
   canonicalConversationSchema,
   draftSchema,
+  identitySchema,
   outgoingMailLimitsSchema,
   operationBatchSchema,
   proposalSchema,
   sendReceiptSchema,
   type Account,
+  type AccountDiscovery,
   type AccountSettings,
   type CreateAccountInput,
   type CreateFolderInput,
@@ -23,6 +26,8 @@ import {
   type DeleteFolderInput,
   type DirectActionInput,
   type Folder,
+  type CreateIdentityInput,
+  type Identity,
   type CanonicalMessageDetail,
   type CanonicalMessageSummary,
   type CanonicalConversation,
@@ -141,6 +146,8 @@ export const api = {
   accounts: (signal?: AbortSignal): Promise<Account[]> => request("/accounts", accountSchema.array(), withSignal(signal)),
   createAccount: (input: CreateAccountInput): Promise<Account> =>
     request("/accounts", accountSchema, { method: "POST", ...jsonBody(input) }),
+  discoverAccount: (email: string, signal?: AbortSignal): Promise<AccountDiscovery> =>
+    request("/accounts/discover", accountDiscoverySchema, { method: "POST", ...jsonBody({ email }), ...withSignal(signal) }),
   testNewAccount: (input: CreateAccountInput, signal?: AbortSignal) =>
     request("/accounts/test", connectionTestResultSchema, {
       method: "POST",
@@ -186,6 +193,19 @@ export const api = {
       ...jsonBody({ path: input.path }),
       ...withSignal(signal),
     }),
+  identities: (accountId: string, signal?: AbortSignal): Promise<Identity[]> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/identities`, identitySchema.array(), withSignal(signal)),
+  addIdentity: (accountId: string, input: CreateIdentityInput, signal?: AbortSignal): Promise<Identity> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/identities`, identitySchema, {
+      method: "POST",
+      ...jsonBody(input),
+      ...withSignal(signal),
+    }),
+  removeIdentity: (accountId: string, identityId: string, signal?: AbortSignal) => request(
+    `/accounts/${encodeURIComponent(accountId)}/identities/${encodeURIComponent(identityId)}`,
+    connectionTestResultSchema,
+    { method: "DELETE", ...withSignal(signal) },
+  ),
   drafts: (accountId: string, signal?: AbortSignal): Promise<Draft[]> =>
     request(`/accounts/${encodeURIComponent(accountId)}/drafts`, draftSchema.array(), withSignal(signal)),
   draft: (accountId: string, draftId: string, signal?: AbortSignal): Promise<Draft> =>
@@ -263,6 +283,9 @@ export const api = {
   downloadAttachment: requestAttachment,
   conversation: (id: string, signal?: AbortSignal): Promise<CanonicalConversation> =>
     request(`/conversations/${encodeURIComponent(id)}`, canonicalConversationSchema, withSignal(signal)),
+  conversationMessages: (id: string, accountId: string, signal?: AbortSignal): Promise<CanonicalMessageSummary[]> =>
+    request(`/conversations/${encodeURIComponent(id)}/messages?accountId=${encodeURIComponent(accountId)}`,
+      canonicalMessageSummarySchema.array(), withSignal(signal)),
   sendMessage: (input: SendMessageInput, signal?: AbortSignal): Promise<SendReceipt> =>
     request("/messages/send", sendReceiptSchema, {
       method: "POST",

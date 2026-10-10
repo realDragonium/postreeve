@@ -1,4 +1,5 @@
 import { uniqueCanonicalMessages } from "../../shared/canonical-messages";
+import { defaultSaveSentCopy } from "../../shared/sent-copy";
 import { mailboxQuerySchema, type MailboxQueryInput, type MailboxPage as IndexedMailboxPage } from "../../shared/mailbox-query";
 import { normalizedQuery, readCursor } from "../sync/query";
 import { accountHealth } from "../sync/health";
@@ -25,12 +26,15 @@ import type {
   DraftRecipientField,
   DraftVersionInput,
   Folder,
+  Identity,
+  CreateIdentityInput,
   ListMessagesInput,
   MessageRef,
   OperationBatch,
   OperationResult,
   OutboundAddress,
   Proposal,
+  TriageAction,
   ProviderDraftRef,
   RenameFolderInput,
   SendMessageInput,
@@ -42,6 +46,7 @@ import type {
 import {
   createFolderInputSchema,
   createDraftInputSchema,
+  createIdentityInputSchema,
   createProposalInputSchema,
   deleteFolderInputSchema,
   directActionInputSchema,
@@ -56,6 +61,7 @@ import {
 } from "../../shared/contracts";
 import type { Store, StoredAccount, StoredBatch } from "../db/store";
 import type { StoredOperation } from "../db/schema";
+import type { ConfirmedState } from "../sync/store";
 import {
   MailProviderRegistry,
   toCanonicalObservation,
@@ -71,6 +77,7 @@ import {
   MailSendPreDispatchError,
   MailSenderRegistry,
   type ConversationSendContext,
+  type OutgoingMessage,
   type MailSender,
 } from "../mail/sender";
 import { DraftConflictError, DraftDeletedError, DraftNotFoundError } from "./errors";
@@ -106,9 +113,11 @@ export interface PostreeveContext {
 
 export const DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
+const identityLimit = 100;
+
 interface PreparedMessageSend {
   readonly account: StoredAccount;
-  readonly input: SendMessageInput;
+  readonly input: OutgoingMessage;
   readonly sender: MailSender;
   readonly context?: ConversationSendContext;
 }
@@ -240,6 +249,7 @@ export class PostreeveService {
         secure: input.smtpSecure,
         username: input.smtpUsername,
         password: input.smtpPassword,
+        saveSentCopy: input.saveSentCopy ?? defaultSaveSentCopy(input.host),
       },
     };
     const clients = await this.#verifiedClients(publicAccount, credentials);
@@ -291,6 +301,7 @@ export class PostreeveService {
       smtpPort: credentials.smtp.port,
       smtpSecure: credentials.smtp.secure,
       smtpUsername: credentials.smtp.username,
+      saveSentCopy: savesSentCopy(credentials.imap.host, credentials.smtp),
     };
   }
 
@@ -436,6 +447,11 @@ export class PostreeveService {
     return conversation;
   }
 
+  async getConversationMessages(id: string, preferredAccountId?: string): Promise<CanonicalMessageSummary[]> {
+    const conversation = await this.getConversation(id);
+    return this.#store.synchronization.conversationSummaries(this.#context.tenantId, conversation.messages, preferredAccountId);
+  }
+
   async readMessages(references: MessageRef[]): Promise<CanonicalMessageDetail[]> {
     if (references.length === 0) return [];
     const accountId = references[0]!.accountId;
@@ -542,6 +558,29 @@ export class PostreeveService {
       mediaType: safeAttachmentMediaType(downloaded.mediaType),
       content: downloaded.content,
     };
+  }
+
+  async listIdentities(accountId: string): Promise<Identity[]> {
+    await this.#requireAccount(accountId);
+    return this.#store.listIdentities(this.#context.tenantId, accountId);
+  }
+
+  async addIdentity(accountId: string, rawInput: CreateIdentityInput): Promise<{ identity: Identity; created: boolean }> {
+    const input = createIdentityInputSchema.parse(rawInput);
+    const account = await this.#requireAccount(accountId);
+    if (input.address === account.email.toLowerCase()) throw new Error("The primary address is already an identity");
+    return this.#store.addIdentity(this.#context.tenantId, {
+      id: crypto.randomUUID(),
+      accountId,
+      name: input.name,
+      address: input.address,
+      createdAt: new Date().toISOString(),
+    }, identityLimit);
+  }
+
+  async removeIdentity(accountId: string, id: string): Promise<void> {
+    await this.#requireAccount(accountId);
+    await this.#store.removeIdentity(this.#context.tenantId, accountId, id);
   }
 
   async sendMessage(rawInput: SendMessageInput): Promise<SendReceipt> {
@@ -723,10 +762,7 @@ export class PostreeveService {
     if (draft.attachments.some((attachment) => !attachment.id)) {
       throw new Error("Some draft files have no stored content; remove or attach them again before sending");
     }
-    const account = await this.#requireAccount(accountId);
-    if (draft.identity.address.toLocaleLowerCase() !== account.email.toLocaleLowerCase()) {
-      throw new Error("Draft identity does not belong to the selected account");
-    }
+    const from = await this.#draftSender(accountId, draft.identity);
     const intent = draft.mode === "new"
       ? { type: "new" as const }
       : draft.source
@@ -743,7 +779,7 @@ export class PostreeveService {
       intent,
     });
     const files = await this.#store.draftFiles(this.#context.tenantId, accountId, draft);
-    const prepared = await this.#prepareMessageSend(input);
+    const prepared = await this.#prepareMessageSend(input, from);
     const claim = await this.#store.claimDraftSend(
       this.#context.tenantId,
       accountId,
@@ -1133,8 +1169,20 @@ export class PostreeveService {
     return { tenantId: this.#context.tenantId, accountId };
   }
 
-  async #prepareMessageSend(input: SendMessageInput): Promise<PreparedMessageSend> {
-    const account = await this.#requireAccount(input.accountId);
+  async #draftSender(accountId: string, identity: OutboundAddress): Promise<OutboundAddress> {
+    const account = await this.#requireAccount(accountId);
+    const address = identity.address.toLowerCase();
+    const storedName = address === account.email.toLowerCase()
+      ? account.name
+      : (await this.#store.listIdentities(this.#context.tenantId, accountId))
+        .find((candidate) => candidate.address === address)?.name;
+    if (storedName === undefined) throw new Error("Draft identity does not belong to the selected account");
+    return { name: identity.name || storedName, address: identity.address };
+  }
+
+  async #prepareMessageSend(sendInput: SendMessageInput, from?: OutboundAddress): Promise<PreparedMessageSend> {
+    const account = await this.#requireAccount(sendInput.accountId);
+    const input: OutgoingMessage = { ...sendInput, from: from ?? { name: account.name, address: account.email } };
     const sender = this.#senders.forAccount(input.accountId);
     const intent = input.intent ?? { type: "new" as const };
     if (intent.type === "new") return { account, input, sender };
@@ -1233,15 +1281,41 @@ export class PostreeveService {
   }
 
   async #dispatchMessageSend(prepared: PreparedMessageSend, files: readonly OutgoingAttachment[] = []): Promise<SendReceipt> {
-    const receipt = sendReceiptSchema.parse(await prepared.sender.send(prepared.input, prepared.context, {
+    const sent = await prepared.sender.send(prepared.input, prepared.context, {
       files, maxMessageBytes: this.outgoingMailLimits.maxMessageBytes,
-    }));
+    });
+    const receipt = sendReceiptSchema.parse(sent.receipt);
     if (receipt.accountId !== prepared.input.accountId) {
       throw new Error("Mail sender returned a receipt for another account");
     }
-    return prepared.context && receipt.accepted.length > 0
-      ? this.#recordConversationSend(prepared.input.accountId, prepared.account.kind, receipt, prepared.context)
+    if (receipt.accepted.length === 0) return receipt;
+    const recorded = prepared.context
+      ? await this.#recordConversationSend(prepared.input.accountId, prepared.account.kind, receipt, prepared.context)
       : receipt;
+    return this.#saveSentCopy(prepared.account, recorded, sent.mime);
+  }
+
+  async #saveSentCopy(account: StoredAccount, receipt: SendReceipt, mime: Buffer): Promise<SendReceipt> {
+    if (account.kind !== "imap") return receipt;
+    try {
+      const credentials = this.#credentialsFor(account);
+      if (credentials.kind !== "imap" || !credentials.smtp || !savesSentCopy(credentials.imap.host, credentials.smtp)) {
+        return receipt;
+      }
+      const provider = this.#providers.forAccount(account.id);
+      if (!provider.appendSentMessage) throw new Error("This mail provider cannot store sent copies");
+      const copy = await provider.appendSentMessage(account.id, mime, receipt.submittedAt);
+      if (copy) {
+        this.#store.synchronization.observe(
+          { tenantId: this.#context.tenantId, accountId: account.id, provider: account.kind },
+          [copy],
+          this.synchronization.now(),
+        );
+      }
+      return receipt;
+    } catch (error) {
+      return withReceiptWarning(receipt, `Message was sent, but a copy could not be saved to Sent: ${errorMessage(error)}`);
+    }
   }
 
   async applyDirectActions(rawInput: DirectActionInput): Promise<OperationBatch> {
@@ -1350,8 +1424,7 @@ export class PostreeveService {
           operation = { result: operationResult(item, "applied", null), applied: null };
         } else {
           const applied = await provider.apply(item.message, item.action);
-          const identityError = await this.#recordProviderMove(proposal.accountId, applied,
-            item.action.type === "mark_read" ? true : item.action.type === "mark_unread" ? false : undefined);
+          const identityError = await this.#recordProviderMove(proposal.accountId, applied, confirmedStateAfter(item.action));
           operation = { result: operationResult(item, "applied", identityError), applied };
         }
       } catch (error) {
@@ -1405,7 +1478,10 @@ export class PostreeveService {
         const reversed = await provider.undo(operation.applied);
         const reverse = reversed ?? { previous: operation.applied.current,
           current: { ...operation.applied.previous, modseq: null } };
-        const identityError = await this.#recordProviderMove(batch.accountId, reverse, operation.applied.previousRead);
+        const { action, previousRead, previousFlagged } = operation.applied;
+        const isFlagChange = action.type === "flag" || action.type === "unflag";
+        const identityError = await this.#recordProviderMove(batch.accountId, reverse,
+          isFlagChange ? { flagged: previousFlagged } : { read: previousRead, flagged: previousFlagged });
         storedOperations.push({
           ...operation,
           result: { ...operation.result, status: "undone", error: identityError },
@@ -1432,7 +1508,7 @@ export class PostreeveService {
     return toPublicBatch(updated);
   }
 
-  async #recordProviderMove(accountId: string, move: ProviderLocationMove, read?: boolean): Promise<string | null> {
+  async #recordProviderMove(accountId: string, move: ProviderLocationMove, state: ConfirmedState): Promise<string | null> {
     try {
       const account = await this.#requireAccount(accountId);
       const retained = await this.#store.recordProviderMove(
@@ -1441,7 +1517,7 @@ export class PostreeveService {
         move.previous,
         move.current,
       );
-      this.#store.synchronization.confirmedAction({ tenantId: this.#context.tenantId, accountId, provider: account.kind }, move.previous, move.current, read);
+      this.#store.synchronization.confirmedAction({ tenantId: this.#context.tenantId, accountId, provider: account.kind }, move.previous, move.current, state);
       if (!retained) {
         return "Provider action succeeded, but local message identity could not be retained: source identity is unknown";
       }
@@ -1554,6 +1630,7 @@ export class PostreeveService {
           secure: input.smtpSecure,
           username: input.smtpUsername,
           password: input.smtpPassword ?? current.smtp.password,
+          saveSentCopy: input.saveSentCopy ?? savesSentCopy(current.imap.host, current.smtp),
         },
       },
     };
@@ -1604,6 +1681,18 @@ export class PostreeveService {
 
 function replySubject(subject: string): string {
   return /^re:/i.test(subject) ? subject : `Re: ${subject}`;
+}
+
+function confirmedStateAfter(action: TriageAction): ConfirmedState {
+  switch (action.type) {
+    case "mark_read": return { read: true };
+    case "mark_unread": return { read: false };
+    case "flag": return { flagged: true };
+    case "unflag": return { flagged: false };
+    case "leave":
+    case "move":
+    case "trash": return {};
+  }
 }
 
 function operationResult(
@@ -1666,6 +1755,10 @@ function mirrorFailure(draft: Draft, error: string, completed?: DraftMirrorArtif
     ...(mirroredVersion ? { mirroredVersion } : {}),
     ...(previousRef ? { ref: previousRef } : {}),
   };
+}
+
+function savesSentCopy(imapHost: string, smtp: { readonly saveSentCopy?: boolean | undefined }): boolean {
+  return smtp.saveSentCopy ?? defaultSaveSentCopy(imapHost);
 }
 
 function withReceiptWarning(receipt: SendReceipt, warning: string): SendReceipt {

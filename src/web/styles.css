@@ -255,6 +255,10 @@ select.input { cursor: pointer; }
 .readscroll { flex: 1; min-height: 0; overflow-y: auto; }
 .readinner { max-width: 780px; padding: 26px 24px 40px; }
 .msghead { display: grid; grid-template-columns: 2px minmax(0, 1fr); padding-bottom: 14px; }
+.convmsg { padding-top: 14px; border-top: 1px solid var(--div); }
+.convmsg + .convmsg { margin-top: 14px; }
+.convhead { width: 100%; padding: 0 0 0 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.convpreview { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .msgrail { width: 2px; }
 .msgsubj { font-size: 20px; font-weight: 600; line-height: 1.25; margin: 0 0 8px; padding-left: 14px; text-wrap: pretty; }
 .msgmeta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; padding-left: 14px; }

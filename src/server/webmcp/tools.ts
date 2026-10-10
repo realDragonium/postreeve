@@ -60,6 +60,8 @@ const webMcpMessageActionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("trash") }),
   z.object({ type: z.literal("mark_read") }),
   z.object({ type: z.literal("mark_unread") }),
+  z.object({ type: z.literal("flag") }),
+  z.object({ type: z.literal("unflag") }),
 ]);
 const applyMessageActionsInputSchema = z.object({
   accountId: z.string().min(1),
@@ -255,7 +257,7 @@ export function createPostreeveWebMcpTools(services: WebMcpServices): readonly W
       name: "apply_message_actions",
       title: "Apply mailbox actions",
       description:
-        "Immediately apply explicit move, trash, or read-state actions to messages in one account. Messages are revalidated before each action, every result is audited, and supported operations can be undone. Trash moves mail to the Trash folder; permanent deletion is never performed.",
+        "Immediately apply explicit move, trash, read-state, or flag actions to messages in one account. Messages are revalidated before each action, every result is audited, and supported operations can be undone. Trash moves mail to the Trash folder; permanent deletion is never performed.",
       inputSchema: inputJsonSchema(applyMessageActionsInputSchema),
       annotations: mutatingAnnotations,
       execute: async (input, { signal }) => {

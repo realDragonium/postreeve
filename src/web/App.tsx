@@ -1,7 +1,7 @@
 import type { MailboxPage, MailboxSource } from "../shared/mailbox-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { Account, Draft, Folder, MessageSummary, ReceivedAttachment, TriageAction } from "../shared/contracts";
+import type { Account, Draft, Folder, Identity, MessageSummary, ReceivedAttachment, TriageAction } from "../shared/contracts";
 import { api } from "./api";
 import { registerPostreeveWebMcp } from "../server/webmcp/register";
 import { subscribeToWebMcpFolderLists, subscribeToWebMcpMailboxViews, webMcpServices } from "./webmcp";
@@ -9,6 +9,7 @@ import { exposedToolNames, loadHiddenTools, storeHiddenTools } from "./assistant
 import { ActivityView } from "./ActivityView";
 import { MessageList } from "./MessageList";
 import { Reader } from "./Reader";
+import { conversationThread } from "./conversation-view";
 import { Sidebar } from "./Sidebar";
 import { SettingsView, settingsSections, type SettingsSection } from "./SettingsView";
 import { AccountSetup, ComposeModal, DraftsSheet, FolderSheet, IdentitySheet, type ComposeIntent } from "./panels";
@@ -30,13 +31,11 @@ import {
   type Actor,
 } from "./provenance";
 import {
-  loadLocalIdentities,
-  storeLocalIdentities,
-  type LocalIdentity,
   type MessageFilter,
   type MessageSort,
 } from "./mail-ui-state";
 import { migrateLocalDraftsOnce } from "./draft-state";
+import { migrateLocalIdentitiesOnce } from "./identities";
 import { useTheme } from "./theme";
 import type { MailboxEvent } from "../shared/mailbox-events";
 import { subscribeToMailboxEvents } from "./mailbox-events";
@@ -106,9 +105,6 @@ function App() {
   const [actorFilter, setActorFilter] = useState<Actor | "all">("all");
   const [hiddenTools, setHiddenTools] = useState<ReadonlySet<string>>(loadHiddenTools);
   const [overlay, setOverlay] = useState<Overlay>(null);
-  const [identities, setIdentities] = useState<LocalIdentity[]>(loadLocalIdentities);
-
-  useEffect(() => storeLocalIdentities(identities), [identities]);
   useEffect(() => storeHiddenTools(hiddenTools), [hiddenTools]);
   const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>(() => loadNotificationPreferences(localStorage));
   const [notificationPermission, setNotificationPermission] = useState<NotificationAccess>(notificationAccess);
@@ -149,6 +145,10 @@ function App() {
     : draftLoadFailure
       ? "Draft loading failed"
       : null;
+  const identityResults = useQueries({
+    queries: accounts.map((account) => ({ queryKey: ["identities", account.id], queryFn: () => api.identities(account.id) })),
+  });
+  const identities: readonly Identity[] = identityResults.flatMap((result) => result.data ?? []);
   const migrationAccountSnapshot = accounts.map(({ id }) => id).sort().join("\0");
   const migratedAccountSnapshot = useRef<string | null>(null);
   useEffect(() => {
@@ -159,6 +159,11 @@ function App() {
     }).catch((error: unknown) => {
       migratedAccountSnapshot.current = null;
       flash(error instanceof Error ? error.message : "Local draft migration failed");
+    });
+    void migrateLocalIdentitiesOnce(localStorage, accounts, api.addIdentity).then(async ({ migrated }) => {
+      if (migrated > 0) await queryClient.invalidateQueries({ queryKey: ["identities"] });
+    }).catch((error: unknown) => {
+      flash(error instanceof Error ? error.message : "Local identity migration failed");
     });
   }, [accountsQuery.isSuccess, migrationAccountSnapshot, queryClient]);
 
@@ -217,11 +222,13 @@ function App() {
   ].filter(Boolean).join(" ") : null;
 
   const openMessage = messages.find((message) => messageMatchesKey(message, openKey)) ?? null;
-  const detailQuery = useQuery({
-    queryKey: ["message", openKey, openMessage?.ref],
-    queryFn: async () => (await api.readMessages(openMessage ? [openMessage.ref] : []))[0] ?? null,
-    enabled: Boolean(openMessage),
+  const openConversationId = openMessage?.conversationId;
+  const conversationQuery = useQuery({
+    queryKey: ["conversation", openConversationId, openMessage?.ref.accountId],
+    queryFn: ({ signal }) => api.conversationMessages(openConversationId ?? "", openMessage?.ref.accountId ?? "", signal),
+    enabled: openConversationId !== undefined,
   });
+  const thread = openMessage ? conversationThread(openMessage, conversationQuery.data) : [];
 
   const scopeAccountId = scope?.kind === "account" ? scope.accountId : null;
   const scopeFolders = scopeAccountId
@@ -240,6 +247,7 @@ function App() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["messages"] }),
       queryClient.invalidateQueries({ queryKey: ["message"] }),
+      queryClient.invalidateQueries({ queryKey: ["conversation"] }),
       ...accounts.flatMap((account) => [
         queryClient.invalidateQueries({ queryKey: ["folders", account.id] }),
         queryClient.invalidateQueries({ queryKey: ["batches", account.id] }),
@@ -278,6 +286,8 @@ function App() {
       const label = action.type === "move" ? `Moved ${targets.length} to ${action.destination}`
         : action.type === "trash" ? `Moved ${targets.length} to Trash`
         : action.type === "mark_read" ? `Marked ${targets.length} read`
+        : action.type === "flag" ? `Flagged ${targets.length}`
+        : action.type === "unflag" ? `Unflagged ${targets.length}`
         : `Marked ${targets.length} unread`;
       setUndoStack((current) => [{ label, batchIds: created.map(({ id }) => id) }, ...current].slice(0, 8));
       setSelected(new Set());
@@ -483,6 +493,7 @@ function App() {
         undoLast();
         return;
       }
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === "[") {
         event.preventDefault();
         setSideOpen((current) => !current);
@@ -530,6 +541,10 @@ function App() {
       if (event.key === "u") {
         event.preventDefault();
         applyTo(targetsFor(current), { type: current.read ? "mark_unread" : "mark_read" });
+      }
+      if (event.key === "s") {
+        event.preventDefault();
+        applyTo(targetsFor(current), { type: current.flagged ? "unflag" : "flag" });
       }
     }
     document.addEventListener("keydown", onKey);
@@ -667,31 +682,28 @@ function App() {
           </section>
 
           {openKey ? <section className="mail-reader-pane" aria-label="Message reader">
-            {detailQuery.data ? <Reader
-              key={`${detailQuery.data.ref.accountId}:${detailQuery.data.canonicalId}`}
-              message={detailQuery.data}
-              folders={foldersByAccount.get(detailQuery.data.ref.accountId) ?? []}
-              provenance={provenance.get(provenanceKey(detailQuery.data.ref))}
+            {openMessage ? <Reader
+              key={openKey}
+              message={openMessage}
+              thread={thread}
+              folders={foldersByAccount.get(openMessage.ref.accountId) ?? []}
+              provenance={provenance.get(provenanceKey(openMessage.ref))}
               folderName={folderName}
               position={`${focus + 1} of ${messages.length}`}
               busy={actionMutation.isPending}
-              error={detailQuery.error?.message ?? null}
               canUndo={undoStack.length > 0}
               onClose={() => setOpenKey(null)}
               onStep={step}
-              onAction={(action) => openMessage && applyTo([openMessage], action)}
+              onAction={(action) => applyTo([openMessage], action)}
               onAcceptProposal={(proposalId) => acceptMutation.mutate(proposalId)}
               onUndo={undoLast}
-              onCompose={(mode) => detailQuery.data && setOverlay({
+              onCompose={(mode, source) => setOverlay({
                 kind: "compose",
-                accountId: detailQuery.data.ref.accountId,
-                intent: { mode, message: detailQuery.data },
+                accountId: source.ref.accountId,
+                intent: { mode, message: source },
               })}
-              onDownloadAttachment={(attachment) => downloadReceivedAttachment(
-                detailQuery.data!.ref.accountId,
-                attachment,
-              )}
-            /> : <div className="pad t-dim">{detailQuery.isError ? detailQuery.error.message : "Loading message…"}</div>}
+              onDownloadAttachment={downloadReceivedAttachment}
+            /> : <div className="pad t-dim">Loading message…</div>}
           </section> : null}
         </div> : null}
 
@@ -769,7 +781,7 @@ function App() {
     {overlay?.kind === "identities" && overlayAccount ? <IdentitySheet
       account={overlayAccount}
       identities={identities.filter((identity) => identity.accountId === overlayAccount.id)}
-      onChange={(next) => setIdentities((current) => [...current.filter((identity) => identity.accountId !== overlayAccount.id), ...next])}
+      onChange={(next) => queryClient.setQueryData<Identity[]>(["identities", overlayAccount.id], next)}
       onClose={() => setOverlay(null)}
     /> : null}
 

@@ -1,5 +1,6 @@
 import type { SynchronizationOptions } from "../../src/server/sync/runner";
-import type { OutgoingContent } from "../../src/server/mail/outgoing-content";
+import { simpleParser, type AddressObject } from "mailparser";
+import { composeMime, type OutgoingContent } from "../../src/server/mail/outgoing-content";
 import {
   sendMessageInputSchema,
   sendReceiptSchema,
@@ -10,7 +11,6 @@ import {
   type MessageDetail,
   type MessageRef,
   type MessageSummary,
-  type SendMessageInput,
   type SendReceipt,
   type TriageAction,
   type ProviderDraftRef,
@@ -33,6 +33,8 @@ import {
   MailSenderRegistry,
   type ConversationSendContext,
   type MailSender,
+  type OutgoingMessage,
+  type SentMessage,
 } from "../../src/server/mail/sender";
 import { CredentialVault } from "../../src/server/security/credentials";
 import type { ImapAccountCredentials } from "../../src/server/security/credentials";
@@ -43,6 +45,10 @@ interface TestMessage extends Omit<MessageDetail, "attachments"> {
 
 const uidValidity = "1723371481";
 const testMasterKey = Buffer.alloc(32, 7).toString("base64");
+
+export function testCredentialVault(): CredentialVault {
+  return new CredentialVault(testMasterKey);
+}
 
 export function testAccountInput(name = "Work", email = "person@example.test"): CreateAccountInput {
   return {
@@ -88,6 +94,7 @@ interface TestHarnessOptions {
   onDraftMirror?: (draft: Draft) => void | Promise<void>;
   onDraftUpdate?: (draft: Draft, ref: ProviderDraftRef) => void | Promise<void>;
   rotateDraftRefOnUpdate?: boolean;
+  sentCopyFailure?: Error;
   onDraftRemove?: (draftId: string) => void | Promise<void>;
   draftRemoveFailure?: () => Error | undefined;
   providerDraftState?: Map<string, ProviderDraft>;
@@ -111,12 +118,13 @@ export async function createTestHarness(options: TestHarnessOptions = {}) {
 export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
   const tenantId = options.tenantId ?? "test-tenant";
   const store = new Store(options.storePath ?? ":memory:");
-  const sent: SendMessageInput[] = [];
-  const sendAttempts: SendMessageInput[] = [];
+  const sent: OutgoingMessage[] = [];
+  const sendAttempts: OutgoingMessage[] = [];
   const sendContents: Array<OutgoingContent | undefined> = [];
   const sendContexts: Array<ConversationSendContext | undefined> = [];
   const connections: ImapAccountCredentials[] = [];
   const draftMirrorAttempts: Draft[] = [];
+  const sentCopies: Buffer[] = [];
   const providers = new Map<string, MailProvider>();
   const service = new PostreeveService(
     store,
@@ -145,6 +153,10 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
         options.onDraftUpdate,
         options.rotateDraftRefOnUpdate ?? false,
         options.downloadAttachment,
+        async (mime) => {
+          if (options.sentCopyFailure) throw options.sentCopyFailure;
+          sentCopies.push(mime);
+        },
       );
       providers.set(accountId, provider);
       return provider;
@@ -153,13 +165,9 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
       connections.push(structuredClone(credentials));
       const custom = options.senderForAccount?.(account);
       if (custom) return custom;
-      return new TestMailSender(account.id, async (input, receipt, context) => {
+      return new TestMailSender(account, async (input, _receipt, context) => {
         sent.push(structuredClone(input));
         sendContexts.push(context ? structuredClone(context) : undefined);
-        const provider = providers.get(account.id);
-        if (provider instanceof TestMailProvider) {
-          provider.appendSent(input, receipt.messageId, receipt.submittedAt, context);
-        }
       }, options.smtpFailure, {
         onAttempt: (input, content) => {
           sendContents.push(content ? structuredClone(content) : undefined);
@@ -183,6 +191,7 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
     sendContents,
     connections,
     draftMirrorAttempts,
+    sentCopies,
     providerForAccount: (accountId: string): MailProvider | undefined => providers.get(accountId),
     providerDrafts: async (accountId: string) => providers.get(accountId)?.listDrafts({ tenantId, accountId }) ?? [],
     replaceProviderDraftVersion: (accountId: string, id: string, version: number) => {
@@ -213,6 +222,7 @@ class TestMailProvider implements MailProvider {
   readonly #onDraftUpdate: ((draft: Draft, ref: ProviderDraftRef) => void | Promise<void>) | undefined;
   readonly #rotateDraftRefOnUpdate: boolean;
   readonly #downloadAttachment: TestHarnessOptions["downloadAttachment"];
+  readonly #onSentCopy: (mime: Buffer) => Promise<void>;
 
   constructor(
     accountId: string,
@@ -229,7 +239,9 @@ class TestMailProvider implements MailProvider {
     onDraftUpdate: ((draft: Draft, ref: ProviderDraftRef) => void | Promise<void>) | undefined,
     rotateDraftRefOnUpdate: boolean,
     downloadAttachment: TestHarnessOptions["downloadAttachment"],
+    onSentCopy: (mime: Buffer) => Promise<void>,
   ) {
+    this.#onSentCopy = onSentCopy;
     this.#accountId = accountId;
     this.#messages = testMessages(accountId, duplicateDelivery, archiveDelivery);
     this.#moveChangesUid = missingMessageId;
@@ -382,6 +394,7 @@ class TestMailProvider implements MailProvider {
     if (!message) throw new Error(`Message UID ${reference.uid} changed or no longer exists`);
     const previous = structuredClone(message.ref);
     const previousRead = message.read;
+    const previousFlagged = message.flagged;
     switch (action.type) {
       case "leave":
         break;
@@ -390,6 +403,12 @@ class TestMailProvider implements MailProvider {
         break;
       case "mark_unread":
         message.read = false;
+        break;
+      case "flag":
+        message.flagged = true;
+        break;
+      case "unflag":
+        message.flagged = false;
         break;
       case "move":
         message.mailbox = action.destination;
@@ -403,7 +422,7 @@ class TestMailProvider implements MailProvider {
         break;
     }
     message.ref.modseq = String(Number(message.ref.modseq ?? "0") + 1);
-    return { current: structuredClone(message.ref), previous, action, previousRead };
+    return { current: structuredClone(message.ref), previous, action, previousRead, previousFlagged };
   }
 
   async undo(applied: AppliedMailAction): Promise<ProviderLocationMove | null> {
@@ -412,33 +431,37 @@ class TestMailProvider implements MailProvider {
     const previous = structuredClone(message.ref);
     message.mailbox = applied.previous.mailbox;
     message.read = applied.previousRead;
+    if (applied.previousFlagged !== undefined) message.flagged = applied.previousFlagged;
     message.ref = { ...applied.previous, modseq: String(Number(message.ref.modseq ?? "0") + 1) };
     return applied.action.type === "move" || applied.action.type === "trash"
       ? { previous, current: structuredClone(message.ref) }
       : null;
   }
 
-  appendSent(input: SendMessageInput, messageId: string, sentAt: string, context?: ConversationSendContext): void {
+  async appendSentMessage(accountId: string, mime: Buffer, sentAt: string): Promise<MessageSummary> {
+    this.#assertAccount(accountId);
+    await this.#onSentCopy(mime);
+    const parsed = await simpleParser(mime);
     const uid = Math.max(0, ...this.#messages.map((message) => message.ref.uid)) + 1;
-    const ref: MessageRef = { accountId: this.#accountId, mailbox: "Sent", uidValidity, uid, modseq: "1" };
-    this.#messages.push({
-      ref,
+    const text = parsed.text ?? "";
+    const message: TestMessage = {
+      ref: { accountId: this.#accountId, mailbox: "Sent", uidValidity, uid, modseq: "1" },
       mailbox: "Sent",
-      messageId,
-      ...(context?.type === "reply" || context?.type === "reply_all" ? {
-        inReplyTo: context.inReplyTo,
-        references: [...context.references],
-      } : {}),
-      subject: input.subject,
+      messageId: parsed.messageId ?? "",
+      inReplyTo: parsed.inReplyTo ?? null,
+      references: typeof parsed.references === "string" ? [parsed.references] : parsed.references ?? [],
+      subject: parsed.subject ?? "",
       from: [{ name: "Test user", address: "person@example.test" }],
-      to: input.to,
+      to: addresses(parsed.to),
       receivedAt: sentAt,
-      preview: input.text.replace(/\s+/g, " ").trim().slice(0, 240),
-      text: input.text,
+      preview: text.replace(/\s+/g, " ").trim().slice(0, 240),
+      text,
       html: null,
       read: true,
       flagged: false,
-    });
+    };
+    this.#messages.push(message);
+    return toSummary(message);
   }
 
   replaceDraftVersion(tenantId: string, id: string, version: number): void {
@@ -490,15 +513,15 @@ function draftStateKey(scope: ProviderDraftScope, draftId: string): string {
 }
 
 class TestMailSender implements MailSender {
-  readonly #accountId: string;
+  readonly #account: Account;
   readonly #onSent: (
-    input: SendMessageInput,
+    input: OutgoingMessage,
     receipt: SendReceipt,
     context?: ConversationSendContext,
   ) => void | Promise<void>;
   readonly #verificationFailure: Error | undefined;
   readonly #behavior: {
-    readonly onAttempt: (input: SendMessageInput, content?: OutgoingContent) => void;
+    readonly onAttempt: (input: OutgoingMessage, content?: OutgoingContent) => void;
     readonly wait: Promise<void> | undefined;
     readonly failure: Error | (() => Error | undefined) | undefined;
     readonly rejectRecipients: readonly string[];
@@ -506,11 +529,11 @@ class TestMailSender implements MailSender {
   };
 
   constructor(
-    accountId: string,
-    onSent: (input: SendMessageInput, receipt: SendReceipt, context?: ConversationSendContext) => void | Promise<void>,
+    account: Account,
+    onSent: (input: OutgoingMessage, receipt: SendReceipt, context?: ConversationSendContext) => void | Promise<void>,
     verificationFailure?: Error,
     behavior: {
-      readonly onAttempt: (input: SendMessageInput, content?: OutgoingContent) => void;
+      readonly onAttempt: (input: OutgoingMessage, content?: OutgoingContent) => void;
       readonly wait: Promise<void> | undefined;
       readonly failure: Error | (() => Error | undefined) | undefined;
       readonly rejectRecipients: readonly string[];
@@ -520,10 +543,10 @@ class TestMailSender implements MailSender {
       wait: undefined,
       failure: undefined,
       rejectRecipients: [],
-      receiptAccountId: accountId,
+      receiptAccountId: account.id,
     },
   ) {
-    this.#accountId = accountId;
+    this.#account = account;
     this.#onSent = onSent;
     this.#verificationFailure = verificationFailure;
     this.#behavior = behavior;
@@ -533,9 +556,9 @@ class TestMailSender implements MailSender {
     if (this.#verificationFailure) throw this.#verificationFailure;
   }
 
-  async send(rawInput: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SendReceipt> {
-    const input = sendMessageInputSchema.parse(rawInput);
-    if (input.accountId !== this.#accountId) throw new Error("Account isolation violation");
+  async send(rawInput: OutgoingMessage, context?: ConversationSendContext, content?: OutgoingContent): Promise<SentMessage> {
+    const input: OutgoingMessage = { ...sendMessageInputSchema.parse(rawInput), ...(rawInput.from ? { from: rawInput.from } : {}) };
+    if (input.accountId !== this.#account.id) throw new Error("Account isolation violation");
     this.#behavior.onAttempt(input, content);
     await this.#behavior.wait;
     const failure = typeof this.#behavior.failure === "function"
@@ -553,9 +576,26 @@ class TestMailSender implements MailSender {
       rejected: recipients.filter((address) => rejected.has(address.toLocaleLowerCase())),
       submittedAt: new Date().toISOString(),
     });
+    const reply = context?.type === "reply" || context?.type === "reply_all" ? context : undefined;
+    const mime = await composeMime({
+      messageId: receipt.messageId,
+      date: new Date(receipt.submittedAt),
+      from: { name: this.#account.name, address: this.#account.email },
+      to: input.to,
+      cc: input.cc,
+      subject: input.subject,
+      ...(reply?.inReplyTo ? { inReplyTo: reply.inReplyTo } : {}),
+      ...(reply && reply.references.length > 0 ? { references: [...reply.references] } : {}),
+    }, input.text);
     if (receipt.accepted.length > 0) await this.#onSent(input, receipt, context);
-    return receipt;
+    return { receipt, mime };
   }
+}
+
+function addresses(field: AddressObject | AddressObject[] | undefined): MessageSummary["to"] {
+  return (Array.isArray(field) ? field : field ? [field] : [])
+    .flatMap(({ value }) => value)
+    .flatMap(({ name, address }) => address ? [{ name, address }] : []);
 }
 
 function toSummary(message: TestMessage): MessageSummary {

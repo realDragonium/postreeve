@@ -27,7 +27,7 @@ The system SHALL define exactly fifteen page tools: the twelve mailbox tools bel
 Every tool SHALL perform an operation a person can perform in the web UI, through Postreeve's server API, and SHALL NOT introduce an agent-only workflow or capability. Where the UI can do more than a tool, the tool SHALL offer the narrower operation rather than a different one.
 
 #### Scenario: No agent-only operation
-- **WHEN** an agent looks for a way to change mail that the UI does not offer, such as permanent deletion or flagging
+- **WHEN** an agent looks for a way to change mail that the UI does not offer, such as permanent deletion
 - **THEN** no tool provides it
 
 ### Requirement: The person controls which tools are offered
@@ -106,7 +106,7 @@ The `send_message` description SHALL state that it sends real mail and must only
 - **THEN** the message is sent from the account's primary address and the receipt lists accepted and rejected recipients
 
 ### Requirement: Mailbox action tool
-`apply_message_actions` SHALL take `{ accountId, items }` with 1 to 100 items of `{ message, subject, action }`, where `action` is `move` with `destination`, `trash`, `mark_read` or `mark_unread`; the proposal-only `leave` SHALL be rejected. It SHALL apply them immediately as a direct action (actions/message-actions) and return the batch with each item's result; the page SHALL attribute the batch to the assistant. Its description SHALL state that Trash never permanently deletes.
+`apply_message_actions` SHALL take `{ accountId, items }` with 1 to 100 items of `{ message, subject, action }`, where `action` is `move` (with `destination`), `trash`, `mark_read`, `mark_unread`, `flag` or `unflag`; `leave` SHALL be rejected. It SHALL apply them immediately as a direct action (actions/message-actions) and return the batch with each item's result; the page SHALL attribute the batch to the assistant. Its description SHALL state that Trash never permanently deletes.
 
 #### Scenario: Mixed result
 - **WHEN** an agent trashes two messages and one is stale
@@ -115,6 +115,10 @@ The `send_message` description SHALL state that it sends real mail and must only
 #### Scenario: Leave action
 - **WHEN** an agent calls `apply_message_actions` with action `{ type: "leave" }`
 - **THEN** the call fails and no request is sent
+
+#### Scenario: Flag for follow-up
+- **WHEN** an agent calls `apply_message_actions` with action `{ type: "flag" }` for a current message
+- **THEN** the message is flagged and the returned batch is `applied`
 
 ### Requirement: Activity and undo tools
 `list_activity` SHALL take `{ accountId }` and return the account's operation batches with per-operation results and statuses. `undo_batch` SHALL take `{ batchId }`, undo the batch as specified in actions/activity-undo and return the updated batch.

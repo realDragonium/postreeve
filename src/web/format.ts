@@ -6,6 +6,8 @@ export const actionLabels: Record<TriageAction["type"], string> = {
   trash: "moved to Trash",
   mark_read: "marked read",
   mark_unread: "marked unread",
+  flag: "flagged",
+  unflag: "unflagged",
 };
 
 export function actionLabel(action: TriageAction): string {
@@ -18,6 +20,8 @@ const proposedLabels: Record<TriageAction["type"], string> = {
   trash: "move to Trash",
   mark_read: "mark read",
   mark_unread: "mark unread",
+  flag: "flag",
+  unflag: "unflag",
 };
 
 /** History reads in the past tense; a proposal has not happened yet. */
