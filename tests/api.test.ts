@@ -13,6 +13,7 @@ import {
   sendReceiptSchema,
 } from "../src/shared/contracts";
 import { createApi, oauthResultUrl, type AppType } from "../src/server/api";
+import type { ProviderMessageSummary } from "../src/server/mail/provider";
 import { createEmptyTestHarness, createTestHarness, testAccountInput } from "./support/test-mail";
 
 describe("Hono RPC API", () => {
@@ -173,6 +174,42 @@ describe("Hono RPC API", () => {
     expect(conversation.messages.map(({ messageId }) => messageId)).toEqual([
       "<ab@example.test>", "<reply@example.test>",
     ]);
+    store.close();
+  });
+
+  test("serves conversation summaries across folders in conversation order", async () => {
+    const { store, service } = await createEmptyTestHarness();
+    const account = await service.createAccount(testAccountInput());
+    const summary = (mailbox: string, uid: number, messageId: string, extra: Partial<ProviderMessageSummary> = {}): ProviderMessageSummary => ({
+      ref: { accountId: account.id, mailbox, uidValidity: "1", uid, modseq: "1" }, messageId, subject: "Plans",
+      from: [{ name: "Sam", address: "sam@example.test" }], to: [{ name: "Alex", address: "alex@example.test" }],
+      receivedAt: "2026-09-02T00:00:00.000Z", preview: `Preview ${uid}`, read: true, flagged: false, ...extra,
+    });
+    const observed = store.synchronization.observe({ tenantId: "test-tenant", accountId: account.id, provider: "imap" }, [
+      summary("Sent", 7, "<reply@example.test>", { inReplyTo: "<root@example.test>", receivedAt: "2026-09-01T00:00:00.000Z" }),
+      summary("INBOX", 3, "<root@example.test>"),
+    ], 1000);
+    const [reply, inbox] = [observed[0]!, observed[1]!];
+    await store.reconcileMailbox({
+      tenantId: "test-tenant", accountId: account.id, provider: "imap", mailbox: "Archive", authoritative: false,
+      observations: [{ tenantId: "test-tenant", messageId: "<unindexed@example.test>", inReplyTo: "<reply@example.test>",
+        references: [], location: { accountId: account.id, provider: "imap", mailbox: "Archive", uidValidity: "1", uid: 9,
+          modseq: null, providerId: null, read: false, flagged: false } }],
+    });
+    const api = createApi(service);
+    const conversationId = (await store.getMessage("test-tenant", inbox))!.conversationId;
+
+    expect((await service.getConversation(conversationId)).messages).toHaveLength(3);
+    const response = await api.request(`/api/conversations/${conversationId}/messages`);
+    const messages = canonicalMessageSummarySchema.array().parse(await response.json());
+    expect(messages.map(({ canonicalId, ref, preview }) => [canonicalId, ref.mailbox, preview])).toEqual([
+      [inbox, "INBOX", "Preview 3"], [reply, "Sent", "Preview 7"],
+    ]);
+    expect(messages.every((message) => message.conversationId === conversationId)).toBe(true);
+
+    const unknown = await api.request("/api/conversations/never-issued/messages");
+    expect(unknown.status).toBe(400);
+    expect(await unknown.json()).toEqual({ error: "Conversation not found" });
     store.close();
   });
 

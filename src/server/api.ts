@@ -268,6 +268,8 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
     )
     .get("/conversations/:conversationId", zValidator("param", conversationParamsSchema), async (context) =>
       context.json(await service.getConversation(context.req.valid("param").conversationId)))
+    .get("/conversations/:conversationId/messages", zValidator("param", conversationParamsSchema), async (context) =>
+      context.json(await service.getConversationMessages(context.req.valid("param").conversationId)))
     .post("/messages/send", zValidator("json", sendMessageInputSchema), async (context) =>
       context.json(await service.sendMessage(context.req.valid("json")), 201))
     .post("/messages/actions", zValidator("json", directActionInputSchema), async (context) =>

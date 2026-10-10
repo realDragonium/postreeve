@@ -104,15 +104,15 @@ export function sortMessages(messages: readonly MessageSummary[], sort: MessageS
   return sorted.sort((left, right) => right.receivedAt.localeCompare(left.receivedAt));
 }
 
-interface MessageIdentityGroup {
-  readonly message: MessageSummary;
+interface MessageIdentityGroup<T extends MessageSummary> {
+  readonly message: T;
   readonly identities: ReadonlySet<string>;
 }
 
-function mergeIdentityGroups(
-  groups: readonly MessageIdentityGroup[],
-  message: MessageSummary,
-): MessageIdentityGroup[] {
+function mergeIdentityGroups<T extends MessageSummary>(
+  groups: readonly MessageIdentityGroup<T>[],
+  message: T,
+): MessageIdentityGroup<T>[] {
   const incomingIdentities = messageIdentityKeys(message);
   const matched = groups
     .map((group, index) => incomingIdentities.some((identity) => group.identities.has(identity)) ? index : -1)
@@ -122,7 +122,7 @@ function mergeIdentityGroups(
   }
 
   const identities = new Set<string>();
-  const candidates: MessageSummary[] = [];
+  const candidates: T[] = [];
   for (const index of matched) {
     const group = groups[index]!;
     for (const identity of group.identities) identities.add(identity);
@@ -149,8 +149,8 @@ function mergeIdentityGroups(
 }
 
 /** Merges per-account results by every known canonical identity and alias. */
-export function mergeMessages(lists: readonly (readonly MessageSummary[])[]): MessageSummary[] {
-  return lists.flat().reduce<MessageIdentityGroup[]>(mergeIdentityGroups, []).map(({ message }) => message);
+export function mergeMessages<T extends MessageSummary>(lists: readonly (readonly T[])[]): T[] {
+  return lists.flat().reduce<MessageIdentityGroup<T>[]>(mergeIdentityGroups, []).map(({ message }) => message);
 }
 
 export function countLine(

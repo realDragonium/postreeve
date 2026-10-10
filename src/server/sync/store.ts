@@ -287,8 +287,23 @@ export class SynchronizationStore {
     return this.query(tenantId, { sources: [{ accountId, mailbox }], limit }).messages;
   }
 
-  #summary(tenantId: string, row: IndexedRow): CanonicalMessageSummary {
-    const canonical = this.canonical(tenantId, row.message_id);
+  /** One summary per member with a current indexed location, in the given order. */
+  conversationSummaries(tenantId: string, members: readonly CanonicalMessage[]): CanonicalMessageSummary[] {
+    const rows = this.sqlite.query(`SELECT * FROM (
+        SELECT i.message_id,i.content,i.received_at,l.account_id,l.mailbox,l.uid_validity,l.uid,l.modseq,l.provider_id,l.read,l.flagged,
+          '' sort_value,
+          ROW_NUMBER() OVER (PARTITION BY i.message_id ORDER BY l.account_id,l.mailbox,l.uid DESC,l.uid_validity DESC,l.id DESC) representative
+        FROM indexed_messages i JOIN message_locations l ON l.tenant_id=i.tenant_id AND l.account_id=i.account_id AND l.message_id=i.message_id
+        WHERE i.tenant_id=? AND i.message_id IN (SELECT value FROM json_each(?)))
+      WHERE representative=1`).all(tenantId, JSON.stringify(members.map(({ id }) => id))) as IndexedRow[];
+    const byId = new Map(rows.map(row => [row.message_id, row]));
+    return members.flatMap(member => {
+      const row = byId.get(member.id);
+      return row ? [this.#summary(tenantId, row, member)] : [];
+    });
+  }
+
+  #summary(tenantId: string, row: IndexedRow, canonical = this.canonical(tenantId, row.message_id)): CanonicalMessageSummary {
     if (!canonical) throw new Error("Indexed canonical message missing");
     return { ...indexedContentSchema.parse(JSON.parse(row.content)),
       canonicalId: canonical.id, canonicalAliases: canonical.aliases, conversationId: canonical.conversationId,

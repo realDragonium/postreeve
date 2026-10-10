@@ -441,6 +441,11 @@ export class PostreeveService {
     return conversation;
   }
 
+  async getConversationMessages(id: string): Promise<CanonicalMessageSummary[]> {
+    const conversation = await this.getConversation(id);
+    return this.#store.synchronization.conversationSummaries(this.#context.tenantId, conversation.messages);
+  }
+
   async readMessages(references: MessageRef[]): Promise<CanonicalMessageDetail[]> {
     if (references.length === 0) return [];
     const accountId = references[0]!.accountId;

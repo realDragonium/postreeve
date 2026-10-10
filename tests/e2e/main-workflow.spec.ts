@@ -947,6 +947,95 @@ test("reads a message and returns to the list on a narrow screen", async ({ page
   await expect(page.getByText(message.subject, { exact: true })).toBeVisible();
 });
 
+test("reads the whole conversation with earlier messages loaded on demand", async ({ page }) => {
+  const earlier: CanonicalMessageDetail = {
+    ...message,
+    canonicalId: "conversation-earlier",
+    ref: { ...messageRef, mailbox: "Archive", uid: 12 },
+    messageId: "earlier@example.com",
+    subject: "Kickoff",
+    from: [{ name: "Taylor Kim", address: "taylor@example.com" }],
+    replyTo: [],
+    cc: [],
+    deliveredTo: [],
+    receivedAt: "2026-08-27T08:30:00.000Z",
+    preview: "Kickoff agenda preview",
+    read: true,
+    text: "Kickoff agenda body",
+    html: null,
+  };
+  const sentReply: CanonicalMessageDetail = {
+    ...earlier,
+    canonicalId: "conversation-sent-reply",
+    ref: { ...messageRef, mailbox: "Sent", uid: 77 },
+    messageId: "sent-reply@example.com",
+    from: [{ name: "Alex", address: account.email }],
+    receivedAt: "2026-08-30T08:30:00.000Z",
+    preview: "My own reply preview",
+    text: "My own reply body",
+  };
+  const details = [earlier, message, sentReply];
+  const reads: string[] = [];
+  const archived: number[] = [];
+  const draftFixture = new BrowserDraftFixture();
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (await draftFixture.handle(route, account.id)) return;
+    if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
+    if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
+    if (request.method() === "POST" && url.pathname === "/api/messages/query") return json(route, mailboxResult([message]));
+    if (request.method() === "GET" && url.pathname === `/api/conversations/${message.conversationId}/messages`) {
+      return json(route, canonicalMessageSummarySchema.array().parse(details));
+    }
+    if (request.method() === "POST" && url.pathname === "/api/messages/read") {
+      const body: unknown = request.postDataJSON();
+      const [reference] = messageRefSchema.array().parse(
+        typeof body === "object" && body !== null && "references" in body ? body.references : [],
+      );
+      const detail = details.find(({ ref }) => ref.mailbox === reference?.mailbox && ref.uid === reference.uid)!;
+      reads.push(detail.canonicalId);
+      return json(route, [detail]);
+    }
+    if (request.method() === "POST" && url.pathname === "/api/messages/actions") {
+      const input = directActionInputSchema.parse(request.postDataJSON());
+      archived.push(...input.items.map((item) => item.message.uid));
+      return json(route, {
+        id: "batch-conversation", proposalId: "direct", accountId: input.accountId, status: "applied",
+        operations: input.items.map((entry, index) => ({ itemId: `item-${index}`, message: entry.message, action: entry.action, status: "applied", error: null })),
+        createdAt: "2026-09-05T10:00:00.000Z", updatedAt: "2026-09-05T10:00:00.000Z",
+      });
+    }
+    if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
+    return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
+  });
+
+  await page.goto("/");
+  await page.getByText(message.subject, { exact: true }).click();
+  const reader = page.getByLabel("Message reader");
+  await expect(reader.getByText("3 messages")).toBeVisible();
+  const earlierMessage = reader.getByRole("article", { name: "Message from Taylor Kim" });
+  const replyMessage = reader.getByRole("article", { name: "Message from Alex" });
+  await expect(earlierMessage.getByText("Kickoff agenda preview")).toBeVisible();
+  await expect(replyMessage.getByText("My own reply preview")).toBeVisible();
+  await expect(reader.getByRole("article", { name: "Message from Sam Rivera" }).getByText("delivered to planning-alias@example.com")).toBeVisible();
+  expect(reads).toEqual([message.canonicalId]);
+
+  await earlierMessage.getByRole("button", { expanded: false }).click();
+  await expect(earlierMessage.getByText("Kickoff agenda body")).toBeVisible();
+  expect(reads).toEqual([message.canonicalId, earlier.canonicalId]);
+
+  await earlierMessage.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect(page.getByLabel("To", { exact: true })).toHaveValue("taylor@example.com");
+  await expect(page.getByLabel("Subject", { exact: true })).toHaveValue("Re: Kickoff");
+  await page.getByRole("button", { name: "Close Reply" }).click();
+
+  await reader.getByRole("button", { name: "Archive", exact: true }).click();
+  await expect.poll(() => archived).toEqual([message.ref.uid]);
+});
+
 test("downloads received attachments with loading and provider error feedback", async ({ page }) => {
   const attached: CanonicalMessageDetail = {
     ...message,

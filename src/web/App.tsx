@@ -9,6 +9,7 @@ import { exposedToolNames, loadHiddenTools, storeHiddenTools } from "./assistant
 import { ActivityView } from "./ActivityView";
 import { MessageList } from "./MessageList";
 import { Reader } from "./Reader";
+import { conversationThread } from "./conversation-view";
 import { Sidebar } from "./Sidebar";
 import { SettingsView, settingsSections, type SettingsSection } from "./SettingsView";
 import { AccountSetup, ComposeModal, DraftsSheet, FolderSheet, IdentitySheet, type ComposeIntent } from "./panels";
@@ -198,11 +199,13 @@ function App() {
   ].filter(Boolean).join(" ") : null;
 
   const openMessage = messages.find((message) => messageMatchesKey(message, openKey)) ?? null;
-  const detailQuery = useQuery({
-    queryKey: ["message", openKey, openMessage?.ref],
-    queryFn: async () => (await api.readMessages(openMessage ? [openMessage.ref] : []))[0] ?? null,
-    enabled: Boolean(openMessage),
+  const openConversationId = openMessage?.conversationId;
+  const conversationQuery = useQuery({
+    queryKey: ["conversation", openConversationId],
+    queryFn: ({ signal }) => api.conversationMessages(openConversationId ?? "", signal),
+    enabled: openConversationId !== undefined,
   });
+  const thread = openMessage ? conversationThread(openMessage, conversationQuery.data) : [];
 
   const scopeAccountId = scope?.kind === "account" ? scope.accountId : null;
   const scopeFolders = scopeAccountId
@@ -221,6 +224,7 @@ function App() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["messages"] }),
       queryClient.invalidateQueries({ queryKey: ["message"] }),
+      queryClient.invalidateQueries({ queryKey: ["conversation"] }),
       ...accounts.flatMap((account) => [
         queryClient.invalidateQueries({ queryKey: ["folders", account.id] }),
         queryClient.invalidateQueries({ queryKey: ["batches", account.id] }),
@@ -603,31 +607,28 @@ function App() {
           </section>
 
           {openKey ? <section className="mail-reader-pane" aria-label="Message reader">
-            {detailQuery.data ? <Reader
-              key={`${detailQuery.data.ref.accountId}:${detailQuery.data.canonicalId}`}
-              message={detailQuery.data}
-              folders={foldersByAccount.get(detailQuery.data.ref.accountId) ?? []}
-              provenance={provenance.get(provenanceKey(detailQuery.data.ref))}
+            {openMessage ? <Reader
+              key={openKey}
+              message={openMessage}
+              thread={thread}
+              folders={foldersByAccount.get(openMessage.ref.accountId) ?? []}
+              provenance={provenance.get(provenanceKey(openMessage.ref))}
               folderName={folderName}
               position={`${focus + 1} of ${messages.length}`}
               busy={actionMutation.isPending}
-              error={detailQuery.error?.message ?? null}
               canUndo={undoStack.length > 0}
               onClose={() => setOpenKey(null)}
               onStep={step}
-              onAction={(action) => openMessage && applyTo([openMessage], action)}
+              onAction={(action) => applyTo([openMessage], action)}
               onAcceptProposal={(proposalId) => acceptMutation.mutate(proposalId)}
               onUndo={undoLast}
-              onCompose={(mode) => detailQuery.data && setOverlay({
+              onCompose={(mode, source) => setOverlay({
                 kind: "compose",
-                accountId: detailQuery.data.ref.accountId,
-                intent: { mode, message: detailQuery.data },
+                accountId: source.ref.accountId,
+                intent: { mode, message: source },
               })}
-              onDownloadAttachment={(attachment) => downloadReceivedAttachment(
-                detailQuery.data!.ref.accountId,
-                attachment,
-              )}
-            /> : <div className="pad t-dim">{detailQuery.isError ? detailQuery.error.message : "Loading message…"}</div>}
+              onDownloadAttachment={downloadReceivedAttachment}
+            /> : <div className="pad t-dim">Loading message…</div>}
           </section> : null}
         </div> : null}
 
