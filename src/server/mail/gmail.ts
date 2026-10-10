@@ -5,9 +5,11 @@ import type { ProviderDraftInput } from "./provider";
 import { simpleParser, type AddressObject, type EmailAddress, type ParsedMail } from "mailparser";
 import { z, type ZodType } from "zod";
 import {
+  outboundAddressSchema,
   sendMessageInputSchema,
   sendReceiptSchema,
   type Account,
+  type OutboundAddress,
   type Draft,
   type Folder,
   type MessageRef,
@@ -33,7 +35,7 @@ import type {
 import { safeAttachmentFilename, safeAttachmentMediaType } from "../core/attachment-reference";
 import { buildProviderDraftMessage, parseProviderDraftMarkers } from "./provider-draft";
 import { normalizeIdentificationFields, normalizeReferenceSequences } from "./message-id";
-import { MailSendPreDispatchError, type ConversationSendContext, type MailSender } from "./sender";
+import { MailSendPreDispatchError, type ConversationSendContext, type MailSender, type OutgoingMessage } from "./sender";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -98,6 +100,13 @@ const gmailSyncMessageSchema = gmailMessageSchema.extend({
   payload: gmailPartSchema.and(z.object({ headers: z.array(z.object({ name: z.string(), value: z.string() })) })),
 });
 const sentMessageSchema = z.object({ id: z.string().min(1), threadId: z.string().min(1).optional() });
+const sendAsListSchema = z.object({
+  sendAs: z.array(z.object({
+    sendAsEmail: z.string(),
+    isPrimary: z.boolean().optional(),
+    verificationStatus: z.string().optional(),
+  })).default([]),
+});
 const draftStubSchema = z.object({ id: z.string().min(1) });
 const draftListSchema = z.object({
   drafts: z.array(draftStubSchema).default([]),
@@ -459,21 +468,25 @@ export class GmailMailClient implements MailProvider, MailSender {
     }
   }
 
-  async send(rawInput: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SendReceipt> {
+  async send(rawInput: OutgoingMessage, context?: ConversationSendContext, content?: OutgoingContent): Promise<SendReceipt> {
     const input = sendMessageInputSchema.parse(rawInput);
     this.#assertAccount(input.accountId);
+    const from = rawInput.from
+      ? outboundAddressSchema.parse(rawInput.from)
+      : { name: this.#account.name, address: this.#account.email };
     const reply = context?.type === "reply" || context?.type === "reply_all" ? context : undefined;
     const submittedAt = new Date().toISOString();
     const messageId = `<${crypto.randomUUID()}@postreeve.local>`;
     let raw: string;
     try {
-      raw = await buildMessage(this.#account, input, messageId, submittedAt, reply, content);
+      raw = await buildMessage(from, input, messageId, submittedAt, reply, content);
     } catch (error) {
       throw preDispatchError(error);
     }
     let token: string;
     try {
       token = await this.#token();
+      if (from.address.toLowerCase() !== this.#account.email.toLowerCase()) await this.#assertSendAs(token, from.address);
     } catch (error) {
       throw preDispatchError(error);
     }
@@ -498,6 +511,18 @@ export class GmailMailClient implements MailProvider, MailSender {
       rejected: [],
       submittedAt,
     });
+  }
+
+  /** Gmail silently replaces a From it does not allow with the primary address, so check before sending. */
+  async #assertSendAs(token: string, address: string): Promise<void> {
+    const { sendAs } = await this.#requestWithToken(token, "/settings/sendAs", sendAsListSchema);
+    const allowed = sendAs.some((entry) => entry.sendAsEmail.toLowerCase() === address.toLowerCase()
+      && (entry.isPrimary === true || entry.verificationStatus !== "pending"));
+    if (!allowed) {
+      throw new MailSendPreDispatchError(
+        `Gmail does not allow sending as ${address}; add and verify it under Gmail Settings > Accounts > Send mail as`,
+      );
+    }
   }
 
   async #putDraft(
@@ -1034,7 +1059,7 @@ async function gmailDraftMessage(scope: ProviderDraftScope, draft: ProviderDraft
 }
 
 async function buildMessage(
-  account: Account,
+  from: OutboundAddress,
   input: SendMessageInput,
   messageId: string,
   submittedAt: string,
@@ -1043,11 +1068,11 @@ async function buildMessage(
 ): Promise<string> {
   const recipients = [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address);
   const raw = await composeMime({
-    from: { name: account.name, address: account.email },
+    from,
     to: input.to,
     cc: input.cc,
     bcc: input.bcc,
-    envelope: { from: account.email, to: recipients },
+    envelope: { from: from.address, to: recipients },
     subject: input.subject.replace(/[\r\n]/g, " "),
     textEncoding: "base64",
     messageId,

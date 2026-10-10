@@ -25,15 +25,7 @@ export interface LocalDraft {
   readonly updatedAt: string;
 }
 
-export interface LocalIdentity {
-  readonly id: string;
-  readonly accountId: string;
-  readonly name: string;
-  readonly email: string;
-}
-
 export const localDraftsKey = "postreeve.local-drafts.v1";
-const identitiesKey = "postreeve.local-identities.v1";
 
 export function loadLocalDrafts(): LocalDraft[] {
   return loadArray(localDraftsKey, isLocalDraft);
@@ -41,14 +33,6 @@ export function loadLocalDrafts(): LocalDraft[] {
 
 export function storeLocalDrafts(drafts: readonly LocalDraft[]): void {
   localStorage.setItem(localDraftsKey, JSON.stringify(drafts));
-}
-
-export function loadLocalIdentities(): LocalIdentity[] {
-  return loadArray(identitiesKey, isLocalIdentity);
-}
-
-export function storeLocalIdentities(identities: readonly LocalIdentity[]): void {
-  localStorage.setItem(identitiesKey, JSON.stringify(identities));
 }
 
 function loadArray<T>(key: string, guard: (value: unknown) => value is T): T[] {
@@ -94,12 +78,4 @@ export function isLocalDraft(value: unknown): value is LocalDraft {
     && Array.isArray(value.attachments)
     && value.attachments.every(isLocalAttachment)
     && typeof value.updatedAt === "string";
-}
-
-function isLocalIdentity(value: unknown): value is LocalIdentity {
-  return isRecord(value)
-    && typeof value.id === "string"
-    && typeof value.accountId === "string"
-    && typeof value.name === "string"
-    && typeof value.email === "string";
 }

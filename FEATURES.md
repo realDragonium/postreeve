@@ -89,7 +89,7 @@ Every WebMCP mutation revalidates the stable message reference, records an audit
 | Reply | Partial | Not available | The editor and quoting UI exist, but sending is blocked until thread headers are supported. |
 | Reply all | Partial | Not available | The editor populates recipients, but sending is blocked. |
 | Forward | Partial | Not available | The editor builds forwarded content, but sending is blocked. |
-| Send from an alternate identity or catch-all alias | Partial | Not available | Identities are local-only and alternate-From sending is blocked. |
+| Send from an alternate identity or catch-all alias | Complete | Not available | Drafts send from a stored identity over SMTP and Gmail. Gmail requires the address under Send mail as. Replies default to the identity the message was delivered to. `send_message` sends from the primary address only. |
 | Add attachments | Partial | Not available | The UI records local attachment metadata, but files are not uploaded or sent. |
 
 Sending is a real external side effect. WebMCP exposes the same basic send operation as the UI, but it does not send drafts, replies, forwards, attachments, or alternate identities that the UI itself cannot send.
@@ -103,8 +103,8 @@ Sending is a real external side effect. WebMCP exposes the same basic send opera
 | List and reopen local drafts | Partial | Not available | Not synchronized with the provider's Drafts folder. |
 | Delete a local draft | Partial | Not available | Local browser state only. |
 | Synchronize provider drafts | Not available | Not available | No IMAP or Gmail draft implementation exists. |
-| Add or remove a local identity | Partial | Not available | Stored only in local storage. |
-| Select an alternate From identity | Partial | Not available | The selector exists, but sending is blocked for alternate identities. |
+| Add or remove an identity | Complete | Not available | Stored per account on the server; browser-local identities migrate once. |
+| Select an alternate From identity | Complete | Not available | Sending is disabled for an address that is not an identity of the account. |
 
 These features are not provider-backed today. Whether and how they should be exposed through WebMCP remains an open product decision.
 

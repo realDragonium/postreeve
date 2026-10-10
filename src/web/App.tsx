@@ -1,7 +1,7 @@
 import type { MailboxPage, MailboxSource } from "../shared/mailbox-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { Account, Draft, Folder, MessageSummary, ReceivedAttachment, TriageAction } from "../shared/contracts";
+import type { Account, Draft, Folder, Identity, MessageSummary, ReceivedAttachment, TriageAction } from "../shared/contracts";
 import { api } from "./api";
 import { registerPostreeveWebMcp } from "../server/webmcp/register";
 import { subscribeToWebMcpFolderLists, subscribeToWebMcpMailboxViews, webMcpServices } from "./webmcp";
@@ -30,13 +30,11 @@ import {
   type Actor,
 } from "./provenance";
 import {
-  loadLocalIdentities,
-  storeLocalIdentities,
-  type LocalIdentity,
   type MessageFilter,
   type MessageSort,
 } from "./mail-ui-state";
 import { migrateLocalDraftsOnce } from "./draft-state";
+import { migrateLocalIdentitiesOnce } from "./identities";
 import { useTheme } from "./theme";
 
 const folderPollIntervalMs = 15_000;
@@ -90,9 +88,6 @@ function App() {
   const [actorFilter, setActorFilter] = useState<Actor | "all">("all");
   const [hiddenTools, setHiddenTools] = useState<ReadonlySet<string>>(loadHiddenTools);
   const [overlay, setOverlay] = useState<Overlay>(null);
-  const [identities, setIdentities] = useState<LocalIdentity[]>(loadLocalIdentities);
-
-  useEffect(() => storeLocalIdentities(identities), [identities]);
   useEffect(() => storeHiddenTools(hiddenTools), [hiddenTools]);
 
   const toastTimer = useRef<number>(0);
@@ -130,6 +125,10 @@ function App() {
     : draftLoadFailure
       ? "Draft loading failed"
       : null;
+  const identityResults = useQueries({
+    queries: accounts.map((account) => ({ queryKey: ["identities", account.id], queryFn: () => api.identities(account.id) })),
+  });
+  const identities: readonly Identity[] = identityResults.flatMap((result) => result.data ?? []);
   const migrationAccountSnapshot = accounts.map(({ id }) => id).sort().join("\0");
   const migratedAccountSnapshot = useRef<string | null>(null);
   useEffect(() => {
@@ -140,6 +139,11 @@ function App() {
     }).catch((error: unknown) => {
       migratedAccountSnapshot.current = null;
       flash(error instanceof Error ? error.message : "Local draft migration failed");
+    });
+    void migrateLocalIdentitiesOnce(localStorage, accounts, api.addIdentity).then(async ({ migrated }) => {
+      if (migrated > 0) await queryClient.invalidateQueries({ queryKey: ["identities"] });
+    }).catch((error: unknown) => {
+      flash(error instanceof Error ? error.message : "Local identity migration failed");
     });
   }, [accountsQuery.isSuccess, migrationAccountSnapshot, queryClient]);
 
@@ -690,7 +694,7 @@ function App() {
     {overlay?.kind === "identities" && overlayAccount ? <IdentitySheet
       account={overlayAccount}
       identities={identities.filter((identity) => identity.accountId === overlayAccount.id)}
-      onChange={(next) => setIdentities((current) => [...current.filter((identity) => identity.accountId !== overlayAccount.id), ...next])}
+      onChange={(next) => queryClient.setQueryData<Identity[]>(["identities", overlayAccount.id], next)}
       onClose={() => setOverlay(null)}
     /> : null}
 

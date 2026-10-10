@@ -8,6 +8,7 @@ import type {
   DraftAttachment,
   DraftContent,
   Folder,
+  Identity,
   OutboundAddress,
   SendReceipt,
   UpdateAccountInput,
@@ -21,7 +22,8 @@ import {
   quotedMessage,
   replySubject,
 } from "./format";
-import type { ComposeMode, LocalIdentity } from "./mail-ui-state";
+import type { ComposeMode } from "./mail-ui-state";
+import { defaultFromAddress, ownAddresses } from "./identities";
 import { DraftSaveQueue } from "./draft-state";
 
 export interface ComposeIntent {
@@ -114,26 +116,44 @@ export function DraftsSheet({ drafts, loaded, loading, refreshing, loadError, on
 
 export function IdentitySheet({ account, identities, onChange, onClose }: {
   account: Account;
-  identities: readonly LocalIdentity[];
-  onChange: (identities: LocalIdentity[]) => void;
+  identities: readonly Identity[];
+  onChange: (identities: Identity[]) => void;
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const valid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  async function run(operation: () => Promise<void>): Promise<void> {
+    setBusy(true);
+    setError(null);
+    try {
+      await operation();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Identity update failed");
+    } finally {
+      setBusy(false);
+    }
+  }
   return <Sheet
     title="Identities"
     meta={account.email}
     onClose={onClose}
-    footer={<span className="t-dim">Aliases appear in the From selector. Sending from them stays blocked until SMTP identity validation exists.</span>}
+    footer={<span className="t-dim">{account.kind === "gmail"
+      ? "Gmail sends only from addresses verified under Settings > Accounts > Send mail as."
+      : "Your outgoing mail server must accept these addresses as sender."}</span>}
   >
     <div>
       <div style={{ display: "flex", gap: 12, borderTop: "1px solid var(--div)", padding: "10px 0" }}>
         <span className="t-ink">{account.name}</span><span className="t-dim">{account.email} · primary</span>
       </div>
       {identities.map((identity) => <div key={identity.id} style={{ display: "flex", alignItems: "center", gap: 12, borderTop: "1px solid var(--div)", padding: "10px 0" }}>
-        <span className="t-ink">{identity.name}</span><span className="t-dim">{identity.email}</span>
-        <button className="btn-danger" style={{ marginLeft: "auto" }} aria-label={`Remove identity ${identity.email}`} onClick={() => onChange(identities.filter(({ id }) => id !== identity.id))}>Remove</button>
+        <span className="t-ink">{identity.name}</span><span className="t-dim">{identity.address}</span>
+        <button className="btn-danger" style={{ marginLeft: "auto" }} disabled={busy} aria-label={`Remove identity ${identity.address}`} onClick={() => void run(async () => {
+          await api.removeIdentity(account.id, identity.id);
+          onChange(identities.filter(({ id }) => id !== identity.id));
+        })}>Remove</button>
       </div>)}
     </div>
     <form
@@ -142,15 +162,19 @@ export function IdentitySheet({ account, identities, onChange, onClose }: {
       onSubmit={(event) => {
         event.preventDefault();
         if (!valid || !name.trim()) return;
-        onChange([...identities, { id: crypto.randomUUID(), accountId: account.id, name: name.trim(), email: email.trim().toLowerCase() }]);
-        setName("");
-        setEmail("");
+        void run(async () => {
+          const added = await api.addIdentity(account.id, { name, address: email });
+          onChange([...identities.filter(({ id }) => id !== added.id), added]);
+          setName("");
+          setEmail("");
+        });
       }}
     >
       <label className="field"><span className="field-label">Display name</span><input className="input" aria-label="Identity name" value={name} onChange={(event) => setName(event.target.value)} /></label>
       <label className="field"><span className="field-label">Email address</span><input className="input" aria-label="Identity email address" type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
-      <button className="chip" disabled={!valid || !name.trim()}>Add identity</button>
+      <button className="chip" disabled={busy || !valid || !name.trim()}>Add identity</button>
     </form>
+    {error ? <div className="alert error">{error}</div> : null}
   </Sheet>;
 }
 
@@ -251,7 +275,7 @@ export function FolderSheet({ account, folders, onChange, onClose }: {
 
 export function ComposeModal({ account, identities, intent, onClose, onSaveDraft, onSent, onCopied }: {
   account: Account;
-  identities: readonly LocalIdentity[];
+  identities: readonly Identity[];
   intent: ComposeIntent;
   onClose: () => void;
   onSaveDraft: (draft: Draft) => void;
@@ -271,19 +295,19 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     conversationId: source.conversationId,
     ...(source.providerConversationId ? { providerConversationId: source.providerConversationId } : {}),
   } : undefined);
-  const ownAddresses = new Set([account.email.toLowerCase()]);
+  const own = ownAddresses(account, identities);
   const replyRecipients = source
     ? (source.replyTo?.length ? source.replyTo : source.from)
-      .filter(({ address }) => !ownAddresses.has(address.toLowerCase()))
+      .filter(({ address }) => !own.has(address.toLowerCase()))
     : [];
   if (source && replyRecipients.length === 0) {
-    replyRecipients.push(...source.to.filter(({ address }) => !ownAddresses.has(address.toLowerCase())));
+    replyRecipients.push(...source.to.filter(({ address }) => !own.has(address.toLowerCase())));
   }
   const replyRecipientAddresses = new Set(replyRecipients.map(({ address }) => address.toLowerCase()));
   const replyAllCc = source
     ? [...source.to, ...(source.cc ?? [])]
       .map(({ address }) => address)
-      .filter((address, index, all) => !ownAddresses.has(address.toLowerCase())
+      .filter((address, index, all) => !own.has(address.toLowerCase())
         && !replyRecipientAddresses.has(address.toLowerCase())
         && all.findIndex((candidate) => candidate.toLowerCase() === address.toLowerCase()) === index)
       .join(", ")
@@ -293,7 +317,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
       ? `\n\n---------- Forwarded message ----------\nFrom: ${addressList(source.from)}\nDate: ${formatDate(source.receivedAt, true)}\nSubject: ${source.subject}\nTo: ${addressList(source.to)}\n\n${source.text}`
       : quotedMessage(source)
     : "";
-  const [from, setFrom] = useState(saved?.identity.address ?? account.email);
+  const [from, setFrom] = useState(saved?.identity.address ?? (source ? defaultFromAddress(source, account, identities) : account.email));
   const [to, setTo] = useState(saved ? draftRecipientsText(saved.to) : source && effectiveMode !== "forward" ? addressList(replyRecipients) : "");
   const [cc, setCc] = useState(saved ? draftRecipientsText(saved.cc) : effectiveMode === "reply_all" ? replyAllCc : "");
   const [bcc, setBcc] = useState(saved ? draftRecipientsText(saved.bcc) : "");
@@ -305,17 +329,11 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   const uploadingNow = useRef(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const limits = useQuery({ queryKey: ["outgoing-mail-limits"], queryFn: api.outgoingMailLimits });
-  const savedIdentityOption: LocalIdentity | undefined = saved
-    && saved.identity.address !== account.email
-    && !identities.some(({ email }) => email === saved.identity.address)
-    ? {
-        id: `saved:${saved.id}`,
-        accountId: account.id,
-        name: saved.identity.name,
-        email: saved.identity.address,
-      }
-    : undefined;
-  const identityOptions = savedIdentityOption ? [savedIdentityOption, ...identities] : identities;
+  const fromIsOwn = own.has(from.toLowerCase());
+  const identityOptions: readonly OutboundAddress[] = [
+    ...saved && !own.has(saved.identity.address.toLowerCase()) ? [saved.identity] : [],
+    ...identities,
+  ];
   const [validationError, setValidationError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<SendReceipt | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(saved?.updatedAt ?? null);
@@ -332,10 +350,10 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   const edited = useRef({ from: false, to: false, cc: false, bcc: false });
   const saver = useRef<DraftSaveQueue | null>(null);
   if (!saver.current) saver.current = new DraftSaveQueue(account.id, saved, api.createDraft, api.updateDraft);
-  const backendPending = deliveryLocked || copying || from !== account.email || attachments.some((attachment) => !attachment.id) || pendingFiles.length > 0 || uploading || (conversationMode && !conversationSource);
+  const backendPending = deliveryLocked || copying || !fromIsOwn || attachments.some((attachment) => !attachment.id) || pendingFiles.length > 0 || uploading || (conversationMode && !conversationSource);
 
   function currentDraft(): DraftContent {
-    const selectedIdentity = identityOptions.find((identity) => identity.email === from);
+    const selectedIdentity = identityOptions.find((identity) => identity.address === from);
     return {
       mode: effectiveMode === "draft" ? "new" : effectiveMode,
       ...(conversationSource ? { source: conversationSource } : {}),
@@ -643,7 +661,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     <label className="field"><span className="field-label">From</span>
       <select className="input" aria-label="From identity" value={from} disabled={formBusy} onChange={(event) => { edited.current.from = true; setFrom(event.target.value); }}>
         <option value={account.email}>{account.email}</option>
-        {identityOptions.map((identity) => <option value={identity.email} key={identity.id}>{identity.name} · {identity.email}</option>)}
+        {identityOptions.map((identity) => <option value={identity.address} key={identity.address}>{identity.name} · {identity.address}</option>)}
       </select>
     </label>
     <label className="field"><span className="field-label">To</span><input className="input" autoFocus required aria-label="To" placeholder="person@example.com, team@example.com" value={to} disabled={formBusy} onChange={(event) => { edited.current.to = true; setTo(event.target.value); }} /></label>
@@ -682,7 +700,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     {delivery.status === "failed" ? <div className="alert error">Delivery failed: {delivery.error}. Your draft and files are retained for retry.</div> : null}
     {backendPending ? <div className="alert"><strong>Sending is unavailable.</strong>{conversationMode && !conversationSource
       ? <> This draft no longer has its source conversation. <button type="button" className="btn-underline" disabled={formBusy} onClick={() => setEffectiveMode("new")}>Convert to a new message</button></>
-      : null}{from !== account.email ? " Alternate From identities are not supported yet." : ""}{attachments.some((attachment) => !attachment.id) ? " Some files need to be attached again." : ""}</div> : null}
+      : null}{!fromIsOwn ? " This From address is not an identity of the account; choose another or add it under Identities." : ""}{attachments.some((attachment) => !attachment.id) ? " Some files need to be attached again." : ""}</div> : null}
     {validationError ? <div className="alert error">{validationError}</div> : null}
     {saveError ? <div className="alert error">Draft not saved: {saveError}. Your form content was kept.</div> : null}
     {!saveError && mirrorError ? <div className="alert">Saved in Postreeve. Provider mirror needs repair: {mirrorError}</div> : null}

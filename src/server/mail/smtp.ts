@@ -6,12 +6,12 @@ import type SMTPTransport from "nodemailer/lib/smtp-transport";
 import { z } from "zod";
 
 import {
+  outboundAddressSchema,
   sendMessageInputSchema,
   sendReceiptSchema,
-  type SendMessageInput,
   type SendReceipt,
 } from "../../shared/contracts";
-import type { ConversationSendContext, MailSender } from "./sender";
+import type { ConversationSendContext, MailSender, OutgoingMessage } from "./sender";
 
 const smtpAccountConfigSchema = z.object({
   accountId: z.string().min(1),
@@ -77,9 +77,12 @@ export class SmtpMailSender implements MailSender {
     if (!verified) throw new Error("SMTP server rejected the connection");
   }
 
-  async send(rawInput: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SendReceipt> {
+  async send(rawInput: OutgoingMessage, context?: ConversationSendContext, content?: OutgoingContent): Promise<SendReceipt> {
     const input = sendMessageInputSchema.parse(rawInput);
     this.#assertAccount(input.accountId);
+    const from = rawInput.from
+      ? outboundAddressSchema.parse(rawInput.from)
+      : { name: this.#config.fromName, address: this.#config.fromAddress };
     const reply = context?.type === "reply" || context?.type === "reply_all" ? context : undefined;
 
     const messageId = `<${crypto.randomUUID()}@postreeve.local>`;
@@ -89,7 +92,7 @@ export class SmtpMailSender implements MailSender {
       raw = await composeMime({
         messageId,
         date: new Date(submittedAt),
-        from: { name: this.#config.fromName, address: this.#config.fromAddress },
+        from,
         to: input.to,
         cc: input.cc,
         bcc: input.bcc,
@@ -106,7 +109,7 @@ export class SmtpMailSender implements MailSender {
     try {
       result = await this.#transport.sendMail({
         raw,
-        envelope: { from: this.#config.fromAddress, to: [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address) },
+        envelope: { from: from.address, to: [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address) },
         messageId,
         disableFileAccess: true,
         disableUrlAccess: true,

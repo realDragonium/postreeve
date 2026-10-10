@@ -25,6 +25,8 @@ import type {
   DraftRecipientField,
   DraftVersionInput,
   Folder,
+  Identity,
+  CreateIdentityInput,
   ListMessagesInput,
   MessageRef,
   OperationBatch,
@@ -42,6 +44,7 @@ import type {
 import {
   createFolderInputSchema,
   createDraftInputSchema,
+  createIdentityInputSchema,
   createProposalInputSchema,
   deleteFolderInputSchema,
   directActionInputSchema,
@@ -71,6 +74,7 @@ import {
   MailSendPreDispatchError,
   MailSenderRegistry,
   type ConversationSendContext,
+  type OutgoingMessage,
   type MailSender,
 } from "../mail/sender";
 import { DraftConflictError, DraftDeletedError, DraftNotFoundError } from "./errors";
@@ -106,9 +110,11 @@ export interface PostreeveContext {
 
 export const DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
+const identityLimit = 100;
+
 interface PreparedMessageSend {
   readonly account: StoredAccount;
-  readonly input: SendMessageInput;
+  readonly input: OutgoingMessage;
   readonly sender: MailSender;
   readonly context?: ConversationSendContext;
 }
@@ -544,6 +550,29 @@ export class PostreeveService {
     };
   }
 
+  async listIdentities(accountId: string): Promise<Identity[]> {
+    await this.#requireAccount(accountId);
+    return this.#store.listIdentities(this.#context.tenantId, accountId);
+  }
+
+  async addIdentity(accountId: string, rawInput: CreateIdentityInput): Promise<{ identity: Identity; created: boolean }> {
+    const input = createIdentityInputSchema.parse(rawInput);
+    const account = await this.#requireAccount(accountId);
+    if (input.address === account.email.toLowerCase()) throw new Error("The primary address is already an identity");
+    return this.#store.addIdentity(this.#context.tenantId, {
+      id: crypto.randomUUID(),
+      accountId,
+      name: input.name,
+      address: input.address,
+      createdAt: new Date().toISOString(),
+    }, identityLimit);
+  }
+
+  async removeIdentity(accountId: string, id: string): Promise<void> {
+    await this.#requireAccount(accountId);
+    await this.#store.removeIdentity(this.#context.tenantId, accountId, id);
+  }
+
   async sendMessage(rawInput: SendMessageInput): Promise<SendReceipt> {
     const input = sendMessageInputSchema.parse(rawInput);
     return this.#dispatchMessageSend(await this.#prepareMessageSend(input));
@@ -723,10 +752,7 @@ export class PostreeveService {
     if (draft.attachments.some((attachment) => !attachment.id)) {
       throw new Error("Some draft files have no stored content; remove or attach them again before sending");
     }
-    const account = await this.#requireAccount(accountId);
-    if (draft.identity.address.toLocaleLowerCase() !== account.email.toLocaleLowerCase()) {
-      throw new Error("Draft identity does not belong to the selected account");
-    }
+    const from = await this.#draftSender(accountId, draft.identity);
     const intent = draft.mode === "new"
       ? { type: "new" as const }
       : draft.source
@@ -743,7 +769,7 @@ export class PostreeveService {
       intent,
     });
     const files = await this.#store.draftFiles(this.#context.tenantId, accountId, draft);
-    const prepared = await this.#prepareMessageSend(input);
+    const prepared = await this.#prepareMessageSend(input, from);
     const claim = await this.#store.claimDraftSend(
       this.#context.tenantId,
       accountId,
@@ -1133,8 +1159,20 @@ export class PostreeveService {
     return { tenantId: this.#context.tenantId, accountId };
   }
 
-  async #prepareMessageSend(input: SendMessageInput): Promise<PreparedMessageSend> {
-    const account = await this.#requireAccount(input.accountId);
+  async #draftSender(accountId: string, identity: OutboundAddress): Promise<OutboundAddress> {
+    const account = await this.#requireAccount(accountId);
+    const address = identity.address.toLowerCase();
+    const storedName = address === account.email.toLowerCase()
+      ? account.name
+      : (await this.#store.listIdentities(this.#context.tenantId, accountId))
+        .find((candidate) => candidate.address === address)?.name;
+    if (storedName === undefined) throw new Error("Draft identity does not belong to the selected account");
+    return { name: identity.name || storedName, address: identity.address };
+  }
+
+  async #prepareMessageSend(sendInput: SendMessageInput, from?: OutboundAddress): Promise<PreparedMessageSend> {
+    const account = await this.#requireAccount(sendInput.accountId);
+    const input: OutgoingMessage = { ...sendInput, from: from ?? { name: account.name, address: account.email } };
     const sender = this.#senders.forAccount(input.accountId);
     const intent = input.intent ?? { type: "new" as const };
     if (intent.type === "new") return { account, input, sender };

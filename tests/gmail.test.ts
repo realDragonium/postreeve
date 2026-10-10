@@ -623,6 +623,55 @@ describe("Gmail compatibility", () => {
     }
   });
 
+  test("sends from a verified Send-as address and refuses others before dispatch", async () => {
+    const sendBodies: string[] = [];
+    const request: HttpFetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return json({ access_token: "short-lived-access-token", expires_in: 3600 });
+      }
+      if (url.endsWith("/settings/sendAs")) {
+        return json({ sendAs: [
+          { sendAsEmail: account.email, isPrimary: true },
+          { sendAsEmail: "Sales@example.test", verificationStatus: "accepted" },
+          { sendAsEmail: "pending@example.test", verificationStatus: "pending" },
+        ] });
+      }
+      if (url.endsWith("/messages/send")) {
+        sendBodies.push(typeof init?.body === "string" ? init.body : "");
+        return json({ id: "sent-alias", threadId: "thread-alias" });
+      }
+      return new Response(null, { status: 404 });
+    };
+    const client = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "stored-refresh-token" },
+      clientId: "desktop-client-id",
+      fetch: request,
+    });
+    const message = (address: string) => ({
+      accountId: account.id,
+      from: { name: "Sales", address },
+      to: [{ name: "", address: "recipient@example.test" }],
+      cc: [],
+      bcc: [],
+      subject: "Hello",
+      text: "Body",
+    });
+
+    await client.send(message("sales@example.test"));
+    const raw = Buffer.from((JSON.parse(sendBodies[0]!) as { raw: string }).raw, "base64url").toString("utf8");
+    expect(raw).toContain("From: Sales <sales@example.test>\r\n");
+
+    for (const address of ["pending@example.test", "unknown@example.test"]) {
+      const failure = client.send(message(address));
+      expect(failure).rejects.toBeInstanceOf(MailSendPreDispatchError);
+      expect(failure).rejects.toThrow(`Gmail does not allow sending as ${address}`);
+      await failure.catch(() => undefined);
+    }
+    expect(sendBodies).toHaveLength(1);
+  });
+
   test("returns Gmail's authoritative thread when it differs from the requested thread", async () => {
     const request: HttpFetch = async (input) => {
       const url = input instanceof Request ? input.url : String(input);

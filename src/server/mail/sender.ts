@@ -1,5 +1,5 @@
 import type { OutgoingContent } from "./outgoing-content";
-import type { SendMessageInput, SendReceipt } from "../../shared/contracts";
+import type { OutboundAddress, SendMessageInput, SendReceipt } from "../../shared/contracts";
 
 interface ConversationSourceContext {
   readonly sourceMessageId: string;
@@ -16,6 +16,9 @@ export type ConversationSendContext = ConversationSourceContext & ({
   readonly type: "forward";
 });
 
+/** A send request with its resolved From; without `from` a sender uses the account's primary address. */
+export type OutgoingMessage = SendMessageInput & { readonly from?: OutboundAddress };
+
 export class MailSendPreDispatchError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message.trim() || "Mail could not be submitted", options);
@@ -25,7 +28,7 @@ export class MailSendPreDispatchError extends Error {
 
 export interface MailSender {
   verifyConnection(): Promise<void>;
-  send(input: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SendReceipt>;
+  send(input: OutgoingMessage, context?: ConversationSendContext, content?: OutgoingContent): Promise<SendReceipt>;
 }
 
 export class MailSenderRegistry {

@@ -78,6 +78,18 @@ describe("Bun Nodemailer compatibility", () => {
     expect(Date.parse(receipt.submittedAt)).not.toBeNaN();
   });
 
+  test("uses the resolved identity as From header and envelope sender", async () => {
+    const transport = new FakeSmtpTransport(deliveredResult());
+    const sender = new SmtpMailSender(smtpConfig, () => transport);
+
+    await sender.send({ ...messageInput(), from: { name: "Sales", address: "sales@example.test" } });
+
+    const submitted = transport.messages[0];
+    expect(submitted?.envelope).toMatchObject({ from: "sales@example.test" });
+    if (!Buffer.isBuffer(submitted?.raw)) throw new Error("Expected composed MIME bytes");
+    expect((await simpleParser(submitted.raw)).from?.value[0]).toEqual({ name: "Sales", address: "sales@example.test" });
+  });
+
   test("validates direct sender input before calling the transport", async () => {
     const transport = new FakeSmtpTransport(deliveredResult());
     const sender = new SmtpMailSender(smtpConfig, () => transport);

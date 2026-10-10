@@ -8,6 +8,7 @@ import {
   createAccountInputSchema,
   createDraftInputSchema,
   createFolderInputSchema,
+  createIdentityInputSchema,
   createProposalInputSchema,
   deleteFolderInputSchema,
   directActionInputSchema,
@@ -29,6 +30,7 @@ import { AccountConflictError, DraftConflictError, DraftDeletedError, DraftNotFo
 import type { GoogleOAuth } from "./google/oauth";
 
 const accountParamsSchema = z.object({ accountId: accountIdSchema });
+const identityParamsSchema = z.object({ accountId: accountIdSchema, identityId: z.string().min(1) });
 const draftParamsSchema = z.object({ accountId: accountIdSchema, draftId: draftIdSchema });
 const proposalParamsSchema = z.object({ proposalId: proposalIdSchema });
 const batchParamsSchema = z.object({ batchId: batchIdSchema });
@@ -138,6 +140,22 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         ...context.req.valid("json"),
       })),
     )
+    .get("/accounts/:accountId/identities", zValidator("param", accountParamsSchema), async (context) =>
+      context.json(await service.listIdentities(context.req.valid("param").accountId)))
+    .post(
+      "/accounts/:accountId/identities",
+      zValidator("param", accountParamsSchema),
+      zValidator("json", createIdentityInputSchema),
+      async (context) => {
+        const { identity, created } = await service.addIdentity(context.req.valid("param").accountId, context.req.valid("json"));
+        return context.json(identity, created ? 201 : 200);
+      },
+    )
+    .delete("/accounts/:accountId/identities/:identityId", zValidator("param", identityParamsSchema), async (context) => {
+      const { accountId, identityId } = context.req.valid("param");
+      await service.removeIdentity(accountId, identityId);
+      return context.json({ ok: true as const });
+    })
     .get("/outgoing-mail-limits", (context) => context.json(service.outgoingMailLimits))
     .post("/accounts/:accountId/drafts/:draftId/files", zValidator("param", draftParamsSchema), async (context) => {
       const { accountId, draftId } = context.req.valid("param");
