@@ -18,6 +18,8 @@ const jobSchema = z.object({
 });
 export type SyncJob = z.infer<typeof jobSchema>;
 export interface SyncClaim extends SyncAccount { readonly generation: string }
+/** Mutable flags a confirmed provider action set; an absent flag keeps its indexed value. */
+export interface ConfirmedState { readonly read?: boolean | undefined; readonly flagged?: boolean | undefined }
 interface ScopeRow { scope: string; cursor: string | null; due_at: number; coverage: "partial" | "catching-up" | "complete" }
 const indexedContentSchema = messageSummarySchema.omit({ ref: true, canonicalId: true, canonicalAliases: true, read: true, flagged: true });
 
@@ -258,7 +260,7 @@ export class SynchronizationStore {
     }).immediate();
   }
 
-  confirmedAction(account: SyncAccount, previous: MessageRef, current: MessageRef, read?: boolean): void {
+  confirmedAction(account: SyncAccount, previous: MessageRef, current: MessageRef, state: ConfirmedState = {}): void {
     if (previous.accountId !== account.accountId || current.accountId !== account.accountId) throw new Error("Action crossed account scope");
     this.sqlite.transaction(() => {
       const row = this.sqlite.query(`SELECT l.message_id,i.content,l.read,l.flagged FROM message_locations l
@@ -271,11 +273,11 @@ export class SynchronizationStore {
       const summary = indexedContentSchema.parse(JSON.parse(row.content));
       this.reconcile({ ...account, mailbox: current.mailbox, authoritative: false,
         observations: [toCanonicalObservation(account.tenantId, account.provider,
-          { ...summary, ref: current, read: read ?? row.read === 1, flagged: row.flagged === 1 })] });
-      if (account.provider === "gmail" && current.providerId && read !== undefined) {
-        this.sqlite.query(`UPDATE message_locations SET read=?,sync_revision=sync_revision+1
+          { ...summary, ref: current, read: state.read ?? row.read === 1, flagged: state.flagged ?? row.flagged === 1 })] });
+      if (account.provider === "gmail" && current.providerId && (state.read !== undefined || state.flagged !== undefined)) {
+        this.sqlite.query(`UPDATE message_locations SET read=COALESCE(?,read),flagged=COALESCE(?,flagged),sync_revision=sync_revision+1
           WHERE tenant_id=? AND account_id=? AND provider='gmail' AND provider_id=?`)
-          .run(read, account.tenantId, account.accountId, current.providerId);
+          .run(state.read ?? null, state.flagged ?? null, account.tenantId, account.accountId, current.providerId);
       }
       if (previous.mailbox !== current.mailbox || previous.uidValidity !== current.uidValidity || previous.uid !== current.uid) this.#remove(account, previous);
     }).immediate();
@@ -285,8 +287,23 @@ export class SynchronizationStore {
     return this.query(tenantId, { sources: [{ accountId, mailbox }], limit }).messages;
   }
 
-  #summary(tenantId: string, row: IndexedRow): CanonicalMessageSummary {
-    const canonical = this.canonical(tenantId, row.message_id);
+  /** One summary per member with a current indexed location, in the given order, preferring locations in `preferredAccountId`. */
+  conversationSummaries(tenantId: string, members: readonly CanonicalMessage[], preferredAccountId?: string): CanonicalMessageSummary[] {
+    const rows = this.sqlite.query(`SELECT * FROM (
+        SELECT i.message_id,i.content,i.received_at,l.account_id,l.mailbox,l.uid_validity,l.uid,l.modseq,l.provider_id,l.read,l.flagged,
+          '' sort_value,
+          ROW_NUMBER() OVER (PARTITION BY i.message_id ORDER BY l.account_id IS NOT ?,l.account_id,l.mailbox,l.uid DESC,l.uid_validity DESC,l.id DESC) representative
+        FROM indexed_messages i JOIN message_locations l ON l.tenant_id=i.tenant_id AND l.account_id=i.account_id AND l.message_id=i.message_id
+        WHERE i.tenant_id=? AND i.message_id IN (SELECT value FROM json_each(?)))
+      WHERE representative=1`).all(preferredAccountId ?? null, tenantId, JSON.stringify(members.map(({ id }) => id))) as IndexedRow[];
+    const byId = new Map(rows.map(row => [row.message_id, row]));
+    return members.flatMap(member => {
+      const row = byId.get(member.id);
+      return row ? [this.#summary(tenantId, row, member)] : [];
+    });
+  }
+
+  #summary(tenantId: string, row: IndexedRow, canonical = this.canonical(tenantId, row.message_id)): CanonicalMessageSummary {
     if (!canonical) throw new Error("Indexed canonical message missing");
     return { ...indexedContentSchema.parse(JSON.parse(row.content)),
       canonicalId: canonical.id, canonicalAliases: canonical.aliases, conversationId: canonical.conversationId,

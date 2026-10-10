@@ -155,7 +155,7 @@ async function gmailPayload(raw: string) {
 }
 
 describe("Gmail compatibility", () => {
-  test("confirmed read and undo update indexed queries across Gmail labels", async () => {
+  test("confirmed read, flag and undo update indexed queries across Gmail labels", async () => {
     let labels = ["INBOX", "Label_1", "UNREAD"];
     let history = 1;
     const request: HttpFetch = async (input, init) => {
@@ -195,6 +195,18 @@ describe("Gmail compatibility", () => {
       expect(labels).toContain("UNREAD");
       expect((await unread("INBOX")).messages).toHaveLength(1);
       expect((await unread("Label_1")).messages).toHaveLength(1);
+      const flagged = (mailbox: string) => service.queryMessages({ sources: [{ accountId: account.id, mailbox }], filter: "flagged" });
+      const current = (await unread("INBOX")).messages[0]!;
+      const flag = await service.applyDirectActions({ accountId: account.id, items: [{ message: current.ref, subject: current.subject, action: { type: "flag" } }] });
+      expect(flag.status).toBe("applied");
+      expect(labels).toContain("STARRED");
+      expect(labels).toContain("UNREAD");
+      expect((await flagged("INBOX")).messages).toHaveLength(1);
+      expect((await flagged("Label_1")).messages).toHaveLength(1);
+      await service.undoBatch(flag.id);
+      expect(labels).not.toContain("STARRED");
+      expect((await flagged("INBOX")).messages).toHaveLength(0);
+      expect((await flagged("Label_1")).messages).toHaveLength(0);
     } finally { store.close(); }
   });
 
@@ -579,7 +591,7 @@ describe("Gmail compatibility", () => {
     expect(labelIds).not.toContain("UNREAD");
     await client.undo(applied);
     expect(labelIds).toContain("UNREAD");
-    const receipt = await client.send({
+    const { receipt } = await client.send({
       accountId: account.id,
       to: [{ name: "Recipient", address: "recipient@example.test" }],
       cc: [],
@@ -609,6 +621,8 @@ describe("Gmail compatibility", () => {
     expect(sendRequest.threadId).toBe("thread-1");
     expect(sentRaw).toContain("In-Reply-To: <gmail-test@example.test>\r\n");
     expect(sentRaw).toContain("References: <root@example.test> <gmail-test@example.test>\r\n");
+    expect(receipt.messageId).toMatch(/^<[0-9a-f-]{36}@example\.test>$/);
+    expect(sentRaw).toContain(`Message-ID: ${receipt.messageId}\r\n`);
 
     function message(extra: Record<string, unknown> = {}) {
       return {
@@ -621,6 +635,55 @@ describe("Gmail compatibility", () => {
         ...extra,
       };
     }
+  });
+
+  test("sends from a verified Send-as address and refuses others before dispatch", async () => {
+    const sendBodies: string[] = [];
+    const request: HttpFetch = async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url === "https://oauth2.googleapis.com/token") {
+        return json({ access_token: "short-lived-access-token", expires_in: 3600 });
+      }
+      if (url.endsWith("/settings/sendAs")) {
+        return json({ sendAs: [
+          { sendAsEmail: account.email, isPrimary: true },
+          { sendAsEmail: "Sales@example.test", verificationStatus: "accepted" },
+          { sendAsEmail: "pending@example.test", verificationStatus: "pending" },
+        ] });
+      }
+      if (url.endsWith("/messages/send")) {
+        sendBodies.push(typeof init?.body === "string" ? init.body : "");
+        return json({ id: "sent-alias", threadId: "thread-alias" });
+      }
+      return new Response(null, { status: 404 });
+    };
+    const client = new GmailMailClient({
+      account,
+      credentials: { kind: "gmail", refreshToken: "stored-refresh-token" },
+      clientId: "desktop-client-id",
+      fetch: request,
+    });
+    const message = (address: string) => ({
+      accountId: account.id,
+      from: { name: "Sales", address },
+      to: [{ name: "", address: "recipient@example.test" }],
+      cc: [],
+      bcc: [],
+      subject: "Hello",
+      text: "Body",
+    });
+
+    await client.send(message("sales@example.test"));
+    const raw = Buffer.from((JSON.parse(sendBodies[0]!) as { raw: string }).raw, "base64url").toString("utf8");
+    expect(raw).toContain("From: Sales <sales@example.test>\r\n");
+
+    for (const address of ["pending@example.test", "unknown@example.test"]) {
+      const failure = client.send(message(address));
+      expect(failure).rejects.toBeInstanceOf(MailSendPreDispatchError);
+      expect(failure).rejects.toThrow(`Gmail does not allow sending as ${address}`);
+      await failure.catch(() => undefined);
+    }
+    expect(sendBodies).toHaveLength(1);
   });
 
   test("returns Gmail's authoritative thread when it differs from the requested thread", async () => {
@@ -641,7 +704,7 @@ describe("Gmail compatibility", () => {
       fetch: request,
     });
 
-    const receipt = await client.send({
+    const { receipt } = await client.send({
       accountId: account.id,
       to: [{ name: "Recipient", address: "recipient@example.test" }],
       cc: [],

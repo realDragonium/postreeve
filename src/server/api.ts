@@ -8,8 +8,10 @@ import {
   createAccountInputSchema,
   createDraftInputSchema,
   createFolderInputSchema,
+  createIdentityInputSchema,
   createProposalInputSchema,
   deleteFolderInputSchema,
+  discoverAccountInputSchema,
   directActionInputSchema,
   draftIdSchema,
   draftFileUploadSchema,
@@ -27,8 +29,11 @@ import type { PostreeveService } from "./core/postreeve";
 import { attachmentDisposition } from "./core/attachment-reference";
 import { AccountConflictError, DraftConflictError, DraftDeletedError, DraftNotFoundError } from "./core/errors";
 import type { GoogleOAuth } from "./google/oauth";
+import { createAccountDiscovery, type DiscoverAccount } from "./accounts/discovery";
+import { resolveMx } from "node:dns/promises";
 
 const accountParamsSchema = z.object({ accountId: accountIdSchema });
+const identityParamsSchema = z.object({ accountId: accountIdSchema, identityId: z.string().min(1) });
 const draftParamsSchema = z.object({ accountId: accountIdSchema, draftId: draftIdSchema });
 const proposalParamsSchema = z.object({ proposalId: proposalIdSchema });
 const batchParamsSchema = z.object({ batchId: batchIdSchema });
@@ -48,9 +53,11 @@ const readMessagesSchema = z.object({ references: z.array(messageRefSchema).min(
 
 export interface ApiOptions {
   readonly oauthReturnUrl?: string | undefined;
+  readonly discoverAccount?: DiscoverAccount;
 }
 
 export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, options: ApiOptions = {}) {
+  const discoverAccount = options.discoverAccount ?? createAccountDiscovery({ fetch, resolveMx });
   return new Hono()
     .basePath("/api")
     .get("/health", (context) => context.json({ ok: true as const }))
@@ -76,6 +83,8 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
     .post("/accounts/:accountId/reauthorization", zValidator("param", accountParamsSchema), async (context) =>
       context.json(await service.requestReauthorization(context.req.valid("param").accountId)))
     .get("/accounts", async (context) => context.json(await service.listAccounts()))
+    .post("/accounts/discover", zValidator("json", discoverAccountInputSchema), async (context) =>
+      context.json(await discoverAccount(context.req.valid("json").email)))
     .post("/accounts/test", zValidator("json", createAccountInputSchema), async (context) => {
       await service.testNewAccountConnection(context.req.valid("json"));
       return context.json({ ok: true as const });
@@ -138,6 +147,22 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         ...context.req.valid("json"),
       })),
     )
+    .get("/accounts/:accountId/identities", zValidator("param", accountParamsSchema), async (context) =>
+      context.json(await service.listIdentities(context.req.valid("param").accountId)))
+    .post(
+      "/accounts/:accountId/identities",
+      zValidator("param", accountParamsSchema),
+      zValidator("json", createIdentityInputSchema),
+      async (context) => {
+        const { identity, created } = await service.addIdentity(context.req.valid("param").accountId, context.req.valid("json"));
+        return context.json(identity, created ? 201 : 200);
+      },
+    )
+    .delete("/accounts/:accountId/identities/:identityId", zValidator("param", identityParamsSchema), async (context) => {
+      const { accountId, identityId } = context.req.valid("param");
+      await service.removeIdentity(accountId, identityId);
+      return context.json({ ok: true as const });
+    })
     .get("/outgoing-mail-limits", (context) => context.json(service.outgoingMailLimits))
     .post("/accounts/:accountId/drafts/:draftId/files", zValidator("param", draftParamsSchema), async (context) => {
       const { accountId, draftId } = context.req.valid("param");
@@ -268,6 +293,10 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
     )
     .get("/conversations/:conversationId", zValidator("param", conversationParamsSchema), async (context) =>
       context.json(await service.getConversation(context.req.valid("param").conversationId)))
+    .get("/conversations/:conversationId/messages", zValidator("param", conversationParamsSchema),
+      zValidator("query", accountQuerySchema.partial()), async (context) =>
+      context.json(await service.getConversationMessages(context.req.valid("param").conversationId,
+        context.req.valid("query").accountId)))
     .post("/messages/send", zValidator("json", sendMessageInputSchema), async (context) =>
       context.json(await service.sendMessage(context.req.valid("json")), 201))
     .post("/messages/actions", zValidator("json", directActionInputSchema), async (context) =>

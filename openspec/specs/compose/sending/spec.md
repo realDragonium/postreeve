@@ -20,19 +20,8 @@ The system SHALL accept `POST /api/messages/send` with `{ accountId, to, cc, bcc
 - **WHEN** a client sends with `text` set to an empty string
 - **THEN** the response is 400 and no mail is submitted
 
-### Requirement: Mail is sent only from the account's primary address
-The system SHALL send every message with the account's display name and primary email address as From; a send request has no From field. A draft whose identity address differs from the account's email, compared case-insensitively, SHALL be refused with 400 `Draft identity does not belong to the selected account` before dispatch. The compose form SHALL disable sending while a locally stored alternate identity is selected.
-
-#### Scenario: Alternate identity selected in compose
-- **WHEN** a user selects a local identity other than the account's address in the From selector
-- **THEN** the Send button is disabled and the form states that alternate From identities are not supported yet
-
-#### Scenario: Draft identity of another address
-- **WHEN** a client sends a draft whose identity address is `alias@example.test` for an account whose email is `person@example.test`
-- **THEN** the response is 400 `Draft identity does not belong to the selected account` and nothing is dispatched
-
 ### Requirement: Provider routing and message construction
-The system SHALL send through the Gmail API `messages/send` for Gmail accounts and through the account's stored SMTP settings for IMAP accounts. Each message SHALL get a new `Message-ID` of the form `<uuid@postreeve.local>` and a UTF-8 plain-text body. SMTP SHALL deliver Bcc recipients through the envelope only and MUST NOT write a Bcc header. An IMAP account without stored SMTP settings SHALL fail every send before dispatch.
+The system SHALL send through the Gmail API `messages/send` for Gmail accounts and through the account's stored SMTP settings for IMAP accounts. Each message SHALL get a new `Message-ID` (see Outgoing Message-IDs use the sender's domain) and a UTF-8 plain-text body. SMTP SHALL deliver Bcc recipients through the envelope only and MUST NOT write a Bcc header. An IMAP account without stored SMTP settings SHALL fail every send before dispatch.
 
 #### Scenario: Bcc over SMTP
 - **WHEN** an IMAP account sends with one `to` and one `bcc` recipient
@@ -41,6 +30,13 @@ The system SHALL send through the Gmail API `messages/send` for Gmail accounts a
 #### Scenario: Account without SMTP settings
 - **WHEN** an IMAP account stored without SMTP settings sends a message
 - **THEN** the send fails before dispatch with a message asking the user to add the account again with outgoing-mail settings
+
+### Requirement: Outgoing Message-IDs use the sender's domain
+Every sent message SHALL have a `Message-ID` of the form `<uuid@domain>`, where `domain` is the domain of the From address, lower-cased and converted to its ASCII (IDNA) form.
+
+#### Scenario: Message-ID uses the sender's domain
+- **WHEN** an account whose email is `person@Example.TEST` sends a message
+- **THEN** the transmitted `Message-ID` ends in `@example.test>` and the receipt's `messageId` is the same value
 
 ### Requirement: Send receipts report accepted and rejected recipients
 A successful send SHALL return `{ id, accountId, messageId, providerConversationId?, accepted, rejected, submittedAt, warning? }`. SMTP SHALL report the addresses the server accepted and refused; Gmail SHALL report every recipient as accepted, with `id` the Gmail message ID and `providerConversationId` the thread Gmail reports. A receipt naming another account SHALL be treated as a failure. The web interface SHALL show the accepted count, the rejected addresses and any warning.
@@ -126,3 +122,58 @@ When a reply, reply-all or forward is accepted for at least one recipient, the s
 #### Scenario: Local recording fails
 - **WHEN** a reply is accepted but its local conversation cannot be updated
 - **THEN** the receipt's `warning` reads `Message was accepted for delivery, but its local conversation could not be updated: <reason>` and the message is not sent again
+
+### Requirement: Sent copies for IMAP accounts
+When an IMAP account whose **Save a copy to Sent** setting is on (accounts/imap-smtp-accounts) sends a message, through `POST /api/messages/send` or a draft, that at least one recipient accepted, the system SHALL append the exact MIME it transmitted over SMTP, flagged `\Seen` and dated with the receipt's `submittedAt`, to the account's selectable special-use Sent mailbox. Otherwise, and for Gmail accounts, nothing SHALL be appended.
+
+#### Scenario: Copy saved
+- **WHEN** an IMAP account with the setting on sends a message with a Bcc recipient that its server accepts
+- **THEN** the Sent mailbox receives the transmitted message, without a Bcc line, flagged `\Seen`, and the receipt has no warning
+
+#### Scenario: Provider files sent mail itself
+- **WHEN** an account whose setting is off sends a message
+- **THEN** nothing is appended to its Sent mailbox
+
+#### Scenario: Every recipient refused
+- **WHEN** the SMTP server refuses every recipient
+- **THEN** nothing is appended to Sent
+
+### Requirement: Sent copies are indexed into their conversation
+When the server reports the UID of an appended Sent copy, the system SHALL index that copy at once, so `Sent` lists it with the canonical message and conversation the send recorded (conversations/conversation-threading), matched by Message-ID. When no UID is reported, synchronization SHALL index it later.
+
+#### Scenario: Reply listed in Sent
+- **WHEN** a reply's Sent copy is appended and the server reports its UID
+- **THEN** `Sent` immediately lists the reply with the canonical ID and `conversationId` recorded for it
+
+### Requirement: Sent copy failures do not fail the send
+A failure to append or index a Sent copy SHALL NOT turn the send into a failure or allow it to be sent again. The receipt SHALL carry `Message was sent, but a copy could not be saved to Sent: <reason>`, after any other warning, and a sent draft SHALL keep that warning in its stored receipt.
+
+#### Scenario: Append fails after delivery
+- **WHEN** the SMTP server accepts a draft's message and the IMAP append is refused
+- **THEN** the draft is recorded as `sent` with that warning in its receipt and nothing is sent again
+
+#### Scenario: No Sent mailbox
+- **WHEN** the account has no selectable mailbox marked `\Sent`
+- **THEN** the send succeeds with the Sent-copy warning naming the missing Sent mailbox
+
+### Requirement: Mail is sent from the selected identity
+A sent draft SHALL use its identity as From, with the stored identity name when the draft's name is empty. `POST /api/messages/send` has no From field and SHALL use the account's display name and primary address. SMTP SHALL use the From address as envelope sender; a server refusing it fails before dispatch. The resolved From SHALL be the sender address for every header derived from it.
+
+#### Scenario: Reply from an alias over SMTP
+- **WHEN** an IMAP account sends a reply draft whose identity is its stored identity `sales@example.test`
+- **THEN** the message has `From: Sales <sales@example.test>` and the SMTP `MAIL FROM` is `sales@example.test`
+
+#### Scenario: Direct send
+- **WHEN** a client sends through `POST /api/messages/send`
+- **THEN** the message is sent from the account's display name and primary address
+
+### Requirement: Gmail sends only from verified Send-as addresses
+Before sending a Gmail message whose From address is not the account's address, the system SHALL read the account's Send-as addresses through the Gmail API and SHALL refuse before dispatch, unless the address is listed and not pending verification, with `Gmail does not allow sending as <address>; add and verify it under Gmail Settings > Accounts > Send mail as`. A failure to read the list SHALL also fail before dispatch.
+
+#### Scenario: Verified alias
+- **WHEN** a Gmail draft is sent from `alias@example.test` and Gmail lists it as an accepted Send-as address
+- **THEN** the message is submitted with `From: <alias@example.test>` as chosen
+
+#### Scenario: Address not configured in Gmail
+- **WHEN** a Gmail draft is sent from a stored identity Gmail does not list as Send-as
+- **THEN** nothing is submitted and the draft is recorded as `failed` with the Send mail as message

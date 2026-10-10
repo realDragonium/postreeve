@@ -20,6 +20,19 @@ export const outboundAddressSchema = z.object({
   address: z.email(),
 });
 
+export const identitySchema = z.object({
+  id: z.string().min(1),
+  accountId: accountIdSchema,
+  name: z.string().min(1).max(120),
+  address: z.email(),
+  createdAt: z.iso.datetime(),
+});
+
+export const createIdentityInputSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  address: z.email().transform((address) => address.toLowerCase()),
+});
+
 export const folderSchema = z.object({
   path: z.string().min(1),
   name: z.string().min(1),
@@ -155,6 +168,8 @@ export const triageActionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("trash") }),
   z.object({ type: z.literal("mark_read") }),
   z.object({ type: z.literal("mark_unread") }),
+  z.object({ type: z.literal("flag") }),
+  z.object({ type: z.literal("unflag") }),
 ]);
 
 export const proposalItemSchema = z.object({
@@ -221,6 +236,7 @@ export const createAccountInputSchema = z.object({
   smtpSecure: z.boolean(),
   smtpUsername: z.string().min(1),
   smtpPassword: z.string().min(1),
+  saveSentCopy: z.boolean().optional(),
 });
 
 export const accountSettingsSchema = z.object({
@@ -236,9 +252,26 @@ export const accountSettingsSchema = z.object({
   smtpPort: z.number().int().min(1).max(65535),
   smtpSecure: z.boolean(),
   smtpUsername: z.string().min(1),
+  saveSentCopy: z.boolean(),
+});
+
+export const discoverAccountInputSchema = z.object({ email: z.email() });
+
+export const mailProviderIds = ["icloud", "fastmail", "yahoo", "aol", "zoho", "gmx", "gmail", "outlook", "proton"] as const;
+
+export const discoveredAccountSettingsSchema = accountSettingsSchema.pick({
+  host: true, port: true, secure: true, username: true,
+  smtpHost: true, smtpPort: true, smtpSecure: true, smtpUsername: true,
+});
+
+export const accountDiscoverySchema = z.object({
+  provider: z.enum(mailProviderIds).nullable(),
+  source: z.enum(["provider", "autoconfig", "ispdb", "mx"]).nullable(),
+  settings: discoveredAccountSettingsSchema.nullable(),
 });
 
 export const updateAccountInputSchema = accountSettingsSchema.omit({ id: true, kind: true }).extend({
+  saveSentCopy: z.boolean().optional(),
   password: z.string().min(1).optional(),
   smtpPassword: z.string().min(1).optional(),
 });
@@ -435,8 +468,13 @@ export type OperationBatch = z.infer<typeof operationBatchSchema>;
 export type CreateAccountInput = z.infer<typeof createAccountInputSchema>;
 export type AccountSettings = z.infer<typeof accountSettingsSchema>;
 export type UpdateAccountInput = z.infer<typeof updateAccountInputSchema>;
+export type MailProviderId = (typeof mailProviderIds)[number];
+export type DiscoveredAccountSettings = z.infer<typeof discoveredAccountSettingsSchema>;
+export type AccountDiscovery = z.infer<typeof accountDiscoverySchema>;
 export type ConnectionTestResult = z.infer<typeof connectionTestResultSchema>;
 export type OutboundAddress = z.infer<typeof outboundAddressSchema>;
+export type Identity = z.infer<typeof identitySchema>;
+export type CreateIdentityInput = z.input<typeof createIdentityInputSchema>;
 export type ConversationSendSource = z.infer<typeof conversationSendSourceSchema>;
 export type SendMessageIntent = z.infer<typeof sendMessageIntentSchema>;
 export type SendMessageInput = z.infer<typeof sendMessageInputSchema>;

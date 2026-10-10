@@ -118,6 +118,7 @@ export type ImapClientFactory = (options: ImapFlowOptions) => ImapClient;
 
 const SUMMARY_SOURCE_BYTES = 64 * 1024;
 const SEEN_FLAG = "\\Seen";
+const FLAGGED_FLAG = "\\Flagged";
 const DRAFT_FLAG = "\\Draft";
 const DELETED_FLAG = "\\Deleted";
 const MAX_PROVIDER_DRAFTS = 1_000;
@@ -197,6 +198,20 @@ export class ImapMailProvider implements MailProvider {
         throw new Error("Move every message out of this IMAP folder before deleting it");
       }
       await client.mailboxDelete(path);
+    });
+  }
+
+  async appendSentMessage(accountId: string, mime: Buffer, sentAt: string): Promise<ProviderMessageSummary | null> {
+    this.#assertAccount(accountId);
+    return this.#withClient(async (client) => {
+      const mailbox = await findSentMailbox(client);
+      const appended = await client.append(mailbox, mime, [SEEN_FLAG], new Date(sentAt));
+      if (!appended) throw new Error("IMAP server refused to store the sent copy");
+      if (appended.uid === undefined || appended.uidValidity === undefined) return null;
+      const opened = await client.mailboxOpen(mailbox, { readOnly: true });
+      if (opened.uidValidity !== appended.uidValidity) return null;
+      const [summary] = await this.#fetchSummaries(client, opened, [appended.uid], true);
+      return summary ?? null;
     });
   }
 
@@ -380,7 +395,7 @@ export class ImapMailProvider implements MailProvider {
         case "leave":
           return { current: previous, previous, action, previousRead };
         case "mark_read":
-          await changeSeenFlag(client, reference, true);
+          await changeFlag(client, reference, SEEN_FLAG, true);
           return {
             current: await fetchCurrentReference(client, this.#config.accountId, reference.mailbox, opened, reference.uid),
             previous,
@@ -388,12 +403,22 @@ export class ImapMailProvider implements MailProvider {
             previousRead,
           };
         case "mark_unread":
-          await changeSeenFlag(client, reference, false);
+          await changeFlag(client, reference, SEEN_FLAG, false);
           return {
             current: await fetchCurrentReference(client, this.#config.accountId, reference.mailbox, opened, reference.uid),
             previous,
             action,
             previousRead,
+          };
+        case "flag":
+        case "unflag":
+          await changeFlag(client, reference, FLAGGED_FLAG, action.type === "flag");
+          return {
+            current: await fetchCurrentReference(client, this.#config.accountId, reference.mailbox, opened, reference.uid),
+            previous,
+            action,
+            previousRead,
+            previousFlagged: hasFlag(before.flags, FLAGGED_FLAG),
           };
         case "move":
           return this.#move(client, reference, opened, action.destination, action, previous, previousRead);
@@ -422,7 +447,16 @@ export class ImapMailProvider implements MailProvider {
           assertUidValidity(opened, applied.current);
           const current = await client.fetchOne(applied.current.uid, { uid: true }, { uid: true });
           assertCurrentMessage(current, applied.current);
-          await changeSeenFlag(client, applied.current, applied.previousRead);
+          await changeFlag(client, applied.current, SEEN_FLAG, applied.previousRead);
+          return null;
+        }
+        case "flag":
+        case "unflag": {
+          const opened = await client.mailboxOpen(applied.current.mailbox);
+          assertUidValidity(opened, applied.current);
+          const current = await client.fetchOne(applied.current.uid, { uid: true }, { uid: true });
+          assertCurrentMessage(current, applied.current);
+          await changeFlag(client, applied.current, FLAGGED_FLAG, applied.previousFlagged === true);
           return null;
         }
         case "move":
@@ -808,6 +842,13 @@ async function findDraftsMailbox(client: ImapClient): Promise<string> {
   return drafts.path;
 }
 
+async function findSentMailbox(client: ImapClient): Promise<string> {
+  const mailboxes = await client.list();
+  const sent = mailboxes.find((mailbox) => specialUseFor(mailbox) === "sent" && !hasFlag(mailbox.flags, "\\Noselect"));
+  if (!sent) throw new Error("This account has no discoverable special-use Sent mailbox");
+  return sent.path;
+}
+
 function assertLimit(limit: number): void {
   if (!Number.isInteger(limit) || limit < 1) throw new Error("Message limit must be a positive integer");
 }
@@ -830,14 +871,14 @@ function isCurrentMessage(message: FetchMessageObject | false, reference: Messag
   return message.modseq?.toString() === reference.modseq;
 }
 
-async function changeSeenFlag(client: ImapClient, reference: MessageRef, read: boolean): Promise<void> {
+async function changeFlag(client: ImapClient, reference: MessageRef, flag: string, set: boolean): Promise<void> {
   // ImapFlow 1.7.6 places UNCHANGEDSINCE after the flag data, which strict IMAP
   // servers reject. apply() and undo() validate the UID and MODSEQ immediately
   // before this single-flag mutation, so the stale-message guard remains intact.
   const options = { uid: true as const };
-  const changed = read
-    ? await client.messageFlagsAdd(reference.uid, [SEEN_FLAG], options)
-    : await client.messageFlagsRemove(reference.uid, [SEEN_FLAG], options);
+  const changed = set
+    ? await client.messageFlagsAdd(reference.uid, [flag], options)
+    : await client.messageFlagsRemove(reference.uid, [flag], options);
   if (!changed) throw new Error(`IMAP server refused to update UID ${reference.uid}`);
 }
 

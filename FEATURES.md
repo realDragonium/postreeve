@@ -23,6 +23,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Use multiple Gmail and IMAP/SMTP accounts | Complete | Complete | All mailbox tools are scoped by `accountId`. |
 | Connect Gmail through Google OAuth | Complete | Not covered | No matching WebMCP tool exists. The current UI uses an interactive Google login and consent flow. |
 | Add an IMAP/SMTP account | Complete | Not covered | No matching WebMCP tool exists. |
+| Propose IMAP/SMTP settings from an email address | Complete | Not covered | **Find settings** uses the built-in provider list, Thunderbird autoconfig, the ISPDB and MX matching, with fixed app-password guidance. No matching WebMCP tool exists. |
 | Test IMAP and SMTP settings | Complete | Not covered | No matching WebMCP tool exists. |
 | Update or reconnect an IMAP/SMTP account | Complete | Not covered | No matching WebMCP tool exists. |
 | Reauthorize Gmail | Complete | Partial | `request_reauthorization` provides human guidance; Google login and consent remain interactive UI steps. |
@@ -49,6 +50,8 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | --- | --- | --- | --- |
 | List message summaries | Complete | Complete | `list_messages` also shows the same mailbox view in the UI. |
 | Read full message bodies | Complete | Complete | `read_messages` |
+| Read the whole conversation, including your own replies in Sent and other folders | Complete | Not covered | No conversation tool exists; `read_messages` reads individual references. The reader collapses read messages and loads each body when expanded. |
+| Group the message list by conversation | Not available | Not available | The list shows individual messages; opening one shows its conversation. |
 | Search within a folder | Complete | Complete | `search_messages` writes the query into the UI and shows the matching messages. |
 | Filter all, unread, or flagged messages | Complete | Complete | `list_messages.filter` and `search_messages.filter` update the visible UI filter. |
 | Sort by newest, oldest, sender, or subject | Complete | Complete | `list_messages.sort` and `search_messages.sort` update the visible UI sort order. |
@@ -70,7 +73,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Move to another folder | Complete | Complete | `apply_message_actions` with `move`. |
 | Move to Trash | Complete | Complete | `apply_message_actions` with `trash`. |
 | Permanently delete mail | Not available | Not available | Not implemented. Trash currently means moving to the provider's Trash folder. |
-| Flag or unflag mail | Partial | Not available | The UI control is disabled pending provider support. |
+| Flag or unflag mail | Complete | Complete | `apply_message_actions` with `flag` or `unflag` (IMAP `\Flagged`, Gmail `STARRED`). |
 
 Every WebMCP mutation revalidates the stable message reference, records an audited batch, isolates work to one account, and returns individual success or failure results.
 
@@ -85,11 +88,12 @@ Every WebMCP mutation revalidates the stable message reference, records an audit
 | Add Bcc recipients | Complete | Complete | `send_message.bcc` |
 | Validate recipient addresses | Complete | Complete | UI and WebMCP inputs reject invalid addresses. |
 | Show accepted and rejected recipients | Complete | Complete | Returned in the send receipt. |
+| Keep a copy of IMAP/SMTP sends in Sent | Complete | Complete | `send_message` uses the same send path. The per-account **Save a copy to Sent** setting is UI-only and starts off for Gmail and Outlook hosts, which file sent mail themselves. |
 | Require approval before an agent sends real mail | Not applicable | Complete contract requirement | The `send_message` description requires explicit approval of recipients, subject, and message before invocation. |
 | Reply | Partial | Not available | The editor and quoting UI exist, but sending is blocked until thread headers are supported. |
 | Reply all | Partial | Not available | The editor populates recipients, but sending is blocked. |
 | Forward | Partial | Not available | The editor builds forwarded content, but sending is blocked. |
-| Send from an alternate identity or catch-all alias | Partial | Not available | Identities are local-only and alternate-From sending is blocked. |
+| Send from an alternate identity or catch-all alias | Complete | Not available | Drafts send from a stored identity over SMTP and Gmail. Gmail requires the address under Send mail as. Replies default to the identity the message was delivered to. `send_message` sends from the primary address only. |
 | Add attachments | Partial | Not available | The UI records local attachment metadata, but files are not uploaded or sent. |
 
 Sending is a real external side effect. WebMCP exposes the same basic send operation as the UI, but it does not send drafts, replies, forwards, attachments, or alternate identities that the UI itself cannot send.
@@ -103,8 +107,8 @@ Sending is a real external side effect. WebMCP exposes the same basic send opera
 | List and reopen local drafts | Partial | Not available | Not synchronized with the provider's Drafts folder. |
 | Delete a local draft | Partial | Not available | Local browser state only. |
 | Synchronize provider drafts | Not available | Not available | No IMAP or Gmail draft implementation exists. |
-| Add or remove a local identity | Partial | Not available | Stored only in local storage. |
-| Select an alternate From identity | Partial | Not available | The selector exists, but sending is blocked for alternate identities. |
+| Add or remove an identity | Complete | Not available | Stored per account on the server; browser-local identities migrate once. |
+| Select an alternate From identity | Complete | Not available | Sending is disabled for an address that is not an identity of the account. |
 
 These features are not provider-backed today. Whether and how they should be exposed through WebMCP remains an open product decision.
 

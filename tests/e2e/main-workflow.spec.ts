@@ -947,6 +947,95 @@ test("reads a message and returns to the list on a narrow screen", async ({ page
   await expect(page.getByText(message.subject, { exact: true })).toBeVisible();
 });
 
+test("reads the whole conversation with earlier messages loaded on demand", async ({ page }) => {
+  const earlier: CanonicalMessageDetail = {
+    ...message,
+    canonicalId: "conversation-earlier",
+    ref: { ...messageRef, mailbox: "Archive", uid: 12 },
+    messageId: "earlier@example.com",
+    subject: "Kickoff",
+    from: [{ name: "Taylor Kim", address: "taylor@example.com" }],
+    replyTo: [],
+    cc: [],
+    deliveredTo: [],
+    receivedAt: "2026-08-27T08:30:00.000Z",
+    preview: "Kickoff agenda preview",
+    read: true,
+    text: "Kickoff agenda body",
+    html: null,
+  };
+  const sentReply: CanonicalMessageDetail = {
+    ...earlier,
+    canonicalId: "conversation-sent-reply",
+    ref: { ...messageRef, mailbox: "Sent", uid: 77 },
+    messageId: "sent-reply@example.com",
+    from: [{ name: "Alex", address: account.email }],
+    receivedAt: "2026-08-30T08:30:00.000Z",
+    preview: "My own reply preview",
+    text: "My own reply body",
+  };
+  const details = [earlier, message, sentReply];
+  const reads: string[] = [];
+  const archived: number[] = [];
+  const draftFixture = new BrowserDraftFixture();
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (await draftFixture.handle(route, account.id)) return;
+    if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
+    if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
+    if (request.method() === "POST" && url.pathname === "/api/messages/query") return json(route, mailboxResult([message]));
+    if (request.method() === "GET" && url.pathname === `/api/conversations/${message.conversationId}/messages`) {
+      return json(route, canonicalMessageSummarySchema.array().parse(details));
+    }
+    if (request.method() === "POST" && url.pathname === "/api/messages/read") {
+      const body: unknown = request.postDataJSON();
+      const [reference] = messageRefSchema.array().parse(
+        typeof body === "object" && body !== null && "references" in body ? body.references : [],
+      );
+      const detail = details.find(({ ref }) => ref.mailbox === reference?.mailbox && ref.uid === reference.uid)!;
+      reads.push(detail.canonicalId);
+      return json(route, [detail]);
+    }
+    if (request.method() === "POST" && url.pathname === "/api/messages/actions") {
+      const input = directActionInputSchema.parse(request.postDataJSON());
+      archived.push(...input.items.map((item) => item.message.uid));
+      return json(route, {
+        id: "batch-conversation", proposalId: "direct", accountId: input.accountId, status: "applied",
+        operations: input.items.map((entry, index) => ({ itemId: `item-${index}`, message: entry.message, action: entry.action, status: "applied", error: null })),
+        createdAt: "2026-09-05T10:00:00.000Z", updatedAt: "2026-09-05T10:00:00.000Z",
+      });
+    }
+    if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
+    return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
+  });
+
+  await page.goto("/");
+  await page.getByText(message.subject, { exact: true }).click();
+  const reader = page.getByLabel("Message reader");
+  await expect(reader.getByText("3 messages")).toBeVisible();
+  const earlierMessage = reader.getByRole("article", { name: "Message from Taylor Kim" });
+  const replyMessage = reader.getByRole("article", { name: "Message from Alex" });
+  await expect(earlierMessage.getByText("Kickoff agenda preview")).toBeVisible();
+  await expect(replyMessage.getByText("My own reply preview")).toBeVisible();
+  await expect(reader.getByRole("article", { name: "Message from Sam Rivera" }).getByText("delivered to planning-alias@example.com")).toBeVisible();
+  expect(reads).toEqual([message.canonicalId]);
+
+  await earlierMessage.getByRole("button", { expanded: false }).click();
+  await expect(earlierMessage.getByText("Kickoff agenda body")).toBeVisible();
+  expect(reads).toEqual([message.canonicalId, earlier.canonicalId]);
+
+  await earlierMessage.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect(page.getByLabel("To", { exact: true })).toHaveValue("taylor@example.com");
+  await expect(page.getByLabel("Subject", { exact: true })).toHaveValue("Re: Kickoff");
+  await page.getByRole("button", { name: "Close Reply" }).click();
+
+  await reader.getByRole("button", { name: "Archive", exact: true }).click();
+  await expect.poll(() => archived).toEqual([message.ref.uid]);
+});
+
 test("downloads received attachments with loading and provider error feedback", async ({ page }) => {
   const attached: CanonicalMessageDetail = {
     ...message,
@@ -1013,7 +1102,7 @@ test("downloads received attachments with loading and provider error feedback", 
   await expect(page.getByRole("alert")).toContainText("Mailbox provider is temporarily unavailable");
 });
 
-test("keyboard shortcuts open, move through and archive mail", async ({ page }) => {
+test("keyboard shortcuts open, move through, archive and flag mail", async ({ page }) => {
   const second: CanonicalMessageDetail = {
     ...message,
     canonicalId: "canonical-second",
@@ -1066,6 +1155,14 @@ test("keyboard shortcuts open, move through and archive mail", async ({ page }) 
 
   await page.keyboard.press("e");
   await expect.poll(() => applied).toContain(JSON.stringify([[41, { type: "move", destination: "Archive" }]]));
+
+  await page.keyboard.press("s");
+  await expect.poll(() => applied).toContain(JSON.stringify([[41, { type: message.flagged ? "unflag" : "flag" }]]));
+  await expect(page.getByText(message.flagged ? "Unflagged 1" : "Flagged 1", { exact: true })).toBeVisible();
+  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: message.flagged ? "Unflag" : "Flag", exact: true }).click();
+  await expect.poll(() => applied.length).toBe(3);
+  await page.keyboard.press("Escape");
 
   const listWithSidebar = await page.locator(".list").boundingBox();
   await page.keyboard.press("[");
@@ -1232,6 +1329,7 @@ test("shows and selects a newly connected account without a reload", async ({ pa
   const personal: Account = { id: "account-personal", name: "Personal", email: "person@example.com", kind: "imap" };
   const work: Account = { id: "account-new-work", name: "New work", email: "person@work.example", kind: "imap" };
   let created = false;
+  let saveSentCopy: boolean | undefined;
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -1240,7 +1338,7 @@ test("shows and selects a newly connected account without a reload", async ({ pa
     if (method === "GET" && url.pathname === "/api/accounts") return json(route, created ? [personal, work] : [personal]);
     if (method === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
     if (method === "POST" && url.pathname === "/api/accounts") {
-      createAccountInputSchema.parse(request.postDataJSON());
+      saveSentCopy = createAccountInputSchema.parse(request.postDataJSON()).saveSentCopy;
       created = true;
       return json(route, work, 201);
     }
@@ -1258,7 +1356,11 @@ test("shows and selects a newly connected account without a reload", async ({ pa
   await page.getByRole("button", { name: "Add account" }).click();
   await page.getByLabel("Name", { exact: true }).fill(work.name);
   await page.getByLabel("Email address").fill(work.email);
+  const saveCopy = page.getByLabel("Save a copy to Sent");
+  await page.getByLabel("IMAP host").fill("imap.gmail.com");
+  await expect(saveCopy).not.toBeChecked();
   await page.getByLabel("IMAP host").fill("imap.work.example");
+  await expect(saveCopy).toBeChecked();
   await page.getByLabel("Username").first().fill(work.email);
   await page.getByLabel(/Password/).first().fill("incoming-password");
   await page.getByRole("button", { name: "Connect account" }).click();
@@ -1266,6 +1368,7 @@ test("shows and selects a newly connected account without a reload", async ({ pa
   await expect(page.getByText(work.email, { exact: true })).toBeVisible();
   await expect(page.getByText(`${work.email} · Inbox`, { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Unified" })).toBeVisible();
+  expect(saveSentCopy).toBe(true);
 });
 
 test("starts with real account onboarding when no mailbox is connected", async ({ page }) => {
@@ -1278,6 +1381,62 @@ test("starts with real account onboarding when no mailbox is connected", async (
   await page.getByRole("button", { name: "Connect account" }).click();
   await expect(page.getByRole("heading", { name: "Connect a mailbox" })).toBeVisible();
   await expect(page.getByText(/demo/i)).toHaveCount(0);
+});
+
+test("fills discovered settings and guidance, keeps them editable, and steers Gmail to Google", async ({ page }) => {
+  const discovered: string[] = [];
+  let created: unknown = null;
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method();
+    if (method === "GET" && url.pathname === "/api/accounts") return json(route, []);
+    if (method === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: true });
+    if (method === "POST" && url.pathname === "/api/accounts/discover") {
+      const { email } = request.postDataJSON() as { email: string };
+      discovered.push(email);
+      if (email.endsWith("@gmail.com")) return json(route, { provider: "gmail", source: "provider", settings: null });
+      return json(route, {
+        provider: "icloud",
+        source: "provider",
+        settings: {
+          host: "imap.mail.me.com", port: 993, secure: true, username: email,
+          smtpHost: "smtp.mail.me.com", smtpPort: 587, smtpSecure: false, smtpUsername: email,
+        },
+      });
+    }
+    if (method === "POST" && url.pathname === "/api/accounts") {
+      created = createAccountInputSchema.parse(request.postDataJSON());
+      return json(route, { error: "stop here" }, 400);
+    }
+    return json(route, { error: `Unhandled test route: ${method} ${url.pathname}` }, 404);
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connect account" }).click();
+  await page.getByLabel("Email address").fill("person@gmail.com");
+  await page.getByRole("button", { name: "Find settings" }).click();
+  await expect(page.getByText(/Use Continue with Google above/)).toBeVisible();
+
+  await page.getByLabel("Email address").fill("person@icloud.com");
+  await expect(page.getByText(/Use Continue with Google above/)).toHaveCount(0);
+  await page.getByRole("button", { name: "Find settings" }).click();
+  await expect(page.getByText(/Postreeve's provider list for iCloud Mail/)).toBeVisible();
+  await expect(page.getByText(/app-specific password/)).toBeVisible();
+  await expect(page.getByLabel("IMAP host")).toHaveValue("imap.mail.me.com");
+  await expect(page.getByLabel("SMTP host")).toHaveValue("smtp.mail.me.com");
+
+  await page.getByLabel("SMTP host").fill("smtp.override.example");
+  await page.getByLabel("Name", { exact: true }).fill("iCloud");
+  await page.getByLabel(/Password/).first().fill("app-specific-password");
+  await page.locator("form").getByRole("button", { name: "Connect account" }).click();
+  await expect(page.getByText("stop here")).toBeVisible();
+
+  expect(discovered).toEqual(["person@gmail.com", "person@icloud.com"]);
+  expect(created).toMatchObject({
+    email: "person@icloud.com", host: "imap.mail.me.com", port: 993, secure: true, username: "person@icloud.com",
+    smtpHost: "smtp.override.example", smtpPort: 587, smtpSecure: false, smtpUsername: "person@icloud.com",
+  });
 });
 
 
