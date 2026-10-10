@@ -13,11 +13,15 @@ The system SHALL derive correspondents per account from the From, To and Cc head
 - **THEN** `bob@example.test` counts one sent message and `carol@example.test` counts one received message
 
 ### Requirement: Correspondents follow the index
-Messages added to, changed in or removed from the index SHALL change the derived correspondents, and an address SHALL no longer be suggested once the index holds no message counting for it. Removing an account SHALL remove that account's contribution.
+Messages added to, changed in or removed from the index SHALL change the derived correspondents, and an address SHALL no longer be suggested once the index holds no message counting for it. Removing an account SHALL remove that account's contribution. Adding, changing or removing an account address or identity SHALL reclassify all indexed messages with the current own addresses.
 
 #### Scenario: Account removed
 - **WHEN** `dave@example.test` occurs only in mail of an account that is then removed
 - **THEN** `dave@example.test` is no longer suggested
+
+#### Scenario: Identity added after synchronization
+- **WHEN** the person sent to `zoe@example.test` from their account address and from `alias@example.test`, `alias@example.test` is then added as an identity, and the message sent from it is removed from the index
+- **THEN** `zoe@example.test` is still suggested
 
 ### Requirement: Suggestions follow index retention
 Suggestions SHALL use only headers the synchronized index retains. Header retention is unaffected by preview and body retention, so suggestions SHALL remain for messages whose preview and body text have expired.
@@ -52,11 +56,22 @@ Suggestions whose address or a word of whose display name starts with the query 
 - **THEN** `ann@example.test` is suggested before `anna@example.test`
 
 ### Requirement: Compose recipient fields offer suggestions
-The To, Cc and Bcc fields of the compose form SHALL request suggestions for the address being typed after the last comma and show them in a list whose first suggestion is active. Arrow Down and Arrow Up SHALL move the active suggestion, Enter or Tab SHALL replace the typed address with the active suggestion's address followed by `, `, and Escape SHALL close the list. Enter SHALL NOT send the message while the list is shown.
+The To, Cc and Bcc fields of the compose form SHALL request suggestions for the address being typed after the last comma and show them in a list. Arrow Down and Arrow Up SHALL move the active suggestion, Enter or Tab SHALL replace the typed address with the active suggestion's address followed by `, `, and Escape SHALL close the list. Enter SHALL NOT send the message while the list is shown.
 
 #### Scenario: Accept with the keyboard
 - **WHEN** a user types `bob@x.test, al` in To, where `albert@example.test` and `alice@example.test` are suggested in that order, and presses Arrow Down and then Enter
 - **THEN** To reads `bob@x.test, alice@example.test, ` and the message is not sent
+
+### Requirement: Typed recipients are not replaced silently
+When the list opens, the first suggestion SHALL be active only when its address or display name starts with the typed text, compared case-insensitively, and the typed text is not already a complete address; otherwise no suggestion SHALL be active until the user presses Arrow Down or Arrow Up. When no suggestion is active, Enter and Tab SHALL close the list and leave the typed text unchanged.
+
+#### Scenario: Prefix match is active
+- **WHEN** a user types `al` in To, where `albert@example.test` is the first suggestion, and presses Tab
+- **THEN** To reads `albert@example.test, `
+
+#### Scenario: Typed address is kept
+- **WHEN** a user types `dan@acme.test` in To, where `jordan@acme.test` is suggested, and presses Tab
+- **THEN** To still reads `dan@acme.test` and the list is closed
 
 ### Requirement: Recipient fields remain comma-separated text
 The recipient fields SHALL remain comma-separated text: pasting a comma-separated list and the existing validation of recipient addresses SHALL be unchanged by suggestions.

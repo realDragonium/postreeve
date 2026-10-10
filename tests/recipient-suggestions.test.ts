@@ -74,6 +74,18 @@ describe("recipient suggestions", () => {
     expect(suggest("dave")).toEqual([]);
   });
 
+  test("reclassify mail when own addresses change", async () => {
+    const { store, index, suggest } = await fixture();
+    index("a", [mail("a", me("a"), [person("zoe@x.test")]), mail("a", person("alias@me.test"), [person("zoe@x.test")])]);
+    index("b", [mail("b", me("a"), [me("b"), person("yuri@x.test")])]);
+    await store.addIdentity(tenant, { id: "i1", accountId: "a", name: "Alias", address: "alias@me.test", createdAt: now.toISOString() }, 10);
+    store.synchronization.sqlite.query("DELETE FROM indexed_messages WHERE json_extract(content,'$.from[0].address')='alias@me.test'").run();
+    expect(suggest("zoe").map(s => s.address)).toEqual(["zoe@x.test"]);
+    expect(await store.deleteAccount("a")).toBe(true);
+    expect(suggest("yuri")).toEqual([]);
+    expect(suggest("me.test").map(s => s.address)).toEqual(["a@me.test"]);
+  });
+
   test("changed headers move a message's contribution", async () => {
     const { index, suggest } = await fixture();
     const original = mail("a", person("first@x.test"), [me("a")]);
@@ -88,8 +100,10 @@ describe("recipient suggestions", () => {
     const path = join(directory, "index.sqlite");
     const first = await fixture(path);
     first.index("a", [mail("a", me("a"), [person("cat@x.test", "Cat")])]);
-    first.store.synchronization.sqlite.exec(`DROP TRIGGER correspondents_insert; DROP TRIGGER correspondents_delete;
-      DROP TRIGGER correspondents_update; DROP TABLE correspondents`);
+    const sqlite = first.store.synchronization.sqlite;
+    const triggers = sqlite.query("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'correspondents_%'").all() as Array<{ name: string }>;
+    for (const { name } of triggers) sqlite.exec(`DROP TRIGGER ${name}`);
+    sqlite.exec("DROP TABLE correspondents");
     first.store.close();
     const reopened = new Store(path); close.push(() => reopened.close());
     expect(reopened.recipientSuggestions(tenant, { q: "cat" }, now)).toEqual([{ name: "Cat", address: "cat@x.test" }]);

@@ -44,5 +44,15 @@ test("suggests indexed correspondents in recipient fields and accepts them with 
     await expect(page.getByRole("listbox")).toHaveCount(0);
     await expect(cc).toBeFocused();
     await expect(cc).toHaveValue("sender");
+
+    await cc.fill("");
+    await cc.pressSequentially("ender");
+    const ccList = page.getByRole("listbox", { name: "Cc suggestions" });
+    await expect(ccList).toBeVisible();
+    await expect(ccList.getByRole("option", { selected: true })).toHaveCount(0);
+    await cc.press("Enter");
+    await expect(page.getByRole("listbox")).toHaveCount(0);
+    await expect(cc).toHaveValue("ender");
+    await expect(page.getByRole("heading", { name: "New message" })).toBeVisible();
   } finally { server.kill("SIGTERM"); }
 });

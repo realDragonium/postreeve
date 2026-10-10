@@ -31,7 +31,6 @@ function add(row: string, from = ""): string {
       last_at=max(correspondents.last_at,excluded.last_at);`;
 }
 
-// Removal reclassifies with today's own addresses, so counts clamp at zero instead of trusting insert-time history.
 const remove = `UPDATE correspondents SET sent_count=max(0,sent_count-c.sent),received_count=max(0,received_count-(1-c.sent))
     FROM (${contributions("OLD")}) c
     WHERE correspondents.tenant_id=c.tenant_id AND correspondents.account_id=c.account_id AND correspondents.address=c.address;
@@ -41,6 +40,10 @@ const remove = `UPDATE correspondents SET sent_count=max(0,sent_count-c.sent),re
 const headersChanged = ["from", "to", "cc"]
   .map(field => `json_extract(OLD.content,'$.${field}') IS NOT json_extract(NEW.content,'$.${field}')`)
   .concat("OLD.received_at IS NOT NEW.received_at").join(" OR ");
+
+// Classification depends on the current own addresses, so changing them rebuilds every count;
+// otherwise removing a message would subtract a different classification than inserting it added.
+const rebuild = `DELETE FROM correspondents; ${add("m", "indexed_messages m,")}`;
 
 /** Creates the correspondents table and the triggers that keep it in step with indexed_messages. */
 export function migrateCorrespondents(sqlite: Database): void {
@@ -54,8 +57,13 @@ export function migrateCorrespondents(sqlite: Database): void {
       CREATE TRIGGER IF NOT EXISTS correspondents_delete AFTER DELETE ON indexed_messages BEGIN ${remove} END;
       CREATE TRIGGER IF NOT EXISTS correspondents_update AFTER UPDATE OF content,received_at ON indexed_messages
         WHEN ${headersChanged} BEGIN ${remove} ${add("NEW")} END;
+      CREATE TRIGGER IF NOT EXISTS correspondents_identity_insert AFTER INSERT ON identities BEGIN ${rebuild} END;
+      CREATE TRIGGER IF NOT EXISTS correspondents_identity_delete AFTER DELETE ON identities BEGIN ${rebuild} END;
+      CREATE TRIGGER IF NOT EXISTS correspondents_identity_update AFTER UPDATE OF tenant_id,address ON identities BEGIN ${rebuild} END;
+      CREATE TRIGGER IF NOT EXISTS correspondents_account_delete AFTER DELETE ON accounts BEGIN ${rebuild} END;
+      CREATE TRIGGER IF NOT EXISTS correspondents_account_update AFTER UPDATE OF email ON accounts BEGIN ${rebuild} END;
     `);
-    if (!exists) sqlite.exec(add("m", "indexed_messages m,"));
+    if (!exists) sqlite.exec(rebuild);
   }).immediate();
 }
 
