@@ -95,6 +95,7 @@ interface TestHarnessOptions {
   onDraftUpdate?: (draft: Draft, ref: ProviderDraftRef) => void | Promise<void>;
   rotateDraftRefOnUpdate?: boolean;
   sentCopyFailure?: Error;
+  beforeSentCopy?: () => void | Promise<void>;
   onDraftRemove?: (draftId: string) => void | Promise<void>;
   draftRemoveFailure?: () => Error | undefined;
   providerDraftState?: Map<string, ProviderDraft>;
@@ -154,6 +155,7 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
         options.rotateDraftRefOnUpdate ?? false,
         options.downloadAttachment,
         async (mime) => {
+          await options.beforeSentCopy?.();
           if (options.sentCopyFailure) throw options.sentCopyFailure;
           sentCopies.push(mime);
         },

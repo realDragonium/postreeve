@@ -29,6 +29,8 @@ Open [http://127.0.0.1:3000](http://127.0.0.1:3000). A new installation starts e
 
 Postreeve binds to `127.0.0.1` by default because the web interface does not have authentication yet. Do not expose it to a public or shared network.
 
+To block pages that rebind their own domain to your machine, the server only answers requests addressed to `127.0.0.1`, `localhost` or `[::1]` (on any port), plus the address in `POSTREEVE_HOST` when it names one, and it rejects API writes sent from another site. Binding to `0.0.0.0` therefore still accepts only loopback names; set `POSTREEVE_HOST` to the exact address or hostname you browse to if you deliberately serve it elsewhere.
+
 ## Desktop app
 
 Run Postreeve as a desktop application without starting the server manually:

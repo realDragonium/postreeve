@@ -131,7 +131,17 @@ const providerDraftMarkerHeaders: string[] = [
 
 type ListedProviderDraft = ProviderDraft & { readonly deleted: boolean };
 
-const defaultClientFactory: ImapClientFactory = (options) => new ImapFlow(options);
+type ImapTimeouts = Pick<ImapFlowOptions, "connectionTimeout" | "greetingTimeout" | "socketTimeout">;
+// A send has already been delivered when its copy is appended, so a stalled server must not hold it for imapflow's five-minute default.
+const SENT_COPY_TIMEOUTS: ImapTimeouts = { connectionTimeout: 30_000, greetingTimeout: 16_000, socketTimeout: 60_000 };
+
+const defaultClientFactory: ImapClientFactory = (options) => {
+  const client = new ImapFlow(options);
+  // A connection error such as a socket timeout closes the client, which rejects the pending command; an unhandled
+  // 'error' event would instead crash the server.
+  client.on("error", () => {});
+  return client;
+};
 
 export class ImapMailProvider implements MailProvider {
   readonly #config: ImapAccountConfig;
@@ -212,7 +222,7 @@ export class ImapMailProvider implements MailProvider {
       if (opened.uidValidity !== appended.uidValidity) return null;
       const [summary] = await this.#fetchSummaries(client, opened, [appended.uid], true);
       return summary ?? null;
-    });
+    }, undefined, SENT_COPY_TIMEOUTS);
   }
 
   async createDraft(scope: ProviderDraftScope, draft: ProviderDraftInput): Promise<ProviderDraftRef> {
@@ -742,7 +752,11 @@ export class ImapMailProvider implements MailProvider {
     return summaries;
   }
 
-  async #withClient<T>(operation: (client: ImapClient) => Promise<T>, signal?: AbortSignal): Promise<T> {
+  async #withClient<T>(
+    operation: (client: ImapClient) => Promise<T>,
+    signal?: AbortSignal,
+    timeouts: ImapTimeouts = {},
+  ): Promise<T> {
     signal?.throwIfAborted();
     const searchEvidence = signal ? new ImapSearchEvidence() : undefined;
     const client = this.#createClient({
@@ -752,6 +766,7 @@ export class ImapMailProvider implements MailProvider {
       auth: { user: this.#config.username, pass: this.#config.password },
       logger: searchEvidence?.logger ?? false,
       qresync: true,
+      ...timeouts,
     });
 
     if (searchEvidence) {

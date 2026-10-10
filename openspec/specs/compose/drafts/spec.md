@@ -146,6 +146,13 @@ After dispatch the system SHALL record `sent` with `settledAt` and the receipt w
 - **WHEN** delivery is accepted but the sent state cannot be stored
 - **THEN** the response carries the receipt with a warning and the draft is `uncertain` with `Delivery was accepted, but its receipt could not be stored`
 
+### Requirement: A delivered draft is recorded before its Sent copy
+The system SHALL record a draft's delivery outcome before saving any Sent copy (compose/sending), so a slow or failing Sent copy never delays the outcome or changes its status.
+
+#### Scenario: Sent copy pending
+- **WHEN** a draft's message is accepted and its Sent copy is still being appended
+- **THEN** the draft is already `sent` with its receipt, and a server restart at that moment leaves it `sent`
+
 ### Requirement: Sent drafts settle and replay their receipt
 Sending a draft whose delivery is `sent` SHALL return its stored receipt, whatever version is supplied, without dispatching again, including after a restart. A sent draft SHALL be readable by ID with its receipt and files, SHALL NOT be updatable (409 `draft_conflict`), and SHALL be deletable with its current version.
 

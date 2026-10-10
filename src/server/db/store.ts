@@ -704,6 +704,17 @@ export class Store {
     return toDraft(row);
   }
 
+  async updateSentDraftReceipt(tenantId: string, accountId: string, id: string, receipt: SendReceipt): Promise<void> {
+    const validatedReceipt = sendReceiptSchema.parse(receipt);
+    if (validatedReceipt.accountId !== accountId) {
+      throw new Error("Draft delivery receipt belongs to another account");
+    }
+    this.#sqlite.query(`
+      UPDATE drafts SET delivery_receipt = ?
+      WHERE tenant_id = ? AND account_id = ? AND id = ? AND delivery_status = 'sent'
+    `).run(JSON.stringify(validatedReceipt), tenantId, accountId, id);
+  }
+
   async markDraftSendUncertain(
     tenantId: string,
     accountId: string,

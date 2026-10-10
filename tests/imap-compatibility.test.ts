@@ -1362,6 +1362,9 @@ describe("IMAP sent copies", () => {
       subject: "Sent copy",
       read: true,
     });
+    expect(state.options).toEqual([
+      expect.objectContaining({ connectionTimeout: 30_000, greetingTimeout: 16_000, socketTimeout: 60_000 }),
+    ]);
   });
 
   test("leaves indexing to synchronization when the server reports no UID", async () => {

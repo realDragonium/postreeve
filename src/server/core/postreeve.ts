@@ -585,7 +585,9 @@ export class PostreeveService {
 
   async sendMessage(rawInput: SendMessageInput): Promise<SendReceipt> {
     const input = sendMessageInputSchema.parse(rawInput);
-    return this.#dispatchMessageSend(await this.#prepareMessageSend(input));
+    const prepared = await this.#prepareMessageSend(input);
+    const dispatched = await this.#dispatchMessageSend(prepared);
+    return this.#saveSentCopy(prepared.account, dispatched.receipt, dispatched.mime);
   }
 
   async createDraft(rawInput: CreateDraftInput): Promise<Draft> {
@@ -791,8 +793,9 @@ export class PostreeveService {
     if (claim.kind === "sent") return claim.receipt;
 
     let receipt: SendReceipt;
+    let mime: Buffer;
     try {
-      receipt = await this.#dispatchMessageSend(prepared, files);
+      ({ receipt, mime } = await this.#dispatchMessageSend(prepared, files));
     } catch (error) {
       const failedAt = new Date().toISOString();
       try {
@@ -834,8 +837,9 @@ export class PostreeveService {
         receipt,
         draftClaimOwner,
       );
+      const settledReceipt = await this.#saveSettledSentCopy(prepared.account, settled, receipt, mime);
       const warning = await this.#cleanupProviderDraft(settled);
-      return warning ? withReceiptWarning(receipt, warning) : receipt;
+      return warning ? withReceiptWarning(settledReceipt, warning) : settledReceipt;
     } catch (settlementError) {
       const recoveredAt = new Date().toISOString();
       let recoveryError: unknown;
@@ -865,13 +869,14 @@ export class PostreeveService {
         recoveryError = error;
       }
       const recovered = await this.#store.getDraft(this.#context.tenantId, accountId, id);
+      const copied = await this.#saveSentCopy(prepared.account, receipt, mime);
       const cleanupWarning = receipt.accepted.length > 0 && recovered
         ? await this.#cleanupProviderDraft(recovered)
         : undefined;
       return sendReceiptSchema.parse({
         ...receipt,
         warning: [
-          receipt.warning,
+          copied.warning,
           `Delivery completed, but the local draft receipt could not be stored: ${errorMessage(settlementError)}.`,
           recoveryError
             ? `Its recoverable delivery state also could not be stored: ${errorMessage(recoveryError)}. Automatic retry remains blocked.`
@@ -1280,7 +1285,10 @@ export class PostreeveService {
     return { account, input, sender, context };
   }
 
-  async #dispatchMessageSend(prepared: PreparedMessageSend, files: readonly OutgoingAttachment[] = []): Promise<SendReceipt> {
+  async #dispatchMessageSend(
+    prepared: PreparedMessageSend,
+    files: readonly OutgoingAttachment[] = [],
+  ): Promise<{ receipt: SendReceipt; mime: Buffer }> {
     const sent = await prepared.sender.send(prepared.input, prepared.context, {
       files, maxMessageBytes: this.outgoingMailLimits.maxMessageBytes,
     });
@@ -1288,15 +1296,26 @@ export class PostreeveService {
     if (receipt.accountId !== prepared.input.accountId) {
       throw new Error("Mail sender returned a receipt for another account");
     }
-    if (receipt.accepted.length === 0) return receipt;
+    if (receipt.accepted.length === 0) return { receipt, mime: sent.mime };
     const recorded = prepared.context
       ? await this.#recordConversationSend(prepared.input.accountId, prepared.account.kind, receipt, prepared.context)
       : receipt;
-    return this.#saveSentCopy(prepared.account, recorded, sent.mime);
+    return { receipt: recorded, mime: sent.mime };
+  }
+
+  async #saveSettledSentCopy(account: StoredAccount, settled: Draft, receipt: SendReceipt, mime: Buffer): Promise<SendReceipt> {
+    const copied = await this.#saveSentCopy(account, receipt, mime);
+    if (copied.warning === receipt.warning || settled.delivery.status !== "sent") return copied;
+    try {
+      await this.#store.updateSentDraftReceipt(this.#context.tenantId, settled.accountId, settled.id, copied);
+    } catch {
+      // The response still carries the warning; the draft itself is already recorded as sent.
+    }
+    return copied;
   }
 
   async #saveSentCopy(account: StoredAccount, receipt: SendReceipt, mime: Buffer): Promise<SendReceipt> {
-    if (account.kind !== "imap") return receipt;
+    if (account.kind !== "imap" || receipt.accepted.length === 0) return receipt;
     try {
       const credentials = this.#credentialsFor(account);
       if (credentials.kind !== "imap" || !credentials.smtp || !savesSentCopy(credentials.imap.host, credentials.smtp)) {

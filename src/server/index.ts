@@ -15,6 +15,7 @@ import { SmtpMailSender } from "./mail/smtp";
 import { CredentialVault } from "./security/credentials";
 import { desktopApiAuthentication } from "./security/desktop-auth";
 import { postreeveSecureHeaders } from "./security/headers";
+import { allowedHostGuard, sameOriginGuard } from "./security/request-origin";
 
 const store = new Store();
 const providers = new MailProviderRegistry();
@@ -95,9 +96,13 @@ await service.recoverInterruptedDraftSends();
 await service.initialize();
 service.synchronization.start();
 
+const desktopToken = process.env.POSTREEVE_DESKTOP_TOKEN;
 const app = new Hono();
 app.use("*", postreeveSecureHeaders);
-app.use("/api/*", desktopApiAuthentication(process.env.POSTREEVE_DESKTOP_TOKEN));
+app.use("*", allowedHostGuard(serverConfig.hostname));
+// With a desktop token every API write is already authenticated, and the protocol proxy forwards a postreeve:// Origin.
+if (!desktopToken?.trim()) app.use("/api/*", sameOriginGuard());
+app.use("/api/*", desktopApiAuthentication(desktopToken));
 app.route("/", createApi(service, googleOAuth, {
   oauthReturnUrl: process.env.POSTREEVE_DESKTOP_URL,
 }));

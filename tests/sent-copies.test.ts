@@ -88,6 +88,36 @@ describe("sent copies for IMAP accounts", () => {
     store.close();
   });
 
+  test("records a delivered draft as sent before its copy is appended", async () => {
+    let statusDuringCopy: string | undefined;
+    let draftId = "";
+    let accountId = "";
+    const { store, service } = await createEmptyTestHarness({
+      beforeSentCopy: async () => {
+        statusDuringCopy = (await service.getDraft(accountId, draftId)).delivery.status;
+      },
+    });
+    const account = await service.createAccount(testAccountInput());
+    const draft = await service.createDraft({
+      accountId: account.id,
+      mode: "new",
+      to: [{ name: "Recipient", address: "recipient@example.test" }],
+      cc: [],
+      bcc: [],
+      subject: "Settled first",
+      body: "Durable before the copy.",
+      identity: { name: account.name, address: account.email },
+      attachments: [],
+    });
+    accountId = account.id;
+    draftId = draft.id;
+
+    await service.sendDraft(account.id, draft.id, { version: draft.version });
+
+    expect(statusDuringCopy).toBe("sent");
+    store.close();
+  });
+
   test("round-trips the setting and falls back to the host default for accounts stored without it", async () => {
     const { store, service, sentCopies } = await createEmptyTestHarness();
     const account = await service.createAccount(accountInput({ host: "outlook.office365.com" }));
