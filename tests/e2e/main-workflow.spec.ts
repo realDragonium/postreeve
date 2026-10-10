@@ -1383,6 +1383,62 @@ test("starts with real account onboarding when no mailbox is connected", async (
   await expect(page.getByText(/demo/i)).toHaveCount(0);
 });
 
+test("fills discovered settings and guidance, keeps them editable, and steers Gmail to Google", async ({ page }) => {
+  const discovered: string[] = [];
+  let created: unknown = null;
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method();
+    if (method === "GET" && url.pathname === "/api/accounts") return json(route, []);
+    if (method === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: true });
+    if (method === "POST" && url.pathname === "/api/accounts/discover") {
+      const { email } = request.postDataJSON() as { email: string };
+      discovered.push(email);
+      if (email.endsWith("@gmail.com")) return json(route, { provider: "gmail", source: "provider", settings: null });
+      return json(route, {
+        provider: "icloud",
+        source: "provider",
+        settings: {
+          host: "imap.mail.me.com", port: 993, secure: true, username: email,
+          smtpHost: "smtp.mail.me.com", smtpPort: 587, smtpSecure: false, smtpUsername: email,
+        },
+      });
+    }
+    if (method === "POST" && url.pathname === "/api/accounts") {
+      created = createAccountInputSchema.parse(request.postDataJSON());
+      return json(route, { error: "stop here" }, 400);
+    }
+    return json(route, { error: `Unhandled test route: ${method} ${url.pathname}` }, 404);
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Connect account" }).click();
+  await page.getByLabel("Email address").fill("person@gmail.com");
+  await page.getByRole("button", { name: "Find settings" }).click();
+  await expect(page.getByText(/Use Continue with Google above/)).toBeVisible();
+
+  await page.getByLabel("Email address").fill("person@icloud.com");
+  await expect(page.getByText(/Use Continue with Google above/)).toHaveCount(0);
+  await page.getByRole("button", { name: "Find settings" }).click();
+  await expect(page.getByText(/Postreeve's provider list for iCloud Mail/)).toBeVisible();
+  await expect(page.getByText(/app-specific password/)).toBeVisible();
+  await expect(page.getByLabel("IMAP host")).toHaveValue("imap.mail.me.com");
+  await expect(page.getByLabel("SMTP host")).toHaveValue("smtp.mail.me.com");
+
+  await page.getByLabel("SMTP host").fill("smtp.override.example");
+  await page.getByLabel("Name", { exact: true }).fill("iCloud");
+  await page.getByLabel(/Password/).first().fill("app-specific-password");
+  await page.locator("form").getByRole("button", { name: "Connect account" }).click();
+  await expect(page.getByText("stop here")).toBeVisible();
+
+  expect(discovered).toEqual(["person@gmail.com", "person@icloud.com"]);
+  expect(created).toMatchObject({
+    email: "person@icloud.com", host: "imap.mail.me.com", port: 993, secure: true, username: "person@icloud.com",
+    smtpHost: "smtp.override.example", smtpPort: 587, smtpSecure: false, smtpUsername: "person@icloud.com",
+  });
+});
+
 
 test("uploads binary files, retries failures, and reopens them in another client before retrying send", async ({ page, browser }) => {
   const fixture = new BrowserDraftFixture();

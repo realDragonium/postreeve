@@ -255,6 +255,21 @@ export const accountSettingsSchema = z.object({
   saveSentCopy: z.boolean(),
 });
 
+export const discoverAccountInputSchema = z.object({ email: z.email() });
+
+export const mailProviderIds = ["icloud", "fastmail", "yahoo", "aol", "zoho", "gmx", "gmail", "outlook", "proton"] as const;
+
+export const discoveredAccountSettingsSchema = accountSettingsSchema.pick({
+  host: true, port: true, secure: true, username: true,
+  smtpHost: true, smtpPort: true, smtpSecure: true, smtpUsername: true,
+});
+
+export const accountDiscoverySchema = z.object({
+  provider: z.enum(mailProviderIds).nullable(),
+  source: z.enum(["provider", "autoconfig", "ispdb", "mx"]).nullable(),
+  settings: discoveredAccountSettingsSchema.nullable(),
+});
+
 export const updateAccountInputSchema = accountSettingsSchema.omit({ id: true, kind: true }).extend({
   saveSentCopy: z.boolean().optional(),
   password: z.string().min(1).optional(),
@@ -453,6 +468,9 @@ export type OperationBatch = z.infer<typeof operationBatchSchema>;
 export type CreateAccountInput = z.infer<typeof createAccountInputSchema>;
 export type AccountSettings = z.infer<typeof accountSettingsSchema>;
 export type UpdateAccountInput = z.infer<typeof updateAccountInputSchema>;
+export type MailProviderId = (typeof mailProviderIds)[number];
+export type DiscoveredAccountSettings = z.infer<typeof discoveredAccountSettingsSchema>;
+export type AccountDiscovery = z.infer<typeof accountDiscoverySchema>;
 export type ConnectionTestResult = z.infer<typeof connectionTestResultSchema>;
 export type OutboundAddress = z.infer<typeof outboundAddressSchema>;
 export type Identity = z.infer<typeof identitySchema>;

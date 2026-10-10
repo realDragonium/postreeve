@@ -11,6 +11,7 @@ import {
   createIdentityInputSchema,
   createProposalInputSchema,
   deleteFolderInputSchema,
+  discoverAccountInputSchema,
   directActionInputSchema,
   draftIdSchema,
   draftFileUploadSchema,
@@ -28,6 +29,8 @@ import type { PostreeveService } from "./core/postreeve";
 import { attachmentDisposition } from "./core/attachment-reference";
 import { AccountConflictError, DraftConflictError, DraftDeletedError, DraftNotFoundError } from "./core/errors";
 import type { GoogleOAuth } from "./google/oauth";
+import { createAccountDiscovery, type DiscoverAccount } from "./accounts/discovery";
+import { resolveMx } from "node:dns/promises";
 
 const accountParamsSchema = z.object({ accountId: accountIdSchema });
 const identityParamsSchema = z.object({ accountId: accountIdSchema, identityId: z.string().min(1) });
@@ -50,9 +53,11 @@ const readMessagesSchema = z.object({ references: z.array(messageRefSchema).min(
 
 export interface ApiOptions {
   readonly oauthReturnUrl?: string | undefined;
+  readonly discoverAccount?: DiscoverAccount;
 }
 
 export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, options: ApiOptions = {}) {
+  const discoverAccount = options.discoverAccount ?? createAccountDiscovery({ fetch, resolveMx });
   return new Hono()
     .basePath("/api")
     .get("/health", (context) => context.json({ ok: true as const }))
@@ -78,6 +83,8 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
     .post("/accounts/:accountId/reauthorization", zValidator("param", accountParamsSchema), async (context) =>
       context.json(await service.requestReauthorization(context.req.valid("param").accountId)))
     .get("/accounts", async (context) => context.json(await service.listAccounts()))
+    .post("/accounts/discover", zValidator("json", discoverAccountInputSchema), async (context) =>
+      context.json(await discoverAccount(context.req.valid("json").email)))
     .post("/accounts/test", zValidator("json", createAccountInputSchema), async (context) => {
       await service.testNewAccountConnection(context.req.valid("json"));
       return context.json({ ok: true as const });

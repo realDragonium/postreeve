@@ -3,6 +3,7 @@ import { accountHealthSchema, reauthorizationSchema, synchronizationStatusSchema
 import type { ZodType } from "zod";
 import { z } from "zod";
 import {
+  accountDiscoverySchema,
   accountSchema,
   accountSettingsSchema,
   connectionTestResultSchema,
@@ -17,6 +18,7 @@ import {
   proposalSchema,
   sendReceiptSchema,
   type Account,
+  type AccountDiscovery,
   type AccountSettings,
   type CreateAccountInput,
   type CreateFolderInput,
@@ -144,6 +146,8 @@ export const api = {
   accounts: (signal?: AbortSignal): Promise<Account[]> => request("/accounts", accountSchema.array(), withSignal(signal)),
   createAccount: (input: CreateAccountInput): Promise<Account> =>
     request("/accounts", accountSchema, { method: "POST", ...jsonBody(input) }),
+  discoverAccount: (email: string, signal?: AbortSignal): Promise<AccountDiscovery> =>
+    request("/accounts/discover", accountDiscoverySchema, { method: "POST", ...jsonBody({ email }), ...withSignal(signal) }),
   testNewAccount: (input: CreateAccountInput, signal?: AbortSignal) =>
     request("/accounts/test", connectionTestResultSchema, {
       method: "POST",
