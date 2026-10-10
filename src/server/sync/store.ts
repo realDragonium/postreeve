@@ -18,6 +18,8 @@ const jobSchema = z.object({
 });
 export type SyncJob = z.infer<typeof jobSchema>;
 export interface SyncClaim extends SyncAccount { readonly generation: string }
+/** Mutable flags a confirmed provider action set; an absent flag keeps its indexed value. */
+export interface ConfirmedState { readonly read?: boolean | undefined; readonly flagged?: boolean | undefined }
 interface ScopeRow { scope: string; cursor: string | null; due_at: number; coverage: "partial" | "catching-up" | "complete" }
 const indexedContentSchema = messageSummarySchema.omit({ ref: true, canonicalId: true, canonicalAliases: true, read: true, flagged: true });
 
@@ -258,7 +260,7 @@ export class SynchronizationStore {
     }).immediate();
   }
 
-  confirmedAction(account: SyncAccount, previous: MessageRef, current: MessageRef, read?: boolean): void {
+  confirmedAction(account: SyncAccount, previous: MessageRef, current: MessageRef, state: ConfirmedState = {}): void {
     if (previous.accountId !== account.accountId || current.accountId !== account.accountId) throw new Error("Action crossed account scope");
     this.sqlite.transaction(() => {
       const row = this.sqlite.query(`SELECT l.message_id,i.content,l.read,l.flagged FROM message_locations l
@@ -271,11 +273,11 @@ export class SynchronizationStore {
       const summary = indexedContentSchema.parse(JSON.parse(row.content));
       this.reconcile({ ...account, mailbox: current.mailbox, authoritative: false,
         observations: [toCanonicalObservation(account.tenantId, account.provider,
-          { ...summary, ref: current, read: read ?? row.read === 1, flagged: row.flagged === 1 })] });
-      if (account.provider === "gmail" && current.providerId && read !== undefined) {
-        this.sqlite.query(`UPDATE message_locations SET read=?,sync_revision=sync_revision+1
+          { ...summary, ref: current, read: state.read ?? row.read === 1, flagged: state.flagged ?? row.flagged === 1 })] });
+      if (account.provider === "gmail" && current.providerId && (state.read !== undefined || state.flagged !== undefined)) {
+        this.sqlite.query(`UPDATE message_locations SET read=COALESCE(?,read),flagged=COALESCE(?,flagged),sync_revision=sync_revision+1
           WHERE tenant_id=? AND account_id=? AND provider='gmail' AND provider_id=?`)
-          .run(read, account.tenantId, account.accountId, current.providerId);
+          .run(state.read ?? null, state.flagged ?? null, account.tenantId, account.accountId, current.providerId);
       }
       if (previous.mailbox !== current.mailbox || previous.uidValidity !== current.uidValidity || previous.uid !== current.uid) this.#remove(account, previous);
     }).immediate();

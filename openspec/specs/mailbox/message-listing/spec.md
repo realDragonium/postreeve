@@ -84,7 +84,7 @@ The unified view SHALL send its matching account/mailbox sources to one backend 
 - **THEN** one cursor pages the combined canonical results
 
 ### Requirement: Filter the visible list
-All, Unread and Flagged filters SHALL apply before pagination to every indexed message in the selected sources. Mutable flags SHALL come from a representative matching location. Confirmed Gmail read changes and their undo SHALL update all locations of the same tenant/account/provider message; IMAP flags SHALL remain location-specific.
+All, Unread and Flagged filters SHALL apply before pagination to every indexed message in the selected sources. Mutable flags SHALL come from a representative matching location. Confirmed Gmail read and flag changes and their undo SHALL update all locations of the same tenant/account/provider message; IMAP flags SHALL remain location-specific.
 
 #### Scenario: Unread filter
 - **WHEN** Unread is selected in a synchronized folder

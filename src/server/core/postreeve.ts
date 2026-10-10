@@ -31,6 +31,7 @@ import type {
   OperationResult,
   OutboundAddress,
   Proposal,
+  TriageAction,
   ProviderDraftRef,
   RenameFolderInput,
   SendMessageInput,
@@ -56,6 +57,7 @@ import {
 } from "../../shared/contracts";
 import type { Store, StoredAccount, StoredBatch } from "../db/store";
 import type { StoredOperation } from "../db/schema";
+import type { ConfirmedState } from "../sync/store";
 import {
   MailProviderRegistry,
   toCanonicalObservation,
@@ -1350,8 +1352,7 @@ export class PostreeveService {
           operation = { result: operationResult(item, "applied", null), applied: null };
         } else {
           const applied = await provider.apply(item.message, item.action);
-          const identityError = await this.#recordProviderMove(proposal.accountId, applied,
-            item.action.type === "mark_read" ? true : item.action.type === "mark_unread" ? false : undefined);
+          const identityError = await this.#recordProviderMove(proposal.accountId, applied, confirmedStateAfter(item.action));
           operation = { result: operationResult(item, "applied", identityError), applied };
         }
       } catch (error) {
@@ -1405,7 +1406,8 @@ export class PostreeveService {
         const reversed = await provider.undo(operation.applied);
         const reverse = reversed ?? { previous: operation.applied.current,
           current: { ...operation.applied.previous, modseq: null } };
-        const identityError = await this.#recordProviderMove(batch.accountId, reverse, operation.applied.previousRead);
+        const identityError = await this.#recordProviderMove(batch.accountId, reverse,
+          { read: operation.applied.previousRead, flagged: operation.applied.previousFlagged });
         storedOperations.push({
           ...operation,
           result: { ...operation.result, status: "undone", error: identityError },
@@ -1432,7 +1434,7 @@ export class PostreeveService {
     return toPublicBatch(updated);
   }
 
-  async #recordProviderMove(accountId: string, move: ProviderLocationMove, read?: boolean): Promise<string | null> {
+  async #recordProviderMove(accountId: string, move: ProviderLocationMove, state: ConfirmedState): Promise<string | null> {
     try {
       const account = await this.#requireAccount(accountId);
       const retained = await this.#store.recordProviderMove(
@@ -1441,7 +1443,7 @@ export class PostreeveService {
         move.previous,
         move.current,
       );
-      this.#store.synchronization.confirmedAction({ tenantId: this.#context.tenantId, accountId, provider: account.kind }, move.previous, move.current, read);
+      this.#store.synchronization.confirmedAction({ tenantId: this.#context.tenantId, accountId, provider: account.kind }, move.previous, move.current, state);
       if (!retained) {
         return "Provider action succeeded, but local message identity could not be retained: source identity is unknown";
       }
@@ -1604,6 +1606,18 @@ export class PostreeveService {
 
 function replySubject(subject: string): string {
   return /^re:/i.test(subject) ? subject : `Re: ${subject}`;
+}
+
+function confirmedStateAfter(action: TriageAction): ConfirmedState {
+  switch (action.type) {
+    case "mark_read": return { read: true };
+    case "mark_unread": return { read: false };
+    case "flag": return { flagged: true };
+    case "unflag": return { flagged: false };
+    case "leave":
+    case "move":
+    case "trash": return {};
+  }
 }
 
 function operationResult(

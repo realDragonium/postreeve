@@ -90,6 +90,8 @@ export interface AppliedMailAction {
   previous: MessageRef;
   action: TriageAction;
   previousRead: boolean;
+  /** Recorded by `flag` and `unflag`, the only actions whose undo needs it. */
+  previousFlagged?: boolean;
 }
 
 export interface ProviderLocationMove {

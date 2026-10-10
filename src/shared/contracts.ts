@@ -155,6 +155,8 @@ export const triageActionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("trash") }),
   z.object({ type: z.literal("mark_read") }),
   z.object({ type: z.literal("mark_unread") }),
+  z.object({ type: z.literal("flag") }),
+  z.object({ type: z.literal("unflag") }),
 ]);
 
 export const proposalItemSchema = z.object({

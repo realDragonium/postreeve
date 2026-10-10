@@ -391,7 +391,11 @@ describe("Postreeve WebMCP", () => {
     expect(services.sendCalls).toEqual([sendInput]);
     const directActionInput: DirectActionInput = {
       accountId: account.id,
-      items: [{ message: messageRef, subject: message.subject, action: { type: "mark_read" } }],
+      items: [
+        { message: messageRef, subject: message.subject, action: { type: "mark_read" } },
+        { message: messageRef, subject: message.subject, action: { type: "flag" } },
+        { message: messageRef, subject: message.subject, action: { type: "unflag" } },
+      ],
     };
     expect(
       await modelContext.tool("apply_message_actions").execute(directActionInput, executeOptions()),

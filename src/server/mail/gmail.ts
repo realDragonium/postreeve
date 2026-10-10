@@ -412,6 +412,12 @@ export class GmailMailClient implements MailProvider, MailSender {
       case "mark_unread":
         after = await this.#modify(id, ["UNREAD"], []);
         break;
+      case "flag":
+        after = await this.#modify(id, ["STARRED"], []);
+        break;
+      case "unflag":
+        after = await this.#modify(id, [], ["STARRED"]);
+        break;
       case "trash":
         after = await this.#request(`/messages/${encodeURIComponent(id)}/trash`, gmailMessageSchema, { method: "POST" });
         mailbox = "TRASH";
@@ -433,6 +439,7 @@ export class GmailMailClient implements MailProvider, MailSender {
       previous,
       action,
       previousRead,
+      ...(action.type === "flag" || action.type === "unflag" ? { previousFlagged: before.labelIds.includes("STARRED") } : {}),
     };
   }
 
@@ -445,6 +452,10 @@ export class GmailMailClient implements MailProvider, MailSender {
       case "mark_read":
       case "mark_unread":
         await this.#modify(id, applied.previousRead ? [] : ["UNREAD"], applied.previousRead ? ["UNREAD"] : []);
+        return null;
+      case "flag":
+      case "unflag":
+        await this.#modify(id, applied.previousFlagged ? ["STARRED"] : [], applied.previousFlagged ? [] : ["STARRED"]);
         return null;
       case "trash":
         await this.#request(`/messages/${encodeURIComponent(id)}/untrash`, gmailMessageSchema, { method: "POST" });

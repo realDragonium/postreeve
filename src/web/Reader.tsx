@@ -52,6 +52,7 @@ export function Reader(props: ReaderProps) {
       <span className="toolbar-end">
         <button className="chip" disabled={props.busy || !archive} title={archive ? undefined : "This account has no Archive folder"} onClick={() => archive && props.onAction({ type: "move", destination: archive.path })}>Archive</button>
         <button className="chip" disabled={props.busy} onClick={() => props.onAction({ type: message.read ? "mark_unread" : "mark_read" })}>{message.read ? "Mark unread" : "Mark read"}</button>
+        <button className="chip" disabled={props.busy} onClick={() => props.onAction({ type: message.flagged ? "unflag" : "flag" })}>{message.flagged ? "Unflag" : "Flag"}</button>
         <select
           className="input"
           style={{ width: "auto", height: 26 }}

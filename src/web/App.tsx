@@ -259,6 +259,8 @@ function App() {
       const label = action.type === "move" ? `Moved ${targets.length} to ${action.destination}`
         : action.type === "trash" ? `Moved ${targets.length} to Trash`
         : action.type === "mark_read" ? `Marked ${targets.length} read`
+        : action.type === "flag" ? `Flagged ${targets.length}`
+        : action.type === "unflag" ? `Unflagged ${targets.length}`
         : `Marked ${targets.length} unread`;
       setUndoStack((current) => [{ label, batchIds: created.map(({ id }) => id) }, ...current].slice(0, 8));
       setSelected(new Set());
@@ -460,6 +462,10 @@ function App() {
       if (event.key === "u") {
         event.preventDefault();
         applyTo(targetsFor(current), { type: current.read ? "mark_unread" : "mark_read" });
+      }
+      if (event.key === "s") {
+        event.preventDefault();
+        applyTo(targetsFor(current), { type: current.flagged ? "unflag" : "flag" });
       }
     }
     document.addEventListener("keydown", onKey);

@@ -155,7 +155,7 @@ async function gmailPayload(raw: string) {
 }
 
 describe("Gmail compatibility", () => {
-  test("confirmed read and undo update indexed queries across Gmail labels", async () => {
+  test("confirmed read, flag and undo update indexed queries across Gmail labels", async () => {
     let labels = ["INBOX", "Label_1", "UNREAD"];
     let history = 1;
     const request: HttpFetch = async (input, init) => {
@@ -195,6 +195,18 @@ describe("Gmail compatibility", () => {
       expect(labels).toContain("UNREAD");
       expect((await unread("INBOX")).messages).toHaveLength(1);
       expect((await unread("Label_1")).messages).toHaveLength(1);
+      const flagged = (mailbox: string) => service.queryMessages({ sources: [{ accountId: account.id, mailbox }], filter: "flagged" });
+      const current = (await unread("INBOX")).messages[0]!;
+      const flag = await service.applyDirectActions({ accountId: account.id, items: [{ message: current.ref, subject: current.subject, action: { type: "flag" } }] });
+      expect(flag.status).toBe("applied");
+      expect(labels).toContain("STARRED");
+      expect(labels).toContain("UNREAD");
+      expect((await flagged("INBOX")).messages).toHaveLength(1);
+      expect((await flagged("Label_1")).messages).toHaveLength(1);
+      await service.undoBatch(flag.id);
+      expect(labels).not.toContain("STARRED");
+      expect((await flagged("INBOX")).messages).toHaveLength(0);
+      expect((await flagged("Label_1")).messages).toHaveLength(0);
     } finally { store.close(); }
   });
 

@@ -1261,6 +1261,20 @@ describe("Bun IMAP compatibility", () => {
     expect(state.storeOptions).toEqual([{ uid: true }, { uid: true }]);
   });
 
+  test("applies and undoes the flag without touching read state", async () => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const flags = () => state.mailboxes.get("INBOX")?.messages.get(3)?.flags;
+    const applied = await provider.apply(messageRef(), { type: "flag" });
+
+    expect(applied.previousFlagged).toBe(false);
+    expect(flags()?.has("\\Flagged")).toBe(true);
+    expect(flags()?.has("\\Seen")).toBe(false);
+
+    await provider.undo(applied);
+    expect(flags()?.has("\\Flagged")).toBe(false);
+  });
+
   test("moves to the discovered Trash mailbox and safely moves back on undo", async () => {
     const state = fakeState();
     const provider = new ImapMailProvider(config, fakeFactory(state));

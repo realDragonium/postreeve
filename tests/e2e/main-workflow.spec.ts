@@ -1013,7 +1013,7 @@ test("downloads received attachments with loading and provider error feedback", 
   await expect(page.getByRole("alert")).toContainText("Mailbox provider is temporarily unavailable");
 });
 
-test("keyboard shortcuts open, move through and archive mail", async ({ page }) => {
+test("keyboard shortcuts open, move through, archive and flag mail", async ({ page }) => {
   const second: CanonicalMessageDetail = {
     ...message,
     canonicalId: "canonical-second",
@@ -1066,6 +1066,14 @@ test("keyboard shortcuts open, move through and archive mail", async ({ page }) 
 
   await page.keyboard.press("e");
   await expect.poll(() => applied).toContain(JSON.stringify([[41, { type: "move", destination: "Archive" }]]));
+
+  await page.keyboard.press("s");
+  await expect.poll(() => applied).toContain(JSON.stringify([[41, { type: message.flagged ? "unflag" : "flag" }]]));
+  await expect(page.getByText(message.flagged ? "Unflagged 1" : "Flagged 1", { exact: true })).toBeVisible();
+  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: message.flagged ? "Unflag" : "Flag", exact: true }).click();
+  await expect.poll(() => applied.length).toBe(3);
+  await page.keyboard.press("Escape");
 
   const listWithSidebar = await page.locator(".list").boundingBox();
   await page.keyboard.press("[");

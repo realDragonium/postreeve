@@ -70,7 +70,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Move to another folder | Complete | Complete | `apply_message_actions` with `move`. |
 | Move to Trash | Complete | Complete | `apply_message_actions` with `trash`. |
 | Permanently delete mail | Not available | Not available | Not implemented. Trash currently means moving to the provider's Trash folder. |
-| Flag or unflag mail | Partial | Not available | The UI control is disabled pending provider support. |
+| Flag or unflag mail | Complete | Complete | `apply_message_actions` with `flag` or `unflag` (IMAP `\Flagged`, Gmail `STARRED`). |
 
 Every WebMCP mutation revalidates the stable message reference, records an audited batch, isolates work to one account, and returns individual success or failure results.
 

@@ -382,6 +382,7 @@ class TestMailProvider implements MailProvider {
     if (!message) throw new Error(`Message UID ${reference.uid} changed or no longer exists`);
     const previous = structuredClone(message.ref);
     const previousRead = message.read;
+    const previousFlagged = message.flagged;
     switch (action.type) {
       case "leave":
         break;
@@ -390,6 +391,12 @@ class TestMailProvider implements MailProvider {
         break;
       case "mark_unread":
         message.read = false;
+        break;
+      case "flag":
+        message.flagged = true;
+        break;
+      case "unflag":
+        message.flagged = false;
         break;
       case "move":
         message.mailbox = action.destination;
@@ -403,7 +410,7 @@ class TestMailProvider implements MailProvider {
         break;
     }
     message.ref.modseq = String(Number(message.ref.modseq ?? "0") + 1);
-    return { current: structuredClone(message.ref), previous, action, previousRead };
+    return { current: structuredClone(message.ref), previous, action, previousRead, previousFlagged };
   }
 
   async undo(applied: AppliedMailAction): Promise<ProviderLocationMove | null> {
@@ -412,6 +419,7 @@ class TestMailProvider implements MailProvider {
     const previous = structuredClone(message.ref);
     message.mailbox = applied.previous.mailbox;
     message.read = applied.previousRead;
+    if (applied.previousFlagged !== undefined) message.flagged = applied.previousFlagged;
     message.ref = { ...applied.previous, modseq: String(Number(message.ref.modseq ?? "0") + 1) };
     return applied.action.type === "move" || applied.action.type === "trash"
       ? { previous, current: structuredClone(message.ref) }
