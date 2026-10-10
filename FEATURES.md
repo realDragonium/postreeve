@@ -60,6 +60,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Render sanitized HTML mail | Complete | Equivalent | WebMCP receives message content rather than rendering it. |
 | Block remote images in displayed HTML | Complete | Equivalent | This is a UI privacy control; WebMCP does not load message images. |
 | Show plain-text mail | Complete | Complete | Returned by `read_messages`. |
+| Unsubscribe from a mailing list | Complete | Not available | The reader offers Unsubscribe from `List-Unsubscribe`: RFC 8058 one-click POST, an email from the delivered identity, or opening the link, always after a human confirmation. Agents can see the options in `read_messages` but cannot unsubscribe, because that confirmation cannot pass through WebMCP. |
 
 ## Message selection and actions
 
@@ -70,6 +71,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Mark as read | Complete | Complete | `apply_message_actions` with `mark_read`. |
 | Mark as unread | Complete | Complete | `apply_message_actions` with `mark_unread`. |
 | Archive | Complete | Complete | Move to the account's archive folder. |
+| Report spam or mark not spam | Complete | Complete | `apply_message_actions` with `move` to the account's junk folder, or from it to the inbox. The UI offers Spam / Not spam buttons and the `!` shortcut. No `$Junk` keywords are set. |
 | Move to another folder | Complete | Complete | `apply_message_actions` with `move`. |
 | Move to Trash | Complete | Complete | `apply_message_actions` with `trash`. |
 | Permanently delete mail | Not available | Not available | Not implemented. Trash currently means moving to the provider's Trash folder. |

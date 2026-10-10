@@ -35,6 +35,7 @@ import { safeAttachmentFilename, safeAttachmentMediaType } from "../core/attachm
 import { buildProviderDraftMessage, parseProviderDraftMarkers } from "./provider-draft";
 import { normalizeIdentificationFields, normalizeReferenceSequences } from "./message-id";
 import { MailSendPreDispatchError, type ConversationSendContext, type MailSender, type OutgoingMessage, type SentMessage } from "./sender";
+import { unsubscribeOptions } from "./unsubscribe";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -435,7 +436,7 @@ export class GmailMailClient implements MailProvider, MailSender {
         const remove = reference.mailbox === GMAIL_ARCHIVE
           ? []
           : [reference.mailbox];
-        if (action.destination === GMAIL_ARCHIVE && !remove.includes("INBOX")) remove.push("INBOX");
+        if ((action.destination === GMAIL_ARCHIVE || action.destination === "SPAM") && !remove.includes("INBOX")) remove.push("INBOX");
         after = await this.#modify(id, add, remove.filter((label) => !add.includes(label)));
         mailbox = action.destination;
         break;
@@ -824,9 +825,11 @@ function toDetail(
   parsedHeaders: ParsedMail,
 ): ProviderMessageDetail {
   const summary = toSummary(accountId, mailbox, message);
+  const unsubscribe = unsubscribeOptions(parsedHeaders.headerLines);
   return {
     ...summary,
     ...rendered,
+    ...(unsubscribe ? { unsubscribe } : {}),
     subject: parsedHeaders.subject ?? summary.subject,
     from: flattenAddresses(parsedHeaders.from).map(toAddress),
     replyTo: flattenAddresses(parsedHeaders.replyTo).map(toAddress),

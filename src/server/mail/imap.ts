@@ -48,6 +48,7 @@ import type {
 import { safeAttachmentFilename, safeAttachmentMediaType } from "../core/attachment-reference";
 import { buildProviderDraftMessage, parseProviderDraftMarkers } from "./provider-draft";
 import { normalizeIdentificationFields, normalizeReferenceSequences } from "./message-id";
+import { unsubscribeOptions } from "./unsubscribe";
 
 export interface ImapAccountConfig {
   accountId: string;
@@ -1102,9 +1103,11 @@ function toDetail(
   parsed: ParsedMail,
   rendered: { text: string; html: string | null; attachments: ProviderAttachment[] },
 ): ProviderMessageDetail {
+  const unsubscribe = unsubscribeOptions(parsed.headerLines);
   return {
     ...toSummary(accountId, mailboxPath, mailbox, message, parsed),
     ...rendered,
+    ...(unsubscribe ? { unsubscribe } : {}),
   };
 }
 

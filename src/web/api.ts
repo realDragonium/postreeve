@@ -18,6 +18,7 @@ import {
   proposalSchema,
   recipientSuggestionSchema,
   sendReceiptSchema,
+  unsubscribeResultSchema,
   type Account,
   type AccountDiscovery,
   type AccountSettings,
@@ -26,6 +27,8 @@ import {
   type CreateProposalInput,
   type DeleteFolderInput,
   type DirectActionInput,
+  type UnsubscribeInput,
+  type UnsubscribeResult,
   type Folder,
   type CreateIdentityInput,
   type Identity,
@@ -296,6 +299,8 @@ export const api = {
       ...jsonBody(input),
       ...withSignal(signal),
     }),
+  unsubscribe: (input: UnsubscribeInput): Promise<UnsubscribeResult> =>
+    request("/messages/unsubscribe", unsubscribeResultSchema, { method: "POST", ...jsonBody(input) }),
   applyDirectActions: (input: DirectActionInput, signal?: AbortSignal): Promise<OperationBatch> =>
     request("/messages/actions", operationBatchSchema, {
       method: "POST",

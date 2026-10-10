@@ -23,6 +23,7 @@ import {
   recipientSuggestionQuerySchema,
   renameFolderInputSchema,
   sendMessageInputSchema,
+  unsubscribeInputSchema,
   updateDraftInputSchema,
   updateProposalInputSchema,
   updateAccountInputSchema,
@@ -321,6 +322,8 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         context.req.valid("query").accountId)))
     .post("/messages/send", zValidator("json", sendMessageInputSchema), async (context) =>
       context.json(await service.sendMessage(context.req.valid("json")), 201))
+    .post("/messages/unsubscribe", zValidator("json", unsubscribeInputSchema), async (context) =>
+      context.json(await service.unsubscribe(context.req.valid("json"))))
     .post("/messages/actions", zValidator("json", directActionInputSchema), async (context) =>
       context.json(await service.applyDirectActions(context.req.valid("json"))))
     .get("/proposals", zValidator("query", accountQuerySchema), async (context) =>

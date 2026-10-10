@@ -1,4 +1,4 @@
-import type { Folder, MessageSummary } from "../shared/contracts";
+import type { Folder, MessageSummary, TriageAction } from "../shared/contracts";
 import type { MessageFilter, MessageSort } from "./mail-ui-state";
 
 export type SpecialUse = NonNullable<Folder["specialUse"]>;
@@ -17,6 +17,22 @@ const specialUseNames: Record<SpecialUse, string> = {
 
 export function specialUseName(specialUse: SpecialUse): string {
   return specialUseNames[specialUse];
+}
+
+export interface SpamToggle {
+  readonly label: "Spam" | "Not spam";
+  /** Null when the account has no folder to move the message to. */
+  readonly action: Extract<TriageAction, { type: "move" }> | null;
+}
+
+/** Spam moves a message to the account's junk folder; Not spam moves it from there to the inbox. */
+export function spamToggle(message: Pick<MessageSummary, "ref">, folders: readonly Folder[]): SpamToggle {
+  const junk = folders.find((folder) => folder.specialUse === "junk");
+  if (junk && junk.path === message.ref.mailbox) {
+    const inbox = folders.find((folder) => folder.specialUse === "inbox");
+    return { label: "Not spam", action: inbox ? { type: "move", destination: inbox.path } : null };
+  }
+  return { label: "Spam", action: junk ? { type: "move", destination: junk.path } : null };
 }
 
 /**

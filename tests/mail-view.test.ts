@@ -10,6 +10,7 @@ import {
   scopeSources,
   senderName,
   sortMessages,
+  spamToggle,
   unifiedFolders,
 } from "../src/web/mail-view";
 
@@ -238,5 +239,24 @@ describe("countLine", () => {
   test("stays to plain counts when nothing is narrowing it", () => {
     expect(countLine([message({ uid: 1 }), message({ uid: 2 })], { query: "", filter: "all", awaiting: 0 }))
       .toBe("2 messages · 0 unread");
+  });
+});
+
+describe("spamToggle", () => {
+  const folder = (path: string, specialUse: Folder["specialUse"]): Folder => ({ path, name: path, specialUse, total: 0, unread: 0 });
+  const folders = [folder("INBOX", "inbox"), folder("Junk", "junk")];
+
+  test("moves an inbox message to the junk folder", () => {
+    expect(spamToggle(message({ uid: 1 }), folders)).toEqual({ label: "Spam", action: { type: "move", destination: "Junk" } });
+  });
+
+  test("moves a junk message back to the inbox", () => {
+    const junk = message({ uid: 2 });
+    expect(spamToggle({ ref: { ...junk.ref, mailbox: "Junk" } }, folders))
+      .toEqual({ label: "Not spam", action: { type: "move", destination: "INBOX" } });
+  });
+
+  test("has no action without a junk folder", () => {
+    expect(spamToggle(message({ uid: 3 }), [folder("INBOX", "inbox")])).toEqual({ label: "Spam", action: null });
   });
 });

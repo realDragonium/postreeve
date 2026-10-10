@@ -1180,6 +1180,65 @@ test("keyboard shortcuts open, move through, archive and flag mail", async ({ pa
   await expect(page.getByLabel("Search messages")).toBeFocused();
 });
 
+test("reports spam and unsubscribes only after confirmation", async ({ page }) => {
+  const listMessage: CanonicalMessageDetail = {
+    ...message,
+    unsubscribe: { https: "https://list.example.test/u/1", mailto: null, oneClick: true },
+  };
+  const applied: string[] = [];
+  const unsubscribes: unknown[] = [];
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
+    if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) {
+      return json(route, [...folders, { path: "Junk", name: "Junk", specialUse: "junk", unread: 0, total: 0 }]);
+    }
+    if (request.method() === "POST" && url.pathname === "/api/messages/query") return json(route, mailboxResult([listMessage]));
+    if (request.method() === "POST" && url.pathname === "/api/messages/read") return json(route, [listMessage]);
+    if (request.method() === "POST" && url.pathname === "/api/messages/unsubscribe") {
+      unsubscribes.push(request.postDataJSON());
+      return json(route, { method: "one_click", target: "https://list.example.test/u/1" });
+    }
+    if (request.method() === "POST" && url.pathname === "/api/messages/actions") {
+      const input = directActionInputSchema.parse(request.postDataJSON());
+      applied.push(JSON.stringify(input.items.map((item) => item.action)));
+      return json(route, {
+        id: "spam-batch", proposalId: "spam", accountId: account.id, status: "applied",
+        operations: input.items.map((item, index) => ({ itemId: `spam-${index}`, message: item.message, action: item.action, status: "applied", error: null })),
+        createdAt: "2026-08-29T09:02:00.000Z", updatedAt: "2026-08-29T09:02:00.000Z",
+      });
+    }
+    if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
+    return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
+  });
+
+  await page.goto("/");
+  await expect(page.getByText(message.subject, { exact: true })).toBeVisible();
+  await page.keyboard.press("Control+!");
+  await page.keyboard.press("!");
+  await expect.poll(() => applied).toEqual([JSON.stringify([{ type: "move", destination: "Junk" }])]);
+  await expect(page.getByText("Moved 1 to Junk", { exact: true })).toBeVisible();
+
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Spam", exact: true })).toBeEnabled();
+  const unsubscribe = page.getByRole("button", { name: "Unsubscribe", exact: true });
+  page.once("dialog", (dialog) => void dialog.dismiss());
+  await unsubscribe.click();
+  expect(unsubscribes).toEqual([]);
+
+  page.once("dialog", (dialog) => {
+    expect(dialog.message()).toContain("list.example.test");
+    void dialog.accept();
+  });
+  await unsubscribe.click();
+  await expect(page.getByText("Unsubscribe request sent.", { exact: true })).toBeVisible();
+  expect(unsubscribes).toEqual([{ message: listMessage.ref, method: "one_click" }]);
+});
+
 test("refreshes an open canonical message when its provider representative changes", async ({ page }) => {
   const secondAccount: Account = { id: "account-second", name: "Second", email: "second@example.com", kind: "imap" };
   const oldMessage: CanonicalMessageDetail = {

@@ -3,29 +3,14 @@ import {
   type Account,
   type CreateIdentityInput,
   type Identity,
-  type MessageSummary,
 } from "../shared/contracts";
 import { ApiRequestError } from "./api";
 import type { DraftMigrationStorage } from "./draft-state";
 
+export { defaultFromAddress, ownAddresses } from "../shared/identities";
+
 export const localIdentitiesKey = "postreeve.local-identities.v1";
 export const localIdentityMigrationKey = "postreeve.local-identities.migrated.v1";
-
-export function ownAddresses(account: Account, identities: readonly Identity[]): ReadonlySet<string> {
-  return new Set([account.email, ...identities.map(({ address }) => address)].map((address) => address.toLowerCase()));
-}
-
-/** The first own address the source was delivered to, so a reply leaves from the alias that received it. */
-export function defaultFromAddress(
-  source: Pick<MessageSummary, "deliveredTo" | "to" | "cc">,
-  account: Account,
-  identities: readonly Identity[],
-): string {
-  const own = ownAddresses(account, identities);
-  const candidates = [...source.deliveredTo ?? [], ...source.to.map(({ address }) => address), ...(source.cc ?? []).map(({ address }) => address)];
-  const match = candidates.find((address) => own.has(address.toLowerCase()))?.toLowerCase();
-  return identities.find(({ address }) => address === match)?.address ?? account.email;
-}
 
 export interface IdentityMigrationResult {
   readonly migrated: number;

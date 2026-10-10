@@ -107,6 +107,10 @@ describe("Bun IMAP compatibility", () => {
     if (!htmlPart) throw new Error("Expected HTML body part");
     htmlPart.size = Buffer.byteLength(html);
     message.bodyParts.set("1.2", Buffer.from(html));
+    message.source = Buffer.concat([
+      Buffer.from("List-Unsubscribe: <https://list.example.test/u>\r\nList-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n"),
+      message.source ?? Buffer.alloc(0),
+    ]);
     const pdf = Buffer.from("pdf bytes").toString("base64");
     const quotedPrintable = "keep=0D=0Abytes=3D";
     message.bodyStructure.childNodes.push(
@@ -156,6 +160,7 @@ describe("Bun IMAP compatibility", () => {
     const [detail] = await provider.readMessages(config.accountId, [reference]);
     expect(detail?.text).toBe("Newest plain text body");
     expect(detail?.text).not.toContain("hidden attached text");
+    expect(detail?.unsubscribe).toEqual({ https: "https://list.example.test/u", mailto: null, oneClick: true });
     expect(detail?.attachments.map(({ filename, sizeIsEstimate }) => ({ filename, sizeIsEstimate }))).toEqual([
       { filename: "logo.png", sizeIsEstimate: true },
       { filename: "report.pdf", sizeIsEstimate: true },

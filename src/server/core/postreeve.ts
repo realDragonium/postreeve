@@ -38,6 +38,8 @@ import type {
   Proposal,
   TriageAction,
   ProviderDraftRef,
+  UnsubscribeInput,
+  UnsubscribeResult,
   RenameFolderInput,
   SendMessageInput,
   SendReceipt,
@@ -58,6 +60,7 @@ import {
   renameFolderInputSchema,
   sendMessageInputSchema,
   sendReceiptSchema,
+  unsubscribeInputSchema,
   updateDraftInputSchema,
   updateProposalInputSchema,
 } from "../../shared/contracts";
@@ -90,6 +93,8 @@ import {
   safeAttachmentMediaType,
 } from "./attachment-reference";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
+import { mailtoUnsubscribe, postOneClickUnsubscribe, type UnsubscribeFetch } from "../mail/unsubscribe";
+import { defaultFromAddress } from "../../shared/identities";
 import {
   CredentialVault,
   type AccountCredentials,
@@ -111,6 +116,8 @@ export interface PostreeveContext {
   maxUploadBytes?: number;
   maxMessageBytes?: number;
   synchronization?: SynchronizationOptions;
+  /** Performs RFC 8058 one-click POSTs; defaults to the global fetch. */
+  unsubscribeFetch?: UnsubscribeFetch;
 }
 
 export const DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -1341,6 +1348,31 @@ export class PostreeveService {
     } catch (error) {
       return withReceiptWarning(receipt, `Message was sent, but a copy could not be saved to Sent: ${errorMessage(error)}`);
     }
+  }
+
+  /** Acts only on the re-read message's own `List-Unsubscribe` options; the UI confirms with the person first. */
+  async unsubscribe(rawInput: UnsubscribeInput): Promise<UnsubscribeResult> {
+    const input = unsubscribeInputSchema.parse(rawInput);
+    const [detail] = await this.readMessages([input.message]);
+    const options = detail?.unsubscribe;
+    if (input.method === "one_click") {
+      if (!options?.oneClick || !options.https) throw new Error("This message does not offer one-click unsubscribe");
+      await postOneClickUnsubscribe(this.#context.unsubscribeFetch ?? fetch, options.https);
+      return { method: "one_click", target: options.https };
+    }
+    if (!detail || !options?.mailto) throw new Error("This message does not offer email unsubscribe");
+    const mail = mailtoUnsubscribe(options.mailto);
+    const accountId = input.message.accountId;
+    const account = await this.#requireAccount(accountId);
+    const identities = await this.#store.listIdentities(this.#context.tenantId, accountId);
+    const from = await this.#draftSender(accountId, { name: "", address: defaultFromAddress(detail, account, identities) });
+    const receipt = await this.#dispatchMessageSend(await this.#prepareMessageSend(sendMessageInputSchema.parse({
+      accountId,
+      to: [{ name: "", address: mail.address }],
+      subject: mail.subject,
+      text: mail.body,
+    }), from));
+    return { method: "mailto", target: mail.address, receipt };
   }
 
   async applyDirectActions(rawInput: DirectActionInput): Promise<OperationBatch> {
