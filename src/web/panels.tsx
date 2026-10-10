@@ -13,6 +13,7 @@ import type {
   UpdateAccountInput,
 } from "../shared/contracts";
 import { api } from "./api";
+import { discoveryStatus, providerGuidance } from "./account-discovery";
 import {
   addressList,
   formatDate,
@@ -770,6 +771,26 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
   const testMutation = useMutation({
     mutationFn: () => accountId ? api.testAccount(accountId, updateInput()) : api.testNewAccount(createInput()),
   });
+  const currentEmail = useRef(email);
+  currentEmail.current = email;
+  const discoverMutation = useMutation({
+    mutationFn: (address: string) => api.discoverAccount(address),
+    onSuccess: ({ settings }, address) => {
+      if (!settings || address !== currentEmail.current.trim()) return;
+      setHost(settings.host);
+      setPort(String(settings.port));
+      setSecure(settings.secure);
+      setUsername(settings.username);
+      setSmtpHost(settings.smtpHost);
+      setSmtpPort(String(settings.smtpPort));
+      setSmtpSecure(settings.smtpSecure);
+      setSmtpUsername(settings.smtpUsername);
+      setSmtpHostEdited(true);
+      setSmtpUsernameEdited(true);
+    },
+  });
+  const discovered = discoverMutation.data;
+  const guidance = discovered ? providerGuidance(discovered.provider, googleStatusQuery.data?.configured ?? false) : null;
   const removeMutation = useMutation({
     mutationFn: () => api.removeAccount(accountId ?? ""),
     onSuccess: () => {
@@ -831,9 +852,17 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
 
     {!isGmail && (!accountId || settingsQuery.isSuccess) ? <>
       <div className="field-grid">
+        <label className="field"><span className="field-label">Email address</span><input className="input" required type="email" value={email} placeholder="you@example.com" onChange={(event) => { setEmail(event.target.value); discoverMutation.reset(); }} /></label>
         <label className="field"><span className="field-label">Name</span><input className="input" required value={name} placeholder="Work" onChange={(event) => setName(event.target.value)} /></label>
-        <label className="field"><span className="field-label">Email address</span><input className="input" required type="email" value={email} placeholder="you@example.com" onChange={(event) => setEmail(event.target.value)} /></label>
       </div>
+      {accountId ? null : <div>
+        <button type="button" className="chip" disabled={!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim()) || discoverMutation.isPending} onClick={() => discoverMutation.mutate(email.trim())}>
+          {discoverMutation.isPending ? "Finding settings…" : "Find settings"}
+        </button>
+        {discovered ? <p className="t-dim" role="status" style={{ margin: "10px 0 0" }}>{discoveryStatus(discovered, email.trim())}</p> : null}
+        {guidance ? <div className="alert" style={{ marginTop: 10 }}>{guidance}</div> : null}
+        {discoverMutation.isError ? <div className="alert error" style={{ marginTop: 10 }}>{discoverMutation.error.message}</div> : null}
+      </div>}
       <fieldset>
         <legend>Incoming mail (IMAP)</legend>
         <div className="field-grid">

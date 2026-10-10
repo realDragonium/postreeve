@@ -23,6 +23,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Use multiple Gmail and IMAP/SMTP accounts | Complete | Complete | All mailbox tools are scoped by `accountId`. |
 | Connect Gmail through Google OAuth | Complete | Not covered | No matching WebMCP tool exists. The current UI uses an interactive Google login and consent flow. |
 | Add an IMAP/SMTP account | Complete | Not covered | No matching WebMCP tool exists. |
+| Propose IMAP/SMTP settings from an email address | Complete | Not covered | **Find settings** uses the built-in provider list, Thunderbird autoconfig, the ISPDB and MX matching, with fixed app-password guidance. No matching WebMCP tool exists. |
 | Test IMAP and SMTP settings | Complete | Not covered | No matching WebMCP tool exists. |
 | Update or reconnect an IMAP/SMTP account | Complete | Not covered | No matching WebMCP tool exists. |
 | Reauthorize Gmail | Complete | Partial | `request_reauthorization` provides human guidance; Google login and consent remain interactive UI steps. |
