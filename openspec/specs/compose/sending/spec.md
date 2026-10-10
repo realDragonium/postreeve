@@ -32,11 +32,7 @@ The system SHALL send every message with the account's display name and primary 
 - **THEN** the response is 400 `Draft identity does not belong to the selected account` and nothing is dispatched
 
 ### Requirement: Provider routing and message construction
-The system SHALL send through the Gmail API `messages/send` for Gmail accounts and through the account's stored SMTP settings for IMAP accounts. Each message SHALL get a new `Message-ID` of the form `<uuid@domain>`, where `domain` is the domain of the From address, lower-cased and converted to its ASCII (IDNA) form, and a UTF-8 plain-text body. SMTP SHALL deliver Bcc recipients through the envelope only and MUST NOT write a Bcc header. An IMAP account without stored SMTP settings SHALL fail every send before dispatch.
-
-#### Scenario: Message-ID uses the sender's domain
-- **WHEN** an account whose email is `person@Example.TEST` sends a message
-- **THEN** the transmitted `Message-ID` ends in `@example.test>` and the receipt's `messageId` is the same value
+The system SHALL send through the Gmail API `messages/send` for Gmail accounts and through the account's stored SMTP settings for IMAP accounts. Each message SHALL get a new `Message-ID` (see Outgoing Message-IDs use the sender's domain) and a UTF-8 plain-text body. SMTP SHALL deliver Bcc recipients through the envelope only and MUST NOT write a Bcc header. An IMAP account without stored SMTP settings SHALL fail every send before dispatch.
 
 #### Scenario: Bcc over SMTP
 - **WHEN** an IMAP account sends with one `to` and one `bcc` recipient
@@ -45,6 +41,13 @@ The system SHALL send through the Gmail API `messages/send` for Gmail accounts a
 #### Scenario: Account without SMTP settings
 - **WHEN** an IMAP account stored without SMTP settings sends a message
 - **THEN** the send fails before dispatch with a message asking the user to add the account again with outgoing-mail settings
+
+### Requirement: Outgoing Message-IDs use the sender's domain
+Every sent message SHALL have a `Message-ID` of the form `<uuid@domain>`, where `domain` is the domain of the From address, lower-cased and converted to its ASCII (IDNA) form.
+
+#### Scenario: Message-ID uses the sender's domain
+- **WHEN** an account whose email is `person@Example.TEST` sends a message
+- **THEN** the transmitted `Message-ID` ends in `@example.test>` and the receipt's `messageId` is the same value
 
 ### Requirement: Send receipts report accepted and rejected recipients
 A successful send SHALL return `{ id, accountId, messageId, providerConversationId?, accepted, rejected, submittedAt, warning? }`. SMTP SHALL report the addresses the server accepted and refused; Gmail SHALL report every recipient as accepted, with `id` the Gmail message ID and `providerConversationId` the thread Gmail reports. A receipt naming another account SHALL be treated as a failure. The web interface SHALL show the accepted count, the rejected addresses and any warning.

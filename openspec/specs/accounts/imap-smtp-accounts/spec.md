@@ -17,7 +17,7 @@ The system SHALL return every configured account, IMAP and Gmail, at `GET /api/a
 - **THEN** both are listed with their `kind`, and neither entry includes a password, refresh token or server setting
 
 ### Requirement: Adding an account verifies both connections before saving
-The system SHALL add an IMAP/SMTP account at `POST /api/accounts` only after authenticating to IMAP and then verifying SMTP without sending mail. The body SHALL require `kind: "imap"`, `name`, `email`, the IMAP `host`, `port`, `secure`, `username` and `password`, and the same five fields prefixed with `smtp`, and MAY include the boolean `saveSentCopy`; invalid input SHALL be answered with 400. On success the system SHALL store the encrypted credentials and settings under a new ID and answer 201 with the public account.
+The system SHALL add an IMAP/SMTP account at `POST /api/accounts` only after authenticating to IMAP and then verifying SMTP without sending mail. The body SHALL require `kind: "imap"`, `name`, `email`, the IMAP `host`, `port`, `secure`, `username` and `password`, and the same five fields prefixed with `smtp`; invalid input SHALL be answered with 400. On success the system SHALL store the encrypted credentials under a new ID and answer 201 with the public account.
 
 #### Scenario: Both servers accept the credentials
 - **WHEN** a user submits valid IMAP and SMTP settings
@@ -128,7 +128,7 @@ Each IMAP account SHALL have a **Save a copy to Sent** setting, `saveSentCopy`, 
 - **THEN** its settings report `saveSentCopy: true` and later sends append a copy to Sent
 
 ### Requirement: Save a copy to Sent defaults from the IMAP host
-An account added without `saveSentCopy`, or stored before the setting existed, SHALL use a default from its IMAP host: off when the host, compared case-insensitively, is `gmail.com`, `googlemail.com`, `outlook.com` or `office365.com` or a subdomain of one, because those providers file SMTP submissions themselves; on otherwise. While adding an account, the checkbox SHALL follow that default until the user changes it.
+`POST /api/accounts` MAY include `saveSentCopy`. An account added without it, or stored before the setting existed, SHALL use a default from its IMAP host: off when the host, compared case-insensitively, is `gmail.com`, `googlemail.com`, `outlook.com` or `office365.com` or a subdomain of one, because those providers file SMTP submissions themselves; on otherwise. While adding an account, the checkbox SHALL follow that default until the user changes it.
 
 #### Scenario: iCloud account
 - **WHEN** a user adds an account with IMAP host `imap.mail.me.com` without choosing the setting

@@ -1,11 +1,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Provider routing and message construction
-The system SHALL send through the Gmail API `messages/send` for Gmail accounts and through the account's stored SMTP settings for IMAP accounts. Each message SHALL get a new `Message-ID` of the form `<uuid@domain>`, where `domain` is the domain of the From address, lower-cased and converted to its ASCII (IDNA) form, and a UTF-8 plain-text body. SMTP SHALL deliver Bcc recipients through the envelope only and MUST NOT write a Bcc header. An IMAP account without stored SMTP settings SHALL fail every send before dispatch.
-
-#### Scenario: Message-ID uses the sender's domain
-- **WHEN** an account whose email is `person@Example.TEST` sends a message
-- **THEN** the transmitted `Message-ID` ends in `@example.test>` and the receipt's `messageId` is the same value
+The system SHALL send through the Gmail API `messages/send` for Gmail accounts and through the account's stored SMTP settings for IMAP accounts. Each message SHALL get a new `Message-ID` (see Outgoing Message-IDs use the sender's domain) and a UTF-8 plain-text body. SMTP SHALL deliver Bcc recipients through the envelope only and MUST NOT write a Bcc header. An IMAP account without stored SMTP settings SHALL fail every send before dispatch.
 
 #### Scenario: Bcc over SMTP
 - **WHEN** an IMAP account sends with one `to` and one `bcc` recipient
@@ -16,6 +12,13 @@ The system SHALL send through the Gmail API `messages/send` for Gmail accounts a
 - **THEN** the send fails before dispatch with a message asking the user to add the account again with outgoing-mail settings
 
 ## ADDED Requirements
+
+### Requirement: Outgoing Message-IDs use the sender's domain
+Every sent message SHALL have a `Message-ID` of the form `<uuid@domain>`, where `domain` is the domain of the From address, lower-cased and converted to its ASCII (IDNA) form.
+
+#### Scenario: Message-ID uses the sender's domain
+- **WHEN** an account whose email is `person@Example.TEST` sends a message
+- **THEN** the transmitted `Message-ID` ends in `@example.test>` and the receipt's `messageId` is the same value
 
 ### Requirement: Sent copies for IMAP accounts
 When an IMAP account whose **Save a copy to Sent** setting is on (accounts/imap-smtp-accounts) sends a message, through `POST /api/messages/send` or a draft, that at least one recipient accepted, the system SHALL append the exact MIME it transmitted over SMTP, flagged `\Seen` and dated with the receipt's `submittedAt`, to the account's selectable special-use Sent mailbox. Otherwise, and for Gmail accounts, nothing SHALL be appended.
