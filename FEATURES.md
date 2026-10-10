@@ -95,6 +95,8 @@ Every WebMCP mutation revalidates the stable message reference, records an audit
 | Forward | Partial | Not available | The editor builds forwarded content, but sending is blocked. |
 | Send from an alternate identity or catch-all alias | Complete | Not available | Drafts send from a stored identity over SMTP and Gmail. Gmail requires the address under Send mail as. Replies default to the identity the message was delivered to. `send_message` sends from the primary address only. |
 | Add attachments | Partial | Not available | The UI records local attachment metadata, but files are not uploaded or sent. |
+| Compose rich text (bold, italic, links, lists, quotes) | Complete | Not available | Sent as `multipart/alternative`: HTML sanitized by the server against an allowlist plus a generated plain-text part. A plain-text mode remains. `send_message` stays plain text so agent-approved messages are exactly the text the person reviewed. |
+| Quote the original HTML in replies and forwards | Complete | Not available | Quoted with the reader's sanitizer; style sheets and remote images are dropped, so composing never fetches remote content. |
 
 Sending is a real external side effect. WebMCP exposes the same basic send operation as the UI, but it does not send drafts, replies, forwards, attachments, or alternate identities that the UI itself cannot send.
 
@@ -109,6 +111,7 @@ Sending is a real external side effect. WebMCP exposes the same basic send opera
 | Synchronize provider drafts | Not available | Not available | No IMAP or Gmail draft implementation exists. |
 | Add or remove an identity | Complete | Not available | Stored per account on the server; browser-local identities migrate once. |
 | Select an alternate From identity | Complete | Not available | Sending is disabled for an address that is not an identity of the account. |
+| Per-identity signatures | Complete | Not available | One signature per sending address, edited in the identity sheet and stored on the server. Compose inserts it and swaps it when From changes, unless the signature was edited. |
 
 These features are not provider-backed today. Whether and how they should be exposed through WebMCP remains an open product decision.
 

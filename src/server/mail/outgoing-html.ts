@@ -75,5 +75,5 @@ export function htmlToPlainText(html: string): string {
       { selector: "h3", options: { uppercase: false } },
       { selector: "table", format: "dataTable" },
     ],
-  }).trim();
+  }).replace(/\n{3,}/g, "\n\n").trim();
 }
