@@ -12,8 +12,14 @@ describe("unsubscribePlan", () => {
     });
   });
 
-  test("uses email before a plain link", () => {
-    expect(unsubscribePlan({ https, mailto, oneClick: false })?.confirmation).toContain("to leave@example.test from");
+  test("uses email before a plain link and shows exactly what will be sent", () => {
+    expect(unsubscribePlan({ https, mailto, oneClick: false })?.confirmation).toBe(
+      "Unsubscribe by email? Postreeve will send this message to leave@example.test from the address this message was delivered to.\n\nSubject: stop\n\nunsubscribe",
+    );
+  });
+
+  test("skips an email it could not send", () => {
+    expect(unsubscribePlan({ https, mailto: `mailto:leave@example.test?body=${"x".repeat(501)}`, oneClick: false })?.kind).toBe("link");
   });
 
   test("falls back to opening the link", () => {

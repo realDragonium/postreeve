@@ -7,7 +7,7 @@ Lets a person leave a mailing list from the reader using the sender's `List-Unsu
 ## ADDED Requirements
 
 ### Requirement: Unsubscribe from the reader after confirmation
-The reader SHALL show an Unsubscribe control for an expanded message whose detail has `unsubscribe`. Choosing it SHALL open a confirmation dialog that names the method and target: one-click to the HTTPS host when `oneClick` is true, otherwise an email to the `mailto` address from the sending identity, otherwise opening the `https` link. Nothing SHALL happen until the person confirms, and cancelling SHALL do nothing.
+The reader SHALL show an Unsubscribe control for an expanded message whose detail has `unsubscribe`. Choosing it SHALL open a confirmation dialog that names the method and target: one-click to the HTTPS host when `oneClick` is true, otherwise an email to the `mailto` address with its exact subject and body, otherwise opening the `https` link. Nothing SHALL happen until the person confirms, and cancelling SHALL do nothing.
 
 #### Scenario: Cancel
 - **WHEN** a person chooses Unsubscribe and cancels the dialog
@@ -36,7 +36,11 @@ For `one_click` the server SHALL send `POST` with body `List-Unsubscribe=One-Cli
 - **THEN** the response is 400 and the redirect target is not contacted
 
 ### Requirement: Mailto unsubscribe sends from the delivered identity
-For `mailto` the system SHALL send a new plain-text message through the normal send path to the URI's single address. The subject SHALL be the URI's `subject` or `unsubscribe`, and the body SHALL be its `body` or `unsubscribe`. The message SHALL be sent from the account's identity the message was delivered to (Delivered-To, then To, then Cc), or else the primary address. A URI with no valid single address SHALL be refused with 400.
+For `mailto` the system SHALL send a new plain-text message through the normal send path to the URI's single address. The subject SHALL be the URI's `subject` or `unsubscribe`, and the body SHALL be its `body` or `unsubscribe`. The message SHALL be sent from the account's identity the message was delivered to (Delivered-To, then To, then Cc), or else the primary address. A URI with no valid single address, or with a subject or body over 500 characters, SHALL be refused with 400.
+
+#### Scenario: Oversized body
+- **WHEN** a list's `mailto` URI carries a 2,000-character `body`
+- **THEN** the unsubscribe is refused with 400 and nothing is sent
 
 #### Scenario: Alias subscription
 - **WHEN** a person confirms a mailto unsubscribe for a list message delivered to their stored identity `lists@example.test`

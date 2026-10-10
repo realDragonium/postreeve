@@ -86,6 +86,10 @@ describe("mailtoUnsubscribe", () => {
     expect(mailtoUnsubscribe("mailto:leave@example.test")).toEqual({ address: "leave@example.test", subject: "unsubscribe", body: "unsubscribe" });
   });
 
+  test("refuses a subject or body too long to confirm", () => {
+    expect(() => mailtoUnsubscribe(`mailto:leave@example.test?body=${"x".repeat(501)}`)).toThrow("too long");
+  });
+
   test("refuses several addresses", () => {
     expect(() => mailtoUnsubscribe("mailto:a@example.test,b@example.test")).toThrow("single valid address");
   });

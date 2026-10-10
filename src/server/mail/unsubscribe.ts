@@ -2,6 +2,8 @@ import { z } from "zod";
 import { isDnsName } from "../accounts/discovery";
 import type { UnsubscribeOptions } from "../../shared/contracts";
 
+export { mailtoUnsubscribe } from "../../shared/unsubscribe";
+
 export type UnsubscribeFetch = (url: string, init: RequestInit) => Promise<Response>;
 
 const ONE_CLICK_TIMEOUT_MS = 10_000;
@@ -52,30 +54,5 @@ export async function postOneClickUnsubscribe(
   await response.body?.cancel();
   if (response.status < 200 || response.status > 299) {
     throw new Error(`One-click unsubscribe was refused by ${url.hostname} (HTTP ${response.status})`);
-  }
-}
-
-/** RFC 6068 fields of a single-address `mailto:` URI, defaulting subject and body to `unsubscribe`. */
-export function mailtoUnsubscribe(uri: string): { address: string; subject: string; body: string } {
-  const [target = "", query = ""] = uri.slice("mailto:".length).split("?", 2);
-  const fields = new Map<string, string>();
-  for (const pair of query.split("&")) {
-    const [name = "", value = ""] = pair.split("=", 2);
-    if (name) fields.set(safeDecode(name).toLowerCase(), safeDecode(value));
-  }
-  const address = safeDecode(target).trim();
-  if (!z.email().safeParse(address).success) throw new Error("The unsubscribe email address is not a single valid address");
-  return {
-    address,
-    subject: fields.get("subject")?.trim() || "unsubscribe",
-    body: fields.get("body")?.trim() || "unsubscribe",
-  };
-}
-
-function safeDecode(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
   }
 }
