@@ -1,6 +1,6 @@
 import { gmailSynchronization, gmailLocationMailboxes, GmailHttpError } from "./gmail-synchronization";
 import type { MailSynchronization } from "./synchronization";
-import { composeMime, outgoingMessageId, type OutgoingContent } from "./outgoing-content";
+import { composeMime, outgoingMessageId, type OutgoingBody, type OutgoingContent } from "./outgoing-content";
 import type { ProviderDraftInput } from "./provider";
 import { simpleParser, type AddressObject, type EmailAddress, type ParsedMail } from "mailparser";
 import { z, type ZodType } from "zod";
@@ -34,7 +34,7 @@ import type {
 import { safeAttachmentFilename, safeAttachmentMediaType } from "../core/attachment-reference";
 import { buildProviderDraftMessage, parseProviderDraftMarkers } from "./provider-draft";
 import { normalizeIdentificationFields, normalizeReferenceSequences } from "./message-id";
-import { MailSendPreDispatchError, type ConversationSendContext, type MailSender, type OutgoingMessage, type SentMessage } from "./sender";
+import { MailSendPreDispatchError, outgoingBody, type ConversationSendContext, type MailSender, type OutgoingMessage, type SentMessage } from "./sender";
 import { unsubscribeOptions } from "./unsubscribe";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -490,7 +490,7 @@ export class GmailMailClient implements MailProvider, MailSender {
     const messageId = outgoingMessageId(from.address);
     let raw: Buffer;
     try {
-      raw = await buildMessage(from, input, messageId, submittedAt, reply, content);
+      raw = await buildMessage(from, input, outgoingBody(rawInput), messageId, submittedAt, reply, content);
     } catch (error) {
       throw preDispatchError(error);
     }
@@ -1075,6 +1075,7 @@ async function gmailDraftMessage(scope: ProviderDraftScope, draft: ProviderDraft
 async function buildMessage(
   from: OutboundAddress,
   input: SendMessageInput,
+  body: OutgoingBody,
   messageId: string,
   submittedAt: string,
   context?: Extract<ConversationSendContext, { type: "reply" | "reply_all" }>,
@@ -1095,7 +1096,7 @@ async function buildMessage(
     ...(context && context.references.length > 0 ? { references: [...context.references] } : {}),
     disableFileAccess: true,
     disableUrlAccess: true,
-  }, input.text, content, true);
+  }, body, content, true);
 }
 
 function toBase64Url(value: Buffer): string {

@@ -14,6 +14,7 @@ function draftFrom(account: Account, identity: { name: string; address: string }
   return {
     accountId: account.id,
     mode: "new" as const,
+    format: "plain" as const,
     to: "alice@example.test",
     cc: "",
     bcc: "",

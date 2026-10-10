@@ -453,6 +453,7 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await page.getByLabel("To", { exact: true }).fill("jordan@example.com, taylor@example.com");
   await page.getByLabel("Cc", { exact: true }).fill("team@example.com");
   await page.getByLabel("Subject", { exact: true }).fill("Planning follow-up");
+  await page.getByRole("button", { name: "Plain text" }).click();
   await page.getByLabel("Message", { exact: true }).fill("Here are the next steps from our planning session.");
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByRole("heading", { name: "Message sent" })).toBeVisible();
@@ -462,6 +463,7 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
 
   await page.getByRole("button", { name: "New message" }).click();
   await page.getByLabel("Subject", { exact: true }).fill("Locally saved idea");
+  await page.getByRole("button", { name: "Plain text" }).click();
   await page.getByLabel("Message", { exact: true }).fill("Keep this as a draft for now.");
   await page.getByRole("button", { name: "Save draft" }).click();
   await page.getByRole("button", { name: "Close New message" }).click();
@@ -521,14 +523,18 @@ test("sends and manages mail, then inspects and undoes activity", async ({ page 
   await page.getByRole("button", { name: "Reply", exact: true }).click();
   await expect(page.getByLabel("To", { exact: true })).toHaveValue("planning-replies@example.com");
   await expect(page.getByLabel("Subject", { exact: true })).toHaveValue("Re: Quarterly planning notes");
-  await expect(page.getByLabel("Message", { exact: true })).toContainText("> Here are the decisions and follow-ups.");
-  await page.getByLabel("Message", { exact: true }).fill(`Thanks, Sam.${await page.getByLabel("Message", { exact: true }).inputValue()}`);
+  const replyEditor = page.getByLabel("Message", { exact: true });
+  await expect(replyEditor.locator("blockquote")).toContainText("Here are the decisions and follow-ups.");
+  await expect(replyEditor.locator("img[src^='http'], [srcset], [style*='url(']")).toHaveCount(0);
+  await replyEditor.locator("div").first().click();
+  await page.keyboard.type("Thanks, Sam.");
   await page.getByRole("button", { name: "Save draft" }).click();
   await page.getByRole("button", { name: "Close Reply" }).click();
   await page.getByRole("button", { name: /Drafts/ }).click();
   await page.getByText("Re: Quarterly planning notes", { exact: true }).click();
   await expect(page.getByLabel("To", { exact: true })).toHaveValue("planning-replies@example.com");
-  await expect(page.getByLabel("Message", { exact: true })).toContainText("> Here are the decisions and follow-ups.");
+  await expect(page.getByLabel("Message", { exact: true })).toContainText("Thanks, Sam.");
+  await expect(page.getByLabel("Message", { exact: true }).locator("blockquote")).toContainText("Here are the decisions and follow-ups.");
   const readsBeforeReply = messageRequests;
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByRole("heading", { name: "Message sent" })).toBeVisible();
@@ -659,6 +665,7 @@ test("keeps trace-header recipients and does not restore a sent draft", async ({
   await expect(page.getByLabel("To", { exact: true })).toHaveValue("planning-replies@example.com");
   await expect(page.getByLabel("Cc", { exact: true })).toHaveValue("taylor@example.com");
 
+  await page.getByRole("button", { name: "Plain text" }).click();
   await page.getByLabel("Message", { exact: true }).fill("Preserve this reply if delivery fails.");
   await page.getByRole("button", { name: "Send message" }).click();
   await expect(page.getByText("Temporary delivery failure.")).toBeVisible();
@@ -688,6 +695,7 @@ test("refetches backend drafts on reopen and leaves unchanged structured drafts 
     cc: [{ name: "Carbon Copy", address: "cc@example.com" }],
     bcc: [],
     subject: "Shared structured draft",
+    format: "plain",
     body: "Original body",
     identity: { name: "Saved Alternate", address: "alternate@example.com" },
     attachments: [{ name: "legacy.txt", size: 42, type: "text/plain" }],
@@ -770,6 +778,7 @@ test("shows draft list failures truthfully and distinguishes pending provider mi
     cc: "",
     bcc: "",
     subject: "Pending provider mirror",
+    format: "plain",
     body: "Saved backend content",
     identity: { name: account.name, address: account.email },
     attachments: [],
@@ -886,6 +895,7 @@ test("keeps dirty compose content open until a failed backend save can be retrie
   await page.getByRole("button", { name: "New message" }).click();
   await page.getByLabel("To", { exact: true }).fill("recipient@example.test");
   await page.getByLabel("Subject", { exact: true }).fill("Recover failed saves");
+  await page.getByRole("button", { name: "Plain text" }).click();
   await page.getByLabel("Message", { exact: true }).fill("Initial authored body");
   await page.clock.fastForward(700);
   await expect.poll(() => fixture.failedWriteRequests).toBe(1);
@@ -1548,6 +1558,7 @@ test("uploads binary files, retries failures, and reopens them in another client
   await page.getByRole("button", { name: "New message", exact: true }).click();
   await page.getByLabel("To", { exact: true }).fill("recipient@example.test");
   await page.getByLabel("Subject", { exact: true }).fill("Durable binary attachment");
+  await page.getByRole("button", { name: "Plain text" }).click();
   await page.getByLabel("Message", { exact: true }).fill("Keep these bytes with my draft.");
   await page.locator('input[type="file"]').setInputFiles({ name: "résumé.bin", mimeType: "application/octet-stream", buffer: bytes });
   await expect(page.getByText(/Upload temporarily unavailable/)).toBeVisible();

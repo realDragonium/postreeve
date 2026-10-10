@@ -37,7 +37,7 @@ export async function buildProviderDraftMessage(scope: ProviderDraftScope, draft
     ],
     disableFileAccess: true,
     disableUrlAccess: true,
-  }, draft.body, draft, true);
+  }, draft.format === "html" ? { html: draft.body } : { text: draft.body }, draft, true);
 }
 
 export function parseProviderDraftMarkers(source: Buffer | string): ProviderDraftMarkers | null {

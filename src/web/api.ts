@@ -13,6 +13,7 @@ import {
   canonicalConversationSchema,
   draftSchema,
   identitySchema,
+  signatureSchema,
   outgoingMailLimitsSchema,
   operationBatchSchema,
   proposalSchema,
@@ -32,6 +33,8 @@ import {
   type Folder,
   type CreateIdentityInput,
   type Identity,
+  type PutSignatureInput,
+  type Signature,
   type CanonicalMessageDetail,
   type CanonicalMessageSummary,
   type CanonicalConversation,
@@ -205,6 +208,14 @@ export const api = {
   addIdentity: (accountId: string, input: CreateIdentityInput, signal?: AbortSignal): Promise<Identity> =>
     request(`/accounts/${encodeURIComponent(accountId)}/identities`, identitySchema, {
       method: "POST",
+      ...jsonBody(input),
+      ...withSignal(signal),
+    }),
+  signatures: (accountId: string, signal?: AbortSignal): Promise<Signature[]> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/signatures`, signatureSchema.array(), withSignal(signal)),
+  putSignature: (accountId: string, input: PutSignatureInput, signal?: AbortSignal): Promise<Signature> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/signatures`, signatureSchema, {
+      method: "PUT",
       ...jsonBody(input),
       ...withSignal(signal),
     }),

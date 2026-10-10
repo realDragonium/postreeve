@@ -53,7 +53,8 @@ test("real API keeps rejected and uncertain attachments recoverable without auto
     expect(original.delivery.status).toBe("uncertain");
     await page.getByRole("button", { name: "Create a copy to review" }).click();
     await expect(page.getByLabel("Message", { exact: true })).toBeEnabled();
-    await expect(page.getByLabel("Message", { exact: true })).toHaveValue(original.body);
+    expect(original.format).toBe("html");
+    await expect(page.getByLabel("Message", { exact: true })).toHaveText("Keep the original text and files.");
     await expect(page.getByText("content.bin", { exact: true })).toBeVisible();
     drafts = draftSchema.array().parse(await (await request.get(draftsUrl)).json());
     expect(drafts).toHaveLength(2);

@@ -190,6 +190,7 @@ function draftContentKey(content: DraftContent): string {
     recipientContentKey(content.cc),
     recipientContentKey(content.bcc),
     content.subject,
+    content.format,
     content.body,
     [content.identity.name, content.identity.address],
     content.source

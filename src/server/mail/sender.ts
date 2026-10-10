@@ -1,4 +1,4 @@
-import type { OutgoingContent } from "./outgoing-content";
+import type { OutgoingBody, OutgoingContent } from "./outgoing-content";
 import type { OutboundAddress, SendMessageInput, SendReceipt } from "../../shared/contracts";
 
 interface ConversationSourceContext {
@@ -16,8 +16,15 @@ export type ConversationSendContext = ConversationSourceContext & ({
   readonly type: "forward";
 });
 
-/** A send request with its resolved From; without `from` a sender uses the account's primary address. */
-export type OutgoingMessage = SendMessageInput & { readonly from?: OutboundAddress };
+/**
+ * A send request with its resolved From; without `from` a sender uses the account's primary address.
+ * `html`, set only for rich-text drafts, replaces `text` as the body source.
+ */
+export type OutgoingMessage = SendMessageInput & { readonly from?: OutboundAddress; readonly html?: string };
+
+export function outgoingBody(message: OutgoingMessage): OutgoingBody {
+  return message.html === undefined ? { text: message.text } : { html: message.html };
+}
 
 export class MailSendPreDispatchError extends Error {
   constructor(message: string, options?: ErrorOptions) {

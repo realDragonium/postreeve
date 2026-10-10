@@ -6,7 +6,7 @@ Covers server-side drafts: their versioned create, list, read, update and delete
 ## Requirements
 
 ### Requirement: Draft content and scope
-The system SHALL store each draft for one account as `{ id, accountId, mode, to, cc, bcc, subject, body, identity, source?, attachments, delivery, mirror, createdAt, updatedAt, version }` with `mode` `new`, `reply`, `reply_all` or `forward`. Each recipient field SHALL be raw text kept exactly as typed or a list of up to 100 `{ name, address }`. `subject` SHALL be at most 998 and `body` at most 2,000,000 characters. A draft SHALL be visible only under its own account.
+The system SHALL store each draft for one account as `{ id, accountId, mode, to, cc, bcc, subject, format, body, identity, source?, attachments, delivery, mirror, createdAt, updatedAt, version }` with `mode` `new`, `reply`, `reply_all` or `forward`. Each recipient field SHALL be raw text kept exactly as typed or a list of up to 100 `{ name, address }`. `subject` SHALL be at most 998 and `body` at most 2,000,000 characters. A draft SHALL be visible only under its own account.
 
 #### Scenario: Unfinished recipient text survives
 - **WHEN** a draft is saved with `to` set to `  alice@  `
@@ -207,3 +207,47 @@ Account removal SHALL wait for running draft operations of that account and SHAL
 #### Scenario: Removal wins before the send claim
 - **WHEN** an account is removed while a send request for its draft is still validating
 - **THEN** the send fails with `draft_not_found` and no message is dispatched
+
+### Requirement: Rich-text compose with a plain-text mode
+The compose form SHALL open new messages, replies and forwards in rich-text mode, offering bold, italic, link, bulleted list, numbered list and quote, and SHALL save them with format `html`. Pasted HTML SHALL be sanitized like a quote before it is inserted. **Plain text** SHALL convert the content to text, dropping formatting, and save with format `plain`; **Rich text** SHALL convert text back to HTML. A draft SHALL reopen in its saved format.
+
+#### Scenario: Bold text
+- **WHEN** a user selects a word, chooses Bold and sends
+- **THEN** the saved draft has format `html` with the word inside `<b>` and the sent message carries a `text/html` part
+
+#### Scenario: Plain draft from before this change
+- **WHEN** a user opens a draft stored as `plain`
+- **THEN** the form shows it in plain-text mode with the body unchanged
+
+### Requirement: Compose inserts and swaps the From signature
+A compose form opened without a saved draft SHALL insert the From address's signature, if any, after an empty first line and before any quote. Changing From SHALL replace, insert or remove the inserted signature to match the new address without changing other content, and SHALL leave a signature the user edited. In plain-text mode the signature SHALL follow a `-- ` line. A new message holding only its inserted signature SHALL NOT be saved as a draft.
+
+#### Scenario: From changed before typing a sign-off
+- **WHEN** a user types a body, then changes From from the primary address to an alias with another signature
+- **THEN** the typed body is unchanged and the primary signature is replaced by the alias's signature
+
+#### Scenario: Edited signature
+- **WHEN** a user edits the inserted signature and then changes From
+- **THEN** the edited signature stays as typed
+
+#### Scenario: Opening and closing a new message
+- **WHEN** a user opens a new message that starts with a signature and closes it without typing
+- **THEN** no draft is created
+
+### Requirement: Drafts default to plain text
+`format` SHALL be `plain` or `html`. A draft saved without `format`, including every draft stored before formats existed, SHALL have format `plain`. When a draft with format `html` is sent, its body SHALL count as empty when its sanitized HTML has no text.
+
+#### Scenario: Draft stored before formats existed
+- **WHEN** a client reads a draft saved before this change
+- **THEN** its format is `plain` and its body is unchanged
+
+#### Scenario: Rich-text draft with only markup
+- **WHEN** a draft with format `html` and body `<p><br></p>` is sent
+- **THEN** the response is 400 and nothing is dispatched
+
+### Requirement: Rich-text replies and forwards quote the source HTML
+In rich-text mode the quote or forwarded message SHALL be the source's HTML, sanitized with the reader's rules and stripped of style sheets and remote resources, or the source's text, escaped, when it has no HTML.
+
+#### Scenario: Reply to an HTML message
+- **WHEN** a user replies to a message whose HTML contains a table, a script and a remote image
+- **THEN** the quote keeps the table, contains no script, and no request is made for the remote image

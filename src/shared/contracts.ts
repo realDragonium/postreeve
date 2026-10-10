@@ -28,6 +28,15 @@ export const identitySchema = z.object({
   createdAt: z.iso.datetime(),
 });
 
+export const signatureSchema = z.object({
+  address: z.email(),
+  html: z.string().max(100_000),
+});
+export const putSignatureInputSchema = z.object({
+  address: z.email().transform((address) => address.toLowerCase()),
+  html: z.string().max(100_000),
+});
+
 export const createIdentityInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
   address: z.email().transform((address) => address.toLowerCase()),
@@ -341,6 +350,7 @@ export const unsubscribeResultSchema = z.discriminatedUnion("method", [
 ]);
 
 export const draftComposeModeSchema = z.enum(["new", "reply", "reply_all", "forward"]);
+export const draftBodyFormatSchema = z.enum(["plain", "html"]);
 export const draftRecipientFieldSchema = z.union([
   z.string(),
   z.array(outboundAddressSchema).max(100),
@@ -369,6 +379,7 @@ export const draftContentSchema = z.object({
   cc: draftRecipientFieldSchema,
   bcc: draftRecipientFieldSchema,
   subject: z.string().max(998),
+  format: draftBodyFormatSchema.default("plain"),
   body: z.string().max(2_000_000),
   identity: outboundAddressSchema,
   source: conversationSendSourceSchema.optional(),
@@ -505,6 +516,9 @@ export type AccountDiscovery = z.infer<typeof accountDiscoverySchema>;
 export type ConnectionTestResult = z.infer<typeof connectionTestResultSchema>;
 export type OutboundAddress = z.infer<typeof outboundAddressSchema>;
 export type Identity = z.infer<typeof identitySchema>;
+export type Signature = z.infer<typeof signatureSchema>;
+export type PutSignatureInput = z.input<typeof putSignatureInputSchema>;
+export type DraftBodyFormat = z.infer<typeof draftBodyFormatSchema>;
 export type CreateIdentityInput = z.input<typeof createIdentityInputSchema>;
 export type RecipientSuggestion = z.infer<typeof recipientSuggestionSchema>;
 export type RecipientSuggestionQuery = z.input<typeof recipientSuggestionQuerySchema>;

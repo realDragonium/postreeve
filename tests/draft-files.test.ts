@@ -16,7 +16,7 @@ import { createEmptyTestHarness, testAccountInput } from "./support/test-mail";
 const binary = Buffer.from([0, 255, 128, 13, 10, 0, 42]);
 const file = (): OutgoingAttachment => ({ id: crypto.randomUUID(), name: "résumé.bin", type: "application/octet-stream", content: binary });
 function content(account: Account): DraftContent {
-  return { mode: "new", to: "recipient@example.test", cc: "", bcc: "", subject: "Files", body: "  authored\nbody  ", identity: { name: account.name, address: account.email }, attachments: [] };
+  return { mode: "new", to: "recipient@example.test", cc: "", bcc: "", subject: "Files", format: "plain", body: "  authored\nbody  ", identity: { name: account.name, address: account.email }, attachments: [] };
 }
 
 async function createDraft(harness: Awaited<ReturnType<typeof createEmptyTestHarness>>) {
@@ -244,7 +244,7 @@ describe("outgoing MIME attachment contract", () => {
       expect(parsed.attachments).toHaveLength(files.length);
       if (files.length) expect(parsed.attachments[0]?.content).toEqual(binary);
     }
-    const raw = await composeMime({ from: account.email, to: "to@example.test" }, input.text);
+    const raw = await composeMime({ from: account.email, to: "to@example.test" }, { text: input.text });
     expect(raw.byteLength).toBeGreaterThan(Buffer.byteLength(input.text));
   });
 });
