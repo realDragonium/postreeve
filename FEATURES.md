@@ -85,6 +85,7 @@ Every WebMCP mutation revalidates the stable message reference, records an audit
 | Add Bcc recipients | Complete | Complete | `send_message.bcc` |
 | Validate recipient addresses | Complete | Complete | UI and WebMCP inputs reject invalid addresses. |
 | Show accepted and rejected recipients | Complete | Complete | Returned in the send receipt. |
+| Keep a copy of IMAP/SMTP sends in Sent | Complete | Complete | `send_message` uses the same send path. The per-account **Save a copy to Sent** setting is UI-only and starts off for Gmail and Outlook hosts, which file sent mail themselves. |
 | Require approval before an agent sends real mail | Not applicable | Complete contract requirement | The `send_message` description requires explicit approval of recipients, subject, and message before invocation. |
 | Reply | Partial | Not available | The editor and quoting UI exist, but sending is blocked until thread headers are supported. |
 | Reply all | Partial | Not available | The editor populates recipients, but sending is blocked. |

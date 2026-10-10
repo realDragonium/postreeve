@@ -1,6 +1,6 @@
 import { gmailSynchronization, gmailLocationMailboxes, GmailHttpError } from "./gmail-synchronization";
 import type { MailSynchronization } from "./synchronization";
-import { composeMime, type OutgoingContent } from "./outgoing-content";
+import { composeMime, outgoingMessageId, type OutgoingContent } from "./outgoing-content";
 import type { ProviderDraftInput } from "./provider";
 import { simpleParser, type AddressObject, type EmailAddress, type ParsedMail } from "mailparser";
 import { z, type ZodType } from "zod";
@@ -12,7 +12,6 @@ import {
   type Folder,
   type MessageRef,
   type SendMessageInput,
-  type SendReceipt,
   type TriageAction,
   type ProviderDraftRef,
 } from "../../shared/contracts";
@@ -33,7 +32,7 @@ import type {
 import { safeAttachmentFilename, safeAttachmentMediaType } from "../core/attachment-reference";
 import { buildProviderDraftMessage, parseProviderDraftMarkers } from "./provider-draft";
 import { normalizeIdentificationFields, normalizeReferenceSequences } from "./message-id";
-import { MailSendPreDispatchError, type ConversationSendContext, type MailSender } from "./sender";
+import { MailSendPreDispatchError, type ConversationSendContext, type MailSender, type SentMessage } from "./sender";
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
 const GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
@@ -470,13 +469,13 @@ export class GmailMailClient implements MailProvider, MailSender {
     }
   }
 
-  async send(rawInput: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SendReceipt> {
+  async send(rawInput: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SentMessage> {
     const input = sendMessageInputSchema.parse(rawInput);
     this.#assertAccount(input.accountId);
     const reply = context?.type === "reply" || context?.type === "reply_all" ? context : undefined;
     const submittedAt = new Date().toISOString();
-    const messageId = `<${crypto.randomUUID()}@postreeve.local>`;
-    let raw: string;
+    const messageId = outgoingMessageId(this.#account.email);
+    let raw: Buffer;
     try {
       raw = await buildMessage(this.#account, input, messageId, submittedAt, reply, content);
     } catch (error) {
@@ -491,7 +490,7 @@ export class GmailMailClient implements MailProvider, MailSender {
     const sent = await this.#requestWithToken(token, "/messages/send", sentMessageSchema, {
       method: "POST",
       body: JSON.stringify({
-        raw: toBase64Url(Buffer.from(raw, "utf8")),
+        raw: toBase64Url(raw),
         ...(reply?.inReplyTo
           && reply.providerConversationId
           && reply.sourceSubject !== undefined
@@ -500,7 +499,7 @@ export class GmailMailClient implements MailProvider, MailSender {
           : {}),
       }),
     });
-    return sendReceiptSchema.parse({
+    const receipt = sendReceiptSchema.parse({
       id: sent.id,
       accountId: this.#account.id,
       messageId,
@@ -509,6 +508,7 @@ export class GmailMailClient implements MailProvider, MailSender {
       rejected: [],
       submittedAt,
     });
+    return { receipt, mime: raw };
   }
 
   async #putDraft(
@@ -1051,9 +1051,9 @@ async function buildMessage(
   submittedAt: string,
   context?: Extract<ConversationSendContext, { type: "reply" | "reply_all" }>,
   content?: OutgoingContent,
-): Promise<string> {
+): Promise<Buffer> {
   const recipients = [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address);
-  const raw = await composeMime({
+  return composeMime({
     from: { name: account.name, address: account.email },
     to: input.to,
     cc: input.cc,
@@ -1068,7 +1068,6 @@ async function buildMessage(
     disableFileAccess: true,
     disableUrlAccess: true,
   }, input.text, content, true);
-  return raw.toString("utf8");
 }
 
 function toBase64Url(value: Buffer): string {

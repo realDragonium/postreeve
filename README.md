@@ -54,6 +54,8 @@ Restart Postreeve, select **Add account**, and choose **Continue with Google**. 
 
 For other providers, select **Add account** and enter the IMAP and SMTP settings supplied by your email provider. Postreeve authenticates to both services before saving the encrypted credentials. The SMTP check uses the provider's non-sending verification mechanism. Prefer an app-specific password when the provider supports one.
 
+Many IMAP providers, such as iCloud, do not keep mail submitted over SMTP, so Postreeve appends a copy of each sent message to the account's Sent folder. Gmail and Outlook/Office 365 file sent mail themselves; for those hosts **Save a copy to Sent** starts off to avoid duplicates. Change it under **Manage** for the account. If saving the copy fails, the message is still sent and the send result shows a warning.
+
 Use **Manage** next to the selected account to test its connection, change settings, reconnect with new passwords, or remove the account and its local workflow history. Stored passwords are never returned to the browser; blank password fields preserve the current values.
 
 Start with a secondary mailbox and verify these actions manually before relying on the agent workflow:

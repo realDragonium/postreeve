@@ -1,4 +1,5 @@
 import { uniqueCanonicalMessages } from "../../shared/canonical-messages";
+import { defaultSaveSentCopy } from "../../shared/sent-copy";
 import { mailboxQuerySchema, type MailboxQueryInput, type MailboxPage as IndexedMailboxPage } from "../../shared/mailbox-query";
 import { normalizedQuery, readCursor } from "../sync/query";
 import { accountHealth } from "../sync/health";
@@ -242,6 +243,7 @@ export class PostreeveService {
         secure: input.smtpSecure,
         username: input.smtpUsername,
         password: input.smtpPassword,
+        saveSentCopy: input.saveSentCopy ?? defaultSaveSentCopy(input.host),
       },
     };
     const clients = await this.#verifiedClients(publicAccount, credentials);
@@ -293,6 +295,7 @@ export class PostreeveService {
       smtpPort: credentials.smtp.port,
       smtpSecure: credentials.smtp.secure,
       smtpUsername: credentials.smtp.username,
+      saveSentCopy: savesSentCopy(credentials.imap.host, credentials.smtp),
     };
   }
 
@@ -1235,15 +1238,41 @@ export class PostreeveService {
   }
 
   async #dispatchMessageSend(prepared: PreparedMessageSend, files: readonly OutgoingAttachment[] = []): Promise<SendReceipt> {
-    const receipt = sendReceiptSchema.parse(await prepared.sender.send(prepared.input, prepared.context, {
+    const sent = await prepared.sender.send(prepared.input, prepared.context, {
       files, maxMessageBytes: this.outgoingMailLimits.maxMessageBytes,
-    }));
+    });
+    const receipt = sendReceiptSchema.parse(sent.receipt);
     if (receipt.accountId !== prepared.input.accountId) {
       throw new Error("Mail sender returned a receipt for another account");
     }
-    return prepared.context && receipt.accepted.length > 0
-      ? this.#recordConversationSend(prepared.input.accountId, prepared.account.kind, receipt, prepared.context)
+    if (receipt.accepted.length === 0) return receipt;
+    const recorded = prepared.context
+      ? await this.#recordConversationSend(prepared.input.accountId, prepared.account.kind, receipt, prepared.context)
       : receipt;
+    return this.#saveSentCopy(prepared.account, recorded, sent.mime);
+  }
+
+  async #saveSentCopy(account: StoredAccount, receipt: SendReceipt, mime: Buffer): Promise<SendReceipt> {
+    if (account.kind !== "imap") return receipt;
+    try {
+      const credentials = this.#credentialsFor(account);
+      if (credentials.kind !== "imap" || !credentials.smtp || !savesSentCopy(credentials.imap.host, credentials.smtp)) {
+        return receipt;
+      }
+      const provider = this.#providers.forAccount(account.id);
+      if (!provider.appendSentMessage) throw new Error("This mail provider cannot store sent copies");
+      const copy = await provider.appendSentMessage(account.id, mime, receipt.submittedAt);
+      if (copy) {
+        this.#store.synchronization.observe(
+          { tenantId: this.#context.tenantId, accountId: account.id, provider: account.kind },
+          [copy],
+          this.synchronization.now(),
+        );
+      }
+      return receipt;
+    } catch (error) {
+      return withReceiptWarning(receipt, `Message was sent, but a copy could not be saved to Sent: ${errorMessage(error)}`);
+    }
   }
 
   async applyDirectActions(rawInput: DirectActionInput): Promise<OperationBatch> {
@@ -1556,6 +1585,7 @@ export class PostreeveService {
           secure: input.smtpSecure,
           username: input.smtpUsername,
           password: input.smtpPassword ?? current.smtp.password,
+          saveSentCopy: input.saveSentCopy ?? savesSentCopy(current.imap.host, current.smtp),
         },
       },
     };
@@ -1680,6 +1710,10 @@ function mirrorFailure(draft: Draft, error: string, completed?: DraftMirrorArtif
     ...(mirroredVersion ? { mirroredVersion } : {}),
     ...(previousRef ? { ref: previousRef } : {}),
   };
+}
+
+function savesSentCopy(imapHost: string, smtp: { readonly saveSentCopy?: boolean | undefined }): boolean {
+  return smtp.saveSentCopy ?? defaultSaveSentCopy(imapHost);
 }
 
 function withReceiptWarning(receipt: SendReceipt, warning: string): SendReceipt {

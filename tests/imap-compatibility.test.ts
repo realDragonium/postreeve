@@ -1327,6 +1327,67 @@ describe("Bun IMAP compatibility", () => {
   });
 });
 
+describe("IMAP sent copies", () => {
+  const sentMime = Buffer.from([
+    "From: Person <person@example.test>",
+    "To: Recipient <recipient@example.test>",
+    "Subject: Sent copy",
+    "Message-ID: <copy@example.test>",
+    "Date: Sat, 10 Oct 2026 09:00:00 +0000",
+    "",
+    "Body",
+    "",
+  ].join("\r\n"));
+
+  function withSentMailbox(state: FakeState): StoredMailbox {
+    const sent: StoredMailbox = { path: "Sent Items", name: "Sent Items", uidValidity: 606n, specialUse: "\\Sent", nextUid: 7, messages: new Map() };
+    state.mailboxes.set(sent.path, sent);
+    return sent;
+  }
+
+  test("appends the exact message as seen to the special-use Sent mailbox and returns its summary", async () => {
+    const state = fakeState();
+    const sent = withSentMailbox(state);
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+
+    const summary = await provider.appendSentMessage(config.accountId, sentMime, "2026-10-10T09:00:00.000Z");
+
+    const stored = sent.messages.get(7);
+    expect(stored?.source?.equals(sentMime)).toBe(true);
+    expect([...stored?.flags ?? []]).toEqual(["\\Seen"]);
+    expect(stored?.internalDate).toEqual(new Date("2026-10-10T09:00:00.000Z"));
+    expect(summary).toMatchObject({
+      ref: { accountId: config.accountId, mailbox: "Sent Items", uidValidity: "606", uid: 7 },
+      messageId: "<copy@example.test>",
+      subject: "Sent copy",
+      read: true,
+    });
+  });
+
+  test("leaves indexing to synchronization when the server reports no UID", async () => {
+    const state = fakeState();
+    const sent = withSentMailbox(state);
+    const provider = new ImapMailProvider(config, (options) => {
+      state.options.push(options);
+      const client = new FakeImapClient(state);
+      client.capabilities.delete("UIDPLUS");
+      return client;
+    });
+
+    expect(await provider.appendSentMessage(config.accountId, sentMime, "2026-10-10T09:00:00.000Z")).toBeNull();
+    expect(sent.messages.size).toBe(1);
+  });
+
+  test("fails without a selectable special-use Sent mailbox", async () => {
+    const state = fakeState();
+    state.mailboxes.set("Sent", { path: "Sent", name: "Sent", uidValidity: 1n, specialUse: "\\Sent", flags: new Set(["\\Noselect"]), nextUid: 1, messages: new Map() });
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+
+    await expect(provider.appendSentMessage(config.accountId, sentMime, "2026-10-10T09:00:00.000Z"))
+      .rejects.toThrow("This account has no discoverable special-use Sent mailbox");
+  });
+});
+
 describe("IMAP synchronization", () => {
   const account = { tenantId: "sync-tenant", accountId: config.accountId, provider: "imap" as const };
   const page = (provider: ImapMailProvider, cursor: string | null = null, limit = 10, mailbox = "INBOX") =>
@@ -1961,6 +2022,7 @@ class FakeImapClient implements ImapClient {
       flags: new Set(flags),
       internalDate: idate ? new Date(idate) : new Date(),
       source,
+      envelope: { subject: headerValue(source, "Subject"), messageId: headerValue(source, "Message-ID") },
       headers: selectedHeaders(source, [
         "X-Postreeve-Draft-Tenant-ID",
         "X-Postreeve-Draft-Account-ID",
@@ -2324,6 +2386,11 @@ function fetchedMessage(message: FetchMessageObject, query: FetchQueryObject): F
     }));
   }
   return cloned;
+}
+
+function headerValue(source: Buffer, name: string): string {
+  const line = selectedHeaders(source, [name]).toString("utf8");
+  return line.slice(line.indexOf(":") + 1).trim();
 }
 
 function selectedHeaders(source: Buffer, names: readonly string[]): Buffer {

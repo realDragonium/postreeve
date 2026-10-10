@@ -591,7 +591,7 @@ describe("Gmail compatibility", () => {
     expect(labelIds).not.toContain("UNREAD");
     await client.undo(applied);
     expect(labelIds).toContain("UNREAD");
-    const receipt = await client.send({
+    const { receipt } = await client.send({
       accountId: account.id,
       to: [{ name: "Recipient", address: "recipient@example.test" }],
       cc: [],
@@ -621,6 +621,8 @@ describe("Gmail compatibility", () => {
     expect(sendRequest.threadId).toBe("thread-1");
     expect(sentRaw).toContain("In-Reply-To: <gmail-test@example.test>\r\n");
     expect(sentRaw).toContain("References: <root@example.test> <gmail-test@example.test>\r\n");
+    expect(receipt.messageId).toMatch(/^<[0-9a-f-]{36}@example\.test>$/);
+    expect(sentRaw).toContain(`Message-ID: ${receipt.messageId}\r\n`);
 
     function message(extra: Record<string, unknown> = {}) {
       return {
@@ -653,7 +655,7 @@ describe("Gmail compatibility", () => {
       fetch: request,
     });
 
-    const receipt = await client.send({
+    const { receipt } = await client.send({
       accountId: account.id,
       to: [{ name: "Recipient", address: "recipient@example.test" }],
       cc: [],
