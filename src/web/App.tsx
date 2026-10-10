@@ -398,6 +398,7 @@ function App() {
       const accountIds = [...changedAccounts.current];
       changedAccounts.current.clear();
       void queryClient.invalidateQueries({ queryKey: ["messages"] });
+      void queryClient.invalidateQueries({ queryKey: ["conversation"] });
       for (const accountId of accountIds) void queryClient.invalidateQueries({ queryKey: ["folders", accountId] });
     }, mailboxEventCoalesceMs);
     const account = accounts.find(({ id }) => id === event.accountId);

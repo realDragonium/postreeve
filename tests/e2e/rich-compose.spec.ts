@@ -17,6 +17,7 @@ test("formats a message and swaps the identity signature without touching typed 
   try {
     await page.route("**/api/**", async (route) => {
       const url = new URL(route.request().url());
+      if (url.pathname === "/api/events") return route.abort();
       await route.fulfill({ response: await route.fetch({ url: `${base}${url.pathname}${url.search}` }) });
     });
     await page.goto("/");
