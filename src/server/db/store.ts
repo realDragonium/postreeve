@@ -1,4 +1,5 @@
 import { SynchronizationStore } from "../sync/store";
+import { migrateCorrespondents, suggestRecipients } from "../contacts/correspondents";
 import type { OutgoingAttachment } from "../mail/outgoing-content";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -18,6 +19,8 @@ import type {
   MessageRef,
   OperationBatch,
   Proposal,
+  RecipientSuggestion,
+  RecipientSuggestionQuery,
   SendReceipt,
   ProviderDraftRef,
 } from "../../shared/contracts";
@@ -91,6 +94,7 @@ export class Store {
       (snapshot) => this.#reconcileMailbox(snapshot),
       (tenantId, provider, previous, current) => this.#recordProviderMove(tenantId, provider, previous, current),
       (tenantId, id) => this.#getMessage(tenantId, id));
+    migrateCorrespondents(this.#sqlite);
   }
 
   close(): void {
@@ -157,6 +161,10 @@ export class Store {
       return true;
     });
     return remove.immediate(id);
+  }
+
+  recipientSuggestions(tenantId: string, query: RecipientSuggestionQuery, now: Date): RecipientSuggestion[] {
+    return suggestRecipients(this.#sqlite, tenantId, query, now);
   }
 
   async listIdentities(tenantId: string, accountId: string): Promise<Identity[]> {

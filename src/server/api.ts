@@ -19,6 +19,7 @@ import {
   listMessagesInputSchema,
   messageRefSchema,
   proposalIdSchema,
+  recipientSuggestionQuerySchema,
   renameFolderInputSchema,
   sendMessageInputSchema,
   updateDraftInputSchema,
@@ -83,6 +84,8 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
     .post("/accounts/:accountId/reauthorization", zValidator("param", accountParamsSchema), async (context) =>
       context.json(await service.requestReauthorization(context.req.valid("param").accountId)))
     .get("/accounts", async (context) => context.json(await service.listAccounts()))
+    .get("/recipient-suggestions", zValidator("query", recipientSuggestionQuerySchema), (context) =>
+      context.json(service.recipientSuggestions(context.req.valid("query"))))
     .post("/accounts/discover", zValidator("json", discoverAccountInputSchema), async (context) =>
       context.json(await discoverAccount(context.req.valid("json").email)))
     .post("/accounts/test", zValidator("json", createAccountInputSchema), async (context) => {

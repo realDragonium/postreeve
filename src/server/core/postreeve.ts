@@ -27,6 +27,8 @@ import type {
   DraftVersionInput,
   Folder,
   Identity,
+  RecipientSuggestion,
+  RecipientSuggestionQuery,
   CreateIdentityInput,
   ListMessagesInput,
   MessageRef,
@@ -558,6 +560,10 @@ export class PostreeveService {
       mediaType: safeAttachmentMediaType(downloaded.mediaType),
       content: downloaded.content,
     };
+  }
+
+  recipientSuggestions(query: RecipientSuggestionQuery): RecipientSuggestion[] {
+    return this.#store.recipientSuggestions(this.#context.tenantId, query, new Date());
   }
 
   async listIdentities(accountId: string): Promise<Identity[]> {

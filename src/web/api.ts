@@ -16,6 +16,7 @@ import {
   outgoingMailLimitsSchema,
   operationBatchSchema,
   proposalSchema,
+  recipientSuggestionSchema,
   sendReceiptSchema,
   type Account,
   type AccountDiscovery,
@@ -38,6 +39,7 @@ import {
   type ReceivedAttachment,
   type OperationBatch,
   type Proposal,
+  type RecipientSuggestion,
   type RenameFolderInput,
   type SendMessageInput,
   type SendReceipt,
@@ -193,6 +195,8 @@ export const api = {
       ...jsonBody({ path: input.path }),
       ...withSignal(signal),
     }),
+  recipientSuggestions: (query: string, signal?: AbortSignal): Promise<RecipientSuggestion[]> =>
+    request(`/recipient-suggestions?${new URLSearchParams({ q: query })}`, recipientSuggestionSchema.array(), withSignal(signal)),
   identities: (accountId: string, signal?: AbortSignal): Promise<Identity[]> =>
     request(`/accounts/${encodeURIComponent(accountId)}/identities`, identitySchema.array(), withSignal(signal)),
   addIdentity: (accountId: string, input: CreateIdentityInput, signal?: AbortSignal): Promise<Identity> =>

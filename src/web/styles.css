@@ -331,3 +331,12 @@ legend { padding: 0 6px; font-size: 10px; font-weight: 500; letter-spacing: .1em
   .mail-view.has-reader .mail-list-pane { display: none; }
   .mail-view.has-reader .mail-reader-pane { flex: 1; }
 }
+
+/* ── Recipient suggestions ─────────────────────────────────────────── */
+.recipient-field { position: relative; }
+.recipient-suggestions {
+  position: absolute; z-index: 10; left: 0; right: 0; margin: 2px 0 0; padding: 2px 0; list-style: none;
+  background: var(--bg); border: 1px solid var(--div); max-height: 220px; overflow-y: auto;
+}
+.recipient-suggestions li { padding: 4px 8px; font-size: 11px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.recipient-suggestions li.on { background: var(--sel); }
