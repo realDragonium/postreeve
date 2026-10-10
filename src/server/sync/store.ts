@@ -7,6 +7,7 @@ import { messageSummarySchema, type CanonicalMessage, type CanonicalMessageSumma
 import { toCanonicalObservation, type ProviderMessageSummary } from "../mail/provider";
 import { syncPageSchema, syncScopeKey, type SyncAccount, type SyncPage, type SyncScope, type SyncFailureKind } from "../mail/synchronization";
 import type { MailboxSnapshot } from "../db/store";
+import { isInbox, type NewMailArrival } from "../../shared/mailbox-events";
 
 const jobSchema = z.object({
   tenant_id: z.string(), account_id: z.string(), provider: z.enum(["gmail", "imap"]),
@@ -121,7 +122,21 @@ export class SynchronizationStore {
       .all(account.tenantId, account.accountId) as ScopeRow[];
   }
 
-  commit(claim: SyncClaim, scope: SyncScope, rawPage: SyncPage, now: number, pollMs: number, limit: number): void {
+  /** Makes a discovered scope and its queued job due now; paused, retrying and canceled jobs keep their schedule. */
+  expedite(tenantId: string, accountId: string, scope: SyncScope, now: number): boolean {
+    return this.sqlite.transaction(() => {
+      const changed = this.sqlite.query("UPDATE sync_scopes SET due_at=MIN(due_at,?) WHERE tenant_id=? AND account_id=? AND scope=?")
+        .run(now, tenantId, accountId, syncScopeKey(scope)).changes > 0;
+      if (changed) {
+        this.sqlite.query(`UPDATE sync_jobs SET due_at=MIN(due_at,?),updated_at=? WHERE tenant_id=? AND account_id=?
+          AND state='queued' AND provider_unavailable=0`).run(now, now, tenantId, accountId);
+      }
+      return changed;
+    }).immediate();
+  }
+
+  /** Returns the page's new arrivals: unread Inbox messages first indexed after the scope completed a snapshot. */
+  commit(claim: SyncClaim, scope: SyncScope, rawPage: SyncPage, now: number, pollMs: number, limit: number): NewMailArrival[] {
     if (JSON.stringify(rawPage).length > 2 * 1024 * 1024) throw new Error("Synchronization page byte limit exceeded");
     const page = syncPageSchema.parse(rawPage);
     const counts = [page.messages.length, page.removed.length, page.moves.length, page.locationSets.length,
@@ -145,8 +160,12 @@ export class SynchronizationStore {
         if (snapshot.scope.kind === "mailbox" && ref.mailbox !== snapshot.scope.mailbox) throw new Error("Snapshot reference crossed its mailbox");
       }
     }
-    this.sqlite.transaction(() => {
+    return this.sqlite.transaction(() => {
       this.#requireClaim(claim, now);
+      const ready = this.sqlite.query("SELECT 1 FROM sync_scans WHERE tenant_id=? AND account_id=? AND scope=? AND completed_generation IS NOT NULL")
+        .get(claim.tenantId, claim.accountId, scopeKey) !== null;
+      const firstIndexed = new Set<string>();
+      const arrivals = new Map<string, NewMailArrival>();
       const existing = this.sqlite.query("SELECT cursor FROM sync_scopes WHERE tenant_id=? AND account_id=? AND scope=?")
         .get(claim.tenantId, claim.accountId, scopeKey) as { cursor: string | null } | null;
       if (!existing) throw new Error("Synchronization scope no longer exists");
@@ -159,6 +178,13 @@ export class SynchronizationStore {
           ...(referenceSequences === undefined ? {} : { referenceSequences }) };
         const canonical = this.reconcile({ ...claim, mailbox: message.ref.mailbox,
           observations: [toCanonicalObservation(claim.tenantId, claim.provider, message)], authoritative: false })[0]!;
+        if (ready && !firstIndexed.has(canonical.id) && this.sqlite.query("SELECT 1 FROM indexed_messages WHERE tenant_id=? AND account_id=? AND message_id=?")
+          .get(claim.tenantId, claim.accountId, canonical.id) === null) firstIndexed.add(canonical.id);
+        if (firstIndexed.has(canonical.id) && !message.read && isInbox(message.ref.mailbox) && !arrivals.has(canonical.id)) {
+          const sender = message.from[0];
+          arrivals.set(canonical.id, { canonicalId: canonical.id, mailbox: message.ref.mailbox,
+            sender: sender ? sender.name || sender.address : "", subject: message.subject, receivedAt: message.receivedAt });
+        }
         this.#index(claim, canonical.id, message, now);
       }
       this.enforceRetention(claim.tenantId, claim.accountId, now);
@@ -171,6 +197,7 @@ export class SynchronizationStore {
       for (const snapshot of page.snapshots) this.#snapshot(claim, snapshot);
       this.sqlite.query(`UPDATE sync_scopes SET cursor=?,due_at=?,coverage=? WHERE tenant_id=? AND account_id=? AND scope=?`)
         .run(page.cursor, page.hasMore ? now : now + pollMs, page.coverage, claim.tenantId, claim.accountId, scopeKey);
+      return [...arrivals.values()];
     }).immediate();
   }
 

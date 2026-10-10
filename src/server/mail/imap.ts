@@ -1,5 +1,6 @@
 import type { ProviderDraftInput } from "./provider";
 import { imapSynchronization } from "./imap-synchronization";
+import { defaultIdleClientFactory, watchImapInbox, type IdleClientFactory } from "./imap-idle";
 import { ImapSearchEvidence } from "./imap-search-evidence";
 import {
   ImapFlow,
@@ -36,6 +37,7 @@ import type {
   MailProvider,
   ProviderLocationMove,
   ProviderMessageDetail,
+  ProviderWatch,
   ProviderMessageSummary,
   ProviderDraft,
   ProviderDraftScope,
@@ -135,16 +137,28 @@ const defaultClientFactory: ImapClientFactory = (options) => new ImapFlow(option
 export class ImapMailProvider implements MailProvider {
   readonly #config: ImapAccountConfig;
   readonly #createClient: ImapClientFactory;
+  readonly #createIdleClient: IdleClientFactory;
   readonly synchronization;
 
-  constructor(config: ImapAccountConfig, createClient: ImapClientFactory = defaultClientFactory) {
+  constructor(config: ImapAccountConfig, createClient: ImapClientFactory = defaultClientFactory,
+    createIdleClient: IdleClientFactory = defaultIdleClientFactory) {
     if (!config.accountId) throw new Error("An IMAP account ID is required");
     this.#config = { ...config };
     this.#createClient = createClient;
+    this.#createIdleClient = createIdleClient;
     this.synchronization = imapSynchronization({
       accountId: config.accountId,
       withClient: (operation, signal) => this.#withClient(operation, signal),
       summaries: (client, mailbox, uids) => this.#fetchSummaries(client, mailbox, uids, true),
+    });
+  }
+
+  watchChanges(onChange: (mailbox: string) => void): ProviderWatch {
+    return watchImapInbox({
+      connection: { host: this.#config.host, port: this.#config.port, secure: this.#config.secure,
+        auth: { user: this.#config.username, pass: this.#config.password } },
+      createClient: this.#createIdleClient,
+      onChange,
     });
   }
 

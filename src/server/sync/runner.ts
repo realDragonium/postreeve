@@ -2,11 +2,16 @@ import type { RetentionPolicy } from "../../shared/synchronization";
 import type { MailProviderRegistry } from "../mail/provider";
 import { additiveSynchronization, SynchronizationError, syncScopeSchema } from "../mail/synchronization";
 import type { SynchronizationStore, SyncClaim } from "./store";
+import type { NewMailArrival } from "../../shared/mailbox-events";
+import { MailboxEvents } from "./events";
+import { ProviderWatches } from "./watches";
 
 export interface SynchronizationOptions {
   readonly now?: () => number;
   readonly retention?: RetentionPolicy;
   readonly pollMs?: number;
+  /** Gmail history is one cheap request, so its account scope is polled more often than IMAP mailboxes. */
+  readonly gmailPollMs?: number;
   readonly leaseMs?: number;
   readonly pageLimit?: number;
   readonly maxScopes?: number;
@@ -15,6 +20,7 @@ export interface SynchronizationOptions {
 export class SynchronizationRunner {
   readonly #now: () => number;
   readonly #pollMs: number;
+  readonly #gmailPollMs: number;
   readonly #leaseMs: number;
   readonly #pageLimit: number;
   readonly #maxScopes: number;
@@ -23,11 +29,15 @@ export class SynchronizationRunner {
   #stopped = true;
   #lastMaintenance = -Infinity;
   #running: Promise<boolean> | undefined;
+  readonly events = new MailboxEvents();
+  readonly #watches: ProviderWatches;
 
   constructor(readonly store: SynchronizationStore, readonly tenantId: string, readonly providers: MailProviderRegistry, options: SynchronizationOptions = {}) {
     if (!tenantId.trim()) throw new Error("Synchronization requires a tenant");
     this.#now = options.now ?? Date.now;
     this.#pollMs = positive(options.pollMs ?? 60_000);
+    this.#gmailPollMs = positive(options.gmailPollMs ?? Math.min(20_000, this.#pollMs));
+    this.#watches = new ProviderWatches(providers, (accountId, mailbox) => this.expedite(accountId, mailbox));
     this.#leaseMs = positive(options.leaseMs ?? 120_000);
     this.#pageLimit = positive(options.pageLimit ?? 100);
     this.#maxScopes = positive(options.maxScopes ?? 1_000);
@@ -53,6 +63,12 @@ export class SynchronizationRunner {
     this.#active.get(accountId)?.controller.abort();
     this.store.retry(this.tenantId, accountId, this.#now());
   }
+  expedite(accountId: string, mailbox: string): void {
+    if (!this.store.expedite(this.tenantId, accountId, { kind: "mailbox", mailbox }, this.#now())) return;
+    if (this.#stopped || this.#running) return;
+    clearTimeout(this.#timer);
+    this.#scheduleTick(0);
+  }
   start(): void {
     if (!this.#stopped) return;
     this.#stopped = false;
@@ -61,6 +77,7 @@ export class SynchronizationRunner {
   async stop(): Promise<void> {
     this.#stopped = true;
     clearTimeout(this.#timer);
+    this.#watches.stopAll();
     for (const { claim, controller } of this.#active.values()) {
       this.store.release(claim, this.#now());
       controller.abort();
@@ -84,6 +101,7 @@ export class SynchronizationRunner {
     this.#timer.unref();
   }
   async #run(): Promise<boolean> {
+    if (!this.#stopped) this.#watches.reconcile(this.store.jobs(this.tenantId));
     if (this.#now() - this.#lastMaintenance >= this.#pollMs) {
       for (const job of this.store.jobs(this.tenantId)) this.store.enforceRetention(this.tenantId, job.account_id, this.#now());
       this.#lastMaintenance = this.#now();
@@ -113,16 +131,23 @@ export class SynchronizationRunner {
     signal.throwIfAborted();
     this.store.discover(claim, scopes, this.#now(), this.#maxScopes);
     const scope = this.store.scopes(claim).find(scope => scope.due_at <= this.#now());
+    const pollMs = claim.provider === "gmail" ? this.#gmailPollMs : this.#pollMs;
     if (scope) {
       const parsed = syncScopeSchema.parse(JSON.parse(scope.scope));
       const page = await abortable(ingestion.fetchPage({ account: claim, scope: parsed, cursor: scope.cursor,
         limit: this.#pageLimit, signal }), signal);
       signal.throwIfAborted();
+      let arrivals: NewMailArrival[];
       try {
-        this.store.commit(claim, parsed, page, this.#now(), this.#pollMs, this.#pageLimit);
+        arrivals = this.store.commit(claim, parsed, page, this.#now(), pollMs, this.#pageLimit);
       } catch { throw new SynchronizationError("invalid-data"); }
+      if (page.messages.length || page.removed.length || page.moves?.length
+        || page.snapshots?.some(snapshot => snapshot.phase === "complete" || snapshot.phase === "start-and-complete")) {
+        this.events.publish({ type: "mailbox-changed", accountId: claim.accountId });
+      }
+      if (arrivals.length) this.events.publish({ type: "new-mail", accountId: claim.accountId, arrivals });
     }
-    this.store.finish(claim, this.#now(), this.#pollMs, scope !== undefined);
+    this.store.finish(claim, this.#now(), pollMs, scope !== undefined);
   }
 }
 

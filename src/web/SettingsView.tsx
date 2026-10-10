@@ -2,11 +2,13 @@ import { SyncStorageView } from "./SyncStorageView";
 import type { Account, Folder } from "../shared/contracts";
 import { assistantTools } from "./assistant-tools";
 import { railFor, type ThemePreference } from "./theme";
+import type { NotificationAccess, NotificationPreferences } from "./notifications";
 
 export const settingsSections = [
   "Accounts",
   "Assistant control",
   "Appearance",
+  "Notifications",
   "Keyboard shortcuts",
   "Rules & filters",
   "Sync & storage",
@@ -54,6 +56,10 @@ export interface SettingsViewProps {
   themePreference: ThemePreference;
   themeMode: "light" | "dark";
   hiddenTools: ReadonlySet<string>;
+  notificationPreferences: NotificationPreferences;
+  notificationPermission: NotificationAccess;
+  onEnableNotifications: (enabled: boolean) => void;
+  onMuteAccount: (accountId: string, muted: boolean) => void;
   onThemePreference: (preference: ThemePreference) => void;
   onToolExposure: (name: string, exposed: boolean) => void;
   onManageAccount: (accountId: string) => void;
@@ -84,6 +90,52 @@ export function SettingsView(props: SettingsViewProps) {
         <p className="t-body" style={{ maxWidth: 720, margin: "14px 0 0" }}>
           System follows your operating system and switches with it. Light and Dark pin the interface until you change it back.
         </p>
+      </div></div>
+    </>;
+  }
+
+  if (props.section === "Notifications") {
+    const { enabled, mutedAccountIds } = props.notificationPreferences;
+    const blocked = props.notificationPermission === "denied" || props.notificationPermission === "unsupported";
+    return <>
+      <Toolbar title="Notifications" meta={enabled ? `On · ${props.accounts.length - mutedAccountIds.length} of ${props.accounts.length} accounts` : "Off"} />
+      <div className="readscroll"><div className="pad">
+        <div className="t-sec" style={{ marginBottom: 10 }}>New mail</div>
+        <div style={{ display: "flex", gap: 6 }}>
+          {([true, false] as const).map((option) => (
+            <button
+              key={String(option)}
+              className={`opt opt-accent ${enabled === option ? "on" : ""}`}
+              style={{ padding: "4px 10px", background: enabled === option ? undefined : "var(--field)" }}
+              aria-pressed={enabled === option}
+              disabled={option && blocked}
+              onClick={() => props.onEnableNotifications(option)}
+            >{option ? "On" : "Off"}</button>
+          ))}
+        </div>
+        <p className="t-body" style={{ maxWidth: 720, margin: "14px 0 0" }}>
+          A desktop notification appears when unread mail arrives in an Inbox while Postreeve is open but not in front.
+          Clicking it opens the message. Existing mail found while an account first synchronizes never notifies.
+        </p>
+        {props.notificationPermission === "denied" ? <p className="t-body" role="status" style={{ maxWidth: 720, margin: "10px 0 0" }}>
+          Notification permission was denied. Allow notifications for Postreeve in your browser or system settings, then turn this on.
+        </p> : null}
+        {props.notificationPermission === "unsupported" ? <p className="t-body" role="status" style={{ maxWidth: 720, margin: "10px 0 0" }}>
+          This browser does not support desktop notifications.
+        </p> : null}
+        <div className="t-sec" style={{ margin: "22px 0 6px" }}>Accounts</div>
+        {props.accounts.map((account) => {
+          const muted = mutedAccountIds.includes(account.id);
+          return <div className="grid-row" key={account.id} style={{ "--grid-cols": "minmax(0,320px) 90px" } as React.CSSProperties}>
+            <span className="t-ink truncate">{account.email}</span>
+            <button
+              className="btn-quiet"
+              aria-pressed={muted}
+              aria-label={`${muted ? "Unmute" : "Mute"} ${account.email}`}
+              onClick={() => props.onMuteAccount(account.id, !muted)}
+            >{muted ? "Muted" : "Mute"}</button>
+          </div>;
+        })}
       </div></div>
     </>;
   }
