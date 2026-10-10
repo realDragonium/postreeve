@@ -11,6 +11,7 @@ import {
   canonicalMessageSummarySchema,
   canonicalConversationSchema,
   draftSchema,
+  identitySchema,
   outgoingMailLimitsSchema,
   operationBatchSchema,
   proposalSchema,
@@ -23,6 +24,8 @@ import {
   type DeleteFolderInput,
   type DirectActionInput,
   type Folder,
+  type CreateIdentityInput,
+  type Identity,
   type CanonicalMessageDetail,
   type CanonicalMessageSummary,
   type CanonicalConversation,
@@ -186,6 +189,19 @@ export const api = {
       ...jsonBody({ path: input.path }),
       ...withSignal(signal),
     }),
+  identities: (accountId: string, signal?: AbortSignal): Promise<Identity[]> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/identities`, identitySchema.array(), withSignal(signal)),
+  addIdentity: (accountId: string, input: CreateIdentityInput, signal?: AbortSignal): Promise<Identity> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/identities`, identitySchema, {
+      method: "POST",
+      ...jsonBody(input),
+      ...withSignal(signal),
+    }),
+  removeIdentity: (accountId: string, identityId: string, signal?: AbortSignal) => request(
+    `/accounts/${encodeURIComponent(accountId)}/identities/${encodeURIComponent(identityId)}`,
+    connectionTestResultSchema,
+    { method: "DELETE", ...withSignal(signal) },
+  ),
   drafts: (accountId: string, signal?: AbortSignal): Promise<Draft[]> =>
     request(`/accounts/${encodeURIComponent(accountId)}/drafts`, draftSchema.array(), withSignal(signal)),
   draft: (accountId: string, draftId: string, signal?: AbortSignal): Promise<Draft> =>

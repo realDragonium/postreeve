@@ -20,6 +20,19 @@ export const outboundAddressSchema = z.object({
   address: z.email(),
 });
 
+export const identitySchema = z.object({
+  id: z.string().min(1),
+  accountId: accountIdSchema,
+  name: z.string().min(1).max(120),
+  address: z.email(),
+  createdAt: z.iso.datetime(),
+});
+
+export const createIdentityInputSchema = z.object({
+  name: z.string().trim().min(1).max(120),
+  address: z.email().transform((address) => address.toLowerCase()),
+});
+
 export const folderSchema = z.object({
   path: z.string().min(1),
   name: z.string().min(1),
@@ -442,6 +455,8 @@ export type AccountSettings = z.infer<typeof accountSettingsSchema>;
 export type UpdateAccountInput = z.infer<typeof updateAccountInputSchema>;
 export type ConnectionTestResult = z.infer<typeof connectionTestResultSchema>;
 export type OutboundAddress = z.infer<typeof outboundAddressSchema>;
+export type Identity = z.infer<typeof identitySchema>;
+export type CreateIdentityInput = z.input<typeof createIdentityInputSchema>;
 export type ConversationSendSource = z.infer<typeof conversationSendSourceSchema>;
 export type SendMessageIntent = z.infer<typeof sendMessageIntentSchema>;
 export type SendMessageInput = z.infer<typeof sendMessageInputSchema>;

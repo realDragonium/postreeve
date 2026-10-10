@@ -6,11 +6,11 @@ import type SMTPTransport from "nodemailer/lib/smtp-transport";
 import { z } from "zod";
 
 import {
+  outboundAddressSchema,
   sendMessageInputSchema,
   sendReceiptSchema,
-  type SendMessageInput,
 } from "../../shared/contracts";
-import type { ConversationSendContext, MailSender, SentMessage } from "./sender";
+import type { ConversationSendContext, MailSender, OutgoingMessage, SentMessage } from "./sender";
 
 const smtpAccountConfigSchema = z.object({
   accountId: z.string().min(1),
@@ -76,19 +76,22 @@ export class SmtpMailSender implements MailSender {
     if (!verified) throw new Error("SMTP server rejected the connection");
   }
 
-  async send(rawInput: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SentMessage> {
+  async send(rawInput: OutgoingMessage, context?: ConversationSendContext, content?: OutgoingContent): Promise<SentMessage> {
     const input = sendMessageInputSchema.parse(rawInput);
     this.#assertAccount(input.accountId);
+    const from = rawInput.from
+      ? outboundAddressSchema.parse(rawInput.from)
+      : { name: this.#config.fromName, address: this.#config.fromAddress };
     const reply = context?.type === "reply" || context?.type === "reply_all" ? context : undefined;
 
-    const messageId = outgoingMessageId(this.#config.fromAddress);
+    const messageId = outgoingMessageId(from.address);
     const submittedAt = new Date().toISOString();
     let raw: Buffer;
     try {
       raw = await composeMime({
         messageId,
         date: new Date(submittedAt),
-        from: { name: this.#config.fromName, address: this.#config.fromAddress },
+        from,
         to: input.to,
         cc: input.cc,
         bcc: input.bcc,
@@ -105,7 +108,7 @@ export class SmtpMailSender implements MailSender {
     try {
       result = await this.#transport.sendMail({
         raw,
-        envelope: { from: this.#config.fromAddress, to: [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address) },
+        envelope: { from: from.address, to: [...input.to, ...input.cc, ...input.bcc].map(({ address }) => address) },
         messageId,
         disableFileAccess: true,
         disableUrlAccess: true,

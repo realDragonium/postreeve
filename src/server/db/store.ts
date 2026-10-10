@@ -13,6 +13,7 @@ import type {
   CanonicalMessageObservation,
   Draft,
   DraftContent,
+  Identity,
   MailProviderKind,
   MessageRef,
   OperationBatch,
@@ -20,7 +21,7 @@ import type {
   SendReceipt,
   ProviderDraftRef,
 } from "../../shared/contracts";
-import { draftSchema, providerDraftRefSchema, sendReceiptSchema } from "../../shared/contracts";
+import { draftSchema, identitySchema, providerDraftRefSchema, sendReceiptSchema } from "../../shared/contracts";
 import { AccountConflictError, DraftConflictError, DraftDeletedError, DraftNotFoundError } from "../core/errors";
 import { accounts, batches, proposals, type StoredOperation } from "./schema";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
@@ -145,6 +146,7 @@ export class Store {
       `).get(accountId);
       if (sending) throw new AccountConflictError();
       this.#sqlite.query("DELETE FROM drafts WHERE account_id = ?").run(accountId);
+      this.#sqlite.query("DELETE FROM identities WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM draft_tombstones WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_provider_conversations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_locations WHERE account_id = ?").run(accountId);
@@ -155,6 +157,35 @@ export class Store {
       return true;
     });
     return remove.immediate(id);
+  }
+
+  async listIdentities(tenantId: string, accountId: string): Promise<Identity[]> {
+    const rows = this.#sqlite.query(`
+      SELECT * FROM identities WHERE tenant_id = ? AND account_id = ? ORDER BY created_at, id
+    `).all(tenantId, accountId) as IdentityRow[];
+    return rows.map(toIdentity);
+  }
+
+  /** Returns the stored identity for an address that already exists instead of adding another. */
+  async addIdentity(tenantId: string, identity: Identity, limit: number): Promise<{ identity: Identity; created: boolean }> {
+    const add = this.#sqlite.transaction((): { identity: Identity; created: boolean } => {
+      const existing = this.#sqlite.query(`
+        SELECT * FROM identities WHERE tenant_id = ? AND account_id = ? AND address = ?
+      `).get(tenantId, identity.accountId, identity.address) as IdentityRow | null;
+      if (existing) return { identity: toIdentity(existing), created: false };
+      const count = this.#sqlite.query("SELECT COUNT(*) AS count FROM identities WHERE tenant_id = ? AND account_id = ?")
+        .get(tenantId, identity.accountId) as { count: number };
+      if (count.count >= limit) throw new Error(`An account can have at most ${limit} identities`);
+      this.#sqlite.query(`
+        INSERT INTO identities (tenant_id, id, account_id, name, address, created_at) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(tenantId, identity.id, identity.accountId, identity.name, identity.address, identity.createdAt);
+      return { identity, created: true };
+    });
+    return add.immediate();
+  }
+
+  async removeIdentity(tenantId: string, accountId: string, id: string): Promise<void> {
+    this.#sqlite.query("DELETE FROM identities WHERE tenant_id = ? AND account_id = ? AND id = ?").run(tenantId, accountId, id);
   }
 
   async insertDraft(tenantId: string, draft: Draft): Promise<Draft> {
@@ -1483,6 +1514,15 @@ export class Store {
     `);
     this.#migrateDraftTombstones();
     this.#migrateDraftTombstoneCleanup();
+    this.#sqlite.exec(`
+      CREATE TABLE IF NOT EXISTS identities (
+        tenant_id TEXT NOT NULL, id TEXT NOT NULL,
+        account_id TEXT NOT NULL REFERENCES accounts(id),
+        name TEXT NOT NULL, address TEXT NOT NULL, created_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, id),
+        UNIQUE (tenant_id, account_id, address)
+      );
+    `);
     const accountsTable = this.#sqlite.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'accounts'")
       .get() as { sql: string } | null;
     if (accountsTable && !accountsTable.sql.includes("'gmail'")) {
@@ -2055,6 +2095,24 @@ function toDraftCleanupArtifact(row: DraftCleanupRow): DraftCleanupArtifact {
     ref: providerDraftRefSchema.parse(parseJson(row.cleanup_ref)),
     mirroredVersion: row.cleanup_version,
   };
+}
+
+interface IdentityRow {
+  id: string;
+  account_id: string;
+  name: string;
+  address: string;
+  created_at: string;
+}
+
+function toIdentity(row: IdentityRow): Identity {
+  return identitySchema.parse({
+    id: row.id,
+    accountId: row.account_id,
+    name: row.name,
+    address: row.address,
+    createdAt: row.created_at,
+  });
 }
 
 function toDraft(row: DraftRow): Draft {

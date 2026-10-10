@@ -11,7 +11,6 @@ import {
   type MessageDetail,
   type MessageRef,
   type MessageSummary,
-  type SendMessageInput,
   type SendReceipt,
   type TriageAction,
   type ProviderDraftRef,
@@ -34,6 +33,7 @@ import {
   MailSenderRegistry,
   type ConversationSendContext,
   type MailSender,
+  type OutgoingMessage,
   type SentMessage,
 } from "../../src/server/mail/sender";
 import { CredentialVault } from "../../src/server/security/credentials";
@@ -118,8 +118,8 @@ export async function createTestHarness(options: TestHarnessOptions = {}) {
 export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
   const tenantId = options.tenantId ?? "test-tenant";
   const store = new Store(options.storePath ?? ":memory:");
-  const sent: SendMessageInput[] = [];
-  const sendAttempts: SendMessageInput[] = [];
+  const sent: OutgoingMessage[] = [];
+  const sendAttempts: OutgoingMessage[] = [];
   const sendContents: Array<OutgoingContent | undefined> = [];
   const sendContexts: Array<ConversationSendContext | undefined> = [];
   const connections: ImapAccountCredentials[] = [];
@@ -515,13 +515,13 @@ function draftStateKey(scope: ProviderDraftScope, draftId: string): string {
 class TestMailSender implements MailSender {
   readonly #account: Account;
   readonly #onSent: (
-    input: SendMessageInput,
+    input: OutgoingMessage,
     receipt: SendReceipt,
     context?: ConversationSendContext,
   ) => void | Promise<void>;
   readonly #verificationFailure: Error | undefined;
   readonly #behavior: {
-    readonly onAttempt: (input: SendMessageInput, content?: OutgoingContent) => void;
+    readonly onAttempt: (input: OutgoingMessage, content?: OutgoingContent) => void;
     readonly wait: Promise<void> | undefined;
     readonly failure: Error | (() => Error | undefined) | undefined;
     readonly rejectRecipients: readonly string[];
@@ -530,10 +530,10 @@ class TestMailSender implements MailSender {
 
   constructor(
     account: Account,
-    onSent: (input: SendMessageInput, receipt: SendReceipt, context?: ConversationSendContext) => void | Promise<void>,
+    onSent: (input: OutgoingMessage, receipt: SendReceipt, context?: ConversationSendContext) => void | Promise<void>,
     verificationFailure?: Error,
     behavior: {
-      readonly onAttempt: (input: SendMessageInput, content?: OutgoingContent) => void;
+      readonly onAttempt: (input: OutgoingMessage, content?: OutgoingContent) => void;
       readonly wait: Promise<void> | undefined;
       readonly failure: Error | (() => Error | undefined) | undefined;
       readonly rejectRecipients: readonly string[];
@@ -556,8 +556,8 @@ class TestMailSender implements MailSender {
     if (this.#verificationFailure) throw this.#verificationFailure;
   }
 
-  async send(rawInput: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SentMessage> {
-    const input = sendMessageInputSchema.parse(rawInput);
+  async send(rawInput: OutgoingMessage, context?: ConversationSendContext, content?: OutgoingContent): Promise<SentMessage> {
+    const input: OutgoingMessage = { ...sendMessageInputSchema.parse(rawInput), ...(rawInput.from ? { from: rawInput.from } : {}) };
     if (input.accountId !== this.#account.id) throw new Error("Account isolation violation");
     this.#behavior.onAttempt(input, content);
     await this.#behavior.wait;
