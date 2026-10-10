@@ -134,17 +134,16 @@ export class SynchronizationRunner {
     const pollMs = claim.provider === "gmail" ? this.#gmailPollMs : this.#pollMs;
     if (scope) {
       const parsed = syncScopeSchema.parse(JSON.parse(scope.scope));
+      const fetchedAt = this.#now();
       const page = await abortable(ingestion.fetchPage({ account: claim, scope: parsed, cursor: scope.cursor,
         limit: this.#pageLimit, signal }), signal);
       signal.throwIfAborted();
-      let arrivals: NewMailArrival[];
+      let committed: { arrivals: NewMailArrival[]; changed: boolean };
       try {
-        arrivals = this.store.commit(claim, parsed, page, this.#now(), pollMs, this.#pageLimit);
+        committed = this.store.commit(claim, parsed, page, this.#now(), pollMs, this.#pageLimit, fetchedAt);
       } catch { throw new SynchronizationError("invalid-data"); }
-      if (page.messages.length || page.removed.length || page.moves?.length
-        || page.snapshots?.some(snapshot => snapshot.phase === "complete" || snapshot.phase === "start-and-complete")) {
-        this.events.publish({ type: "mailbox-changed", accountId: claim.accountId });
-      }
+      const { arrivals, changed } = committed;
+      if (changed) this.events.publish({ type: "mailbox-changed", accountId: claim.accountId });
       if (arrivals.length) this.events.publish({ type: "new-mail", accountId: claim.accountId, arrivals });
     }
     this.store.finish(claim, this.#now(), pollMs, scope !== undefined);

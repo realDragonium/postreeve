@@ -87,6 +87,7 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         void stream.writeSSE({ data: JSON.stringify(event) }).catch(ignore);
       });
       const keepAlive = setInterval(() => { void stream.write(": keep-alive\n\n").catch(ignore); }, EVENT_KEEP_ALIVE_MS);
+      keepAlive.unref();
       try {
         await stream.write(": connected\n\n");
         await new Promise<void>(resolve => stream.onAbort(resolve));

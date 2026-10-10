@@ -31,7 +31,7 @@ async function fixture(kind: "imap" | "gmail" = "imap") {
   const scope: SyncScope = kind === "imap" ? inbox : { kind: "account" };
   sync.discover(claim, [scope], 0, 10);
   let now = 1;
-  const commit = (value: SyncPage) => sync.commit(claim, scope, value, now++, 10, 100);
+  const commit = (value: SyncPage) => sync.commit(claim, scope, value, now++, 10, 100).arrivals;
   return { store, sync, claim, scope, commit };
 }
 
@@ -65,11 +65,46 @@ describe("new arrivals", () => {
     sync.schedule(tenant, "account", 5, true);
     const claim = sync.claim(tenant, 5, 1_000)!;
     sync.discover(claim, [scope], 5, 10);
-    expect(sync.commit(claim, scope, page([message(7)]), 6, 10, 100)).toEqual([]);
+    expect(sync.commit(claim, scope, page([message(7)]), 6, 10, 100).arrivals).toEqual([]);
+  });
+});
+
+describe("indexed changes", () => {
+  test("a rescan that re-sends unchanged summaries changes nothing; flags, new mail and removals do", async () => {
+    const { sync, claim, scope } = await fixture();
+    const changed = (value: SyncPage, now: number) => sync.commit(claim, scope, value, now, 10, 100).changed;
+    expect(changed(page([message(1), message(2)]), 1)).toBe(true);
+    expect(changed(page([message(1), message(2)]), 2)).toBe(false);
+    expect(changed(page([message(1, { read: true }), message(2)]), 3)).toBe(true);
+    expect(changed(page([message(3)]), 4)).toBe(true);
+    expect(changed(page([], { removed: [message(3).ref] }), 5)).toBe(true);
+    expect(changed(page([], { removed: [message(3).ref] }), 6)).toBe(false);
+    expect(changed(page([message(1, { read: true })], { snapshots: [{ scope, generation: "scan", phase: "start-and-complete", seen: [message(1).ref] }] }), 7)).toBe(true);
+    expect(changed(page([message(1, { read: true })], { snapshots: [{ scope, generation: "again", phase: "start-and-complete", seen: [message(1).ref] }] }), 8)).toBe(false);
   });
 });
 
 describe("expedite", () => {
+  test("survives pages that cannot observe the change and clears on a fresh view requested afterwards", async () => {
+    const { sync, claim, scope } = await fixture();
+    const due = () => sync.scopes(claim)[0]!.due_at;
+    const scan = (generation: string, phase: "start" | "complete" | "start-and-complete") =>
+      ({ snapshots: [{ scope, generation, phase, seen: [] }] });
+    sync.commit(claim, scope, page([], { hasMore: true, cursor: "scan-1", ...scan("one", "start") }), 10, 1_000, 100);
+    sync.expedite(tenant, "account", scope, 20);
+    sync.commit(claim, scope, page([], { cursor: "done-1", ...scan("one", "complete") }), 30, 1_000, 100, 25);
+    expect(due()).toBe(30);
+    sync.commit(claim, scope, page([], { cursor: "fresh-1", ...scan("two", "start-and-complete") }), 40, 1_000, 100, 35);
+    expect(due()).toBe(1_040);
+
+    sync.expedite(tenant, "account", scope, 50);
+    sync.commit(claim, scope, page([], { cursor: "fresh-2", ...scan("three", "start-and-complete") }), 60, 1_000, 100, 45);
+    expect(due()).toBe(60);
+    sync.commit(claim, scope, page([message(9)], { cursor: "arrivals" }), 70, 1_000, 100, 65);
+    expect(due()).toBe(1_070);
+  });
+
+
   test("makes a queued scope and job due now, but leaves paused jobs alone", async () => {
     const { sync, claim, scope } = await fixture();
     sync.commit(claim, scope, page([]), 1, 1_000, 100);
@@ -122,6 +157,30 @@ describe("runner", () => {
     harness.runner.expedite(harness.account.id, "INBOX");
     expect(await harness.runner.runOnce()).toBe(true);
     expect(harness.events.at(-1)).toMatchObject({ type: "new-mail", accountId: harness.account.id, arrivals: [{ subject: "Subject 2" }] });
+  });
+
+  test("an expedite that arrives while its page is being fetched runs again without waiting for the poll", async () => {
+    let fetches = 0;
+    let expediteDuringFetch: (() => void) | undefined;
+    const harness = await runnerFixture({
+      async discoverScopes() { return [inbox]; },
+      async fetchPage() {
+        fetches++;
+        expediteDuringFetch?.();
+        expediteDuringFetch = undefined;
+        return page([], { cursor: `c${fetches}`, snapshots: [{ scope: inbox, generation: `g${fetches}`, phase: "start-and-complete", seen: [] }] });
+      },
+    });
+    await harness.runner.runOnce();
+    harness.clock(1_000);
+    harness.runner.expedite(harness.account.id, "INBOX");
+    expediteDuringFetch = () => { harness.clock(1_500); harness.runner.expedite(harness.account.id, "INBOX"); };
+    await harness.runner.runOnce();
+    expect(harness.store.synchronization.jobs(tenant)[0]!.due_at).toBe(1_500);
+    expect(await harness.runner.runOnce()).toBe(true);
+    expect(fetches).toBe(3);
+    expect(harness.store.synchronization.jobs(tenant)[0]!.due_at).toBe(61_500);
+    expect(harness.events).toEqual([]);
   });
 
   test("Gmail scopes become due after the Gmail poll interval", async () => {

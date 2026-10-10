@@ -110,7 +110,8 @@ console.info(`Postreeve listening on http://${server.hostname}:${server.port}`);
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
-    void service.synchronization.stop().finally(() => { server.stop(); store.close(); });
+    // Open mailbox event streams never finish, so shutdown closes active connections instead of waiting for them.
+    void service.synchronization.stop().finally(() => { server.stop(true); store.close(); });
   });
 }
 

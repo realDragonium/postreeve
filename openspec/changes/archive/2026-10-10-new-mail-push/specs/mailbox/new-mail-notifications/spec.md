@@ -26,11 +26,15 @@ Synchronization SHALL report a message as a new arrival only when it is unread, 
 - **THEN** it is not reported as a new arrival
 
 ### Requirement: The open page receives mailbox events
-The server SHALL stream events to the open page at `GET /api/events` as Server-Sent Events: a mailbox-change event naming the account after any committed synchronization page that changed indexed messages, and a new-mail event with each arrival's account, mailbox, canonical identity, sender and subject. Events SHALL carry no body content or credentials, and the stream SHALL send a keep-alive at least every 15 seconds.
+The server SHALL stream events to the open page at `GET /api/events` as Server-Sent Events: a mailbox-change event naming the account after any committed synchronization page that added, removed or moved an indexed location or changed its read or flagged state, and a new-mail event with each arrival's account, mailbox, canonical identity, sender and subject. Events SHALL carry no body content or credentials, and the stream SHALL send a keep-alive at least every 15 seconds.
 
 #### Scenario: Change pushed to the page
 - **WHEN** synchronization commits new messages for an account while the page is open
 - **THEN** the page receives a mailbox-change event for that account and, for arrivals, a new-mail event
+
+#### Scenario: Unchanged rescan
+- **WHEN** a rescan page re-sends summaries identical to the indexed locations
+- **THEN** no mailbox-change event is sent
 
 #### Scenario: Stream reconnects
 - **WHEN** the event stream closes or fails
