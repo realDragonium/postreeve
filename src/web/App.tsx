@@ -205,8 +205,8 @@ function App() {
   const openMessage = messages.find((message) => messageMatchesKey(message, openKey)) ?? null;
   const openConversationId = openMessage?.conversationId;
   const conversationQuery = useQuery({
-    queryKey: ["conversation", openConversationId],
-    queryFn: ({ signal }) => api.conversationMessages(openConversationId ?? "", signal),
+    queryKey: ["conversation", openConversationId, openMessage?.ref.accountId],
+    queryFn: ({ signal }) => api.conversationMessages(openConversationId ?? "", openMessage?.ref.accountId ?? "", signal),
     enabled: openConversationId !== undefined,
   });
   const thread = openMessage ? conversationThread(openMessage, conversationQuery.data) : [];
@@ -423,6 +423,7 @@ function App() {
         undoLast();
         return;
       }
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === "[") {
         event.preventDefault();
         setSideOpen((current) => !current);

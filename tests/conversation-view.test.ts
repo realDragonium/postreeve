@@ -36,4 +36,9 @@ describe("conversation thread", () => {
   test("expands the opened message and unread messages only", () => {
     expect([...initiallyExpanded(conversationThread(opened, members), opened)]).toEqual(["second", "reply"]);
   });
+
+  test("auto-expands only the three most recent unread messages besides the opened one", () => {
+    const unread = ["u1", "u2", "u3", "u4"].map((id) => message(id, "INBOX", false));
+    expect([...initiallyExpanded([opened, ...unread], opened)]).toEqual(["second", "u2", "u3", "u4"]);
+  });
 });

@@ -152,7 +152,7 @@ When a person opens a message, the reader SHALL show every message of its conver
 - **THEN** the reader still shows the opened message with its body
 
 ### Requirement: Read conversation messages start collapsed
-The reader SHALL start with the opened message and unread messages expanded and every other message collapsed to its sender, date and preview. Selecting a collapsed message SHALL expand it, and selecting an expanded message's header SHALL collapse it. The reader SHALL scroll the opened message into view.
+The reader SHALL request the conversation with the opened message's account as `accountId`. It SHALL start with the opened message and the three most recent other unread messages expanded and every other message collapsed to its sender, date and preview. Selecting a collapsed message SHALL expand it, and selecting an expanded message's header SHALL collapse it. The reader SHALL scroll the opened message into view.
 
 #### Scenario: Older read message
 - **WHEN** a person opens the latest message of a conversation whose earlier message is read

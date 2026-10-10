@@ -213,6 +213,30 @@ describe("Hono RPC API", () => {
     store.close();
   });
 
+  test("represents a message copied to several accounts by the requested account's copy", async () => {
+    const { store, service } = await createEmptyTestHarness();
+    const accounts = [await service.createAccount(testAccountInput("Work", "work@example.test")),
+      await service.createAccount(testAccountInput("Home", "home@example.test"))];
+    for (const account of accounts) {
+      store.synchronization.observe({ tenantId: "test-tenant", accountId: account.id, provider: "imap" }, [{
+        ref: { accountId: account.id, mailbox: "INBOX", uidValidity: "1", uid: 1, modseq: "1" },
+        messageId: "<shared@example.test>", subject: "Plans", from: [{ name: "Sam", address: "sam@example.test" }],
+        to: [{ name: "Work", address: "work@example.test" }, { name: "Home", address: "home@example.test" }],
+        receivedAt: "2026-09-02T00:00:00.000Z", preview: "", read: true, flagged: false,
+      }], 1000);
+    }
+    const listed = store.synchronization.indexed("test-tenant", accounts[0]!.id, "INBOX");
+    const conversationId = listed[0]!.conversationId!;
+    const api = createApi(service);
+
+    for (const account of accounts) {
+      const response = await api.request(`/api/conversations/${conversationId}/messages?accountId=${account.id}`);
+      const messages = canonicalMessageSummarySchema.array().parse(await response.json());
+      expect(messages.map(({ ref }) => ref.accountId)).toEqual([account.id]);
+    }
+    store.close();
+  });
+
   test("persists a complete 100,000-ID References observation beyond SQLite's binding limit", async () => {
     const { store, service } = await createEmptyTestHarness();
     const account = await service.createAccount(testAccountInput());

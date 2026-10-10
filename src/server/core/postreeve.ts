@@ -447,9 +447,9 @@ export class PostreeveService {
     return conversation;
   }
 
-  async getConversationMessages(id: string): Promise<CanonicalMessageSummary[]> {
+  async getConversationMessages(id: string, preferredAccountId?: string): Promise<CanonicalMessageSummary[]> {
     const conversation = await this.getConversation(id);
-    return this.#store.synchronization.conversationSummaries(this.#context.tenantId, conversation.messages);
+    return this.#store.synchronization.conversationSummaries(this.#context.tenantId, conversation.messages, preferredAccountId);
   }
 
   async readMessages(references: MessageRef[]): Promise<CanonicalMessageDetail[]> {
@@ -1478,8 +1478,10 @@ export class PostreeveService {
         const reversed = await provider.undo(operation.applied);
         const reverse = reversed ?? { previous: operation.applied.current,
           current: { ...operation.applied.previous, modseq: null } };
+        const { action, previousRead, previousFlagged } = operation.applied;
+        const isFlagChange = action.type === "flag" || action.type === "unflag";
         const identityError = await this.#recordProviderMove(batch.accountId, reverse,
-          { read: operation.applied.previousRead, flagged: operation.applied.previousFlagged });
+          isFlagChange ? { flagged: previousFlagged } : { read: previousRead, flagged: previousFlagged });
         storedOperations.push({
           ...operation,
           result: { ...operation.result, status: "undone", error: identityError },

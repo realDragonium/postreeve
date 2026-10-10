@@ -283,8 +283,9 @@ export const api = {
   downloadAttachment: requestAttachment,
   conversation: (id: string, signal?: AbortSignal): Promise<CanonicalConversation> =>
     request(`/conversations/${encodeURIComponent(id)}`, canonicalConversationSchema, withSignal(signal)),
-  conversationMessages: (id: string, signal?: AbortSignal): Promise<CanonicalMessageSummary[]> =>
-    request(`/conversations/${encodeURIComponent(id)}/messages`, canonicalMessageSummarySchema.array(), withSignal(signal)),
+  conversationMessages: (id: string, accountId: string, signal?: AbortSignal): Promise<CanonicalMessageSummary[]> =>
+    request(`/conversations/${encodeURIComponent(id)}/messages?accountId=${encodeURIComponent(accountId)}`,
+      canonicalMessageSummarySchema.array(), withSignal(signal)),
   sendMessage: (input: SendMessageInput, signal?: AbortSignal): Promise<SendReceipt> =>
     request("/messages/send", sendReceiptSchema, {
       method: "POST",

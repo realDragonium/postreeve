@@ -169,3 +169,10 @@ The system SHALL serve `GET /api/conversations/:conversationId/messages` for a c
 #### Scenario: Unknown conversation summaries
 - **WHEN** a client requests summaries for a conversation ID that was never issued
 - **THEN** the response is HTTP 400 with `error` `Conversation not found`
+
+### Requirement: Conversation summaries prefer the requested account
+When `GET /api/conversations/:conversationId/messages` has an `accountId` query parameter, a member indexed in that account SHALL be represented by a location in that account.
+
+#### Scenario: Message delivered to two accounts
+- **WHEN** a message is indexed in the Inbox of two accounts and the conversation is requested with the second account's ID
+- **THEN** its summary's reference names the second account

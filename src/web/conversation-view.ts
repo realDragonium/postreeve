@@ -8,6 +8,10 @@ export function conversationThread<T extends MessageSummary>(opened: T, members:
   return members.map((member, position) => position === index ? opened : member);
 }
 
+/** Each expanded message reads its body over its own provider connection, so auto-expansion stays small. */
+const maxAutoExpandedUnread = 3;
+
 export function initiallyExpanded(thread: readonly MessageSummary[], opened: MessageSummary): Set<string> {
-  return new Set(thread.filter((message) => message === opened || !message.read).map(messageKey));
+  const recentUnread = thread.filter((message) => message !== opened && !message.read).slice(-maxAutoExpandedUnread);
+  return new Set([opened, ...recentUnread].map(messageKey));
 }
