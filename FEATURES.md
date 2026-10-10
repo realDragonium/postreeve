@@ -49,6 +49,8 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | --- | --- | --- | --- |
 | List message summaries | Complete | Complete | `list_messages` also shows the same mailbox view in the UI. |
 | Read full message bodies | Complete | Complete | `read_messages` |
+| Read the whole conversation, including your own replies in Sent and other folders | Complete | Not covered | No conversation tool exists; `read_messages` reads individual references. The reader collapses read messages and loads each body when expanded. |
+| Group the message list by conversation | Not available | Not available | The list shows individual messages; opening one shows its conversation. |
 | Search within a folder | Complete | Complete | `search_messages` writes the query into the UI and shows the matching messages. |
 | Filter all, unread, or flagged messages | Complete | Complete | `list_messages.filter` and `search_messages.filter` update the visible UI filter. |
 | Sort by newest, oldest, sender, or subject | Complete | Complete | `list_messages.sort` and `search_messages.sort` update the visible UI sort order. |
