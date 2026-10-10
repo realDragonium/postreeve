@@ -37,7 +37,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Show total and unread folder counts | Complete | Complete | Returned by `list_folders`. |
 | Open Inbox, Sent, Drafts, Spam, Trash, and custom folders | Complete | Complete | `list_messages` opens the same account and folder in the UI. |
 | Manually refresh the mailbox | Complete | Equivalent | List/search query the synchronized index and report coverage; incomplete coverage uses bounded provider fallback. Full reads request provider data. |
-| Detect changed folder counts in the open UI | Complete | Equivalent | The UI polls folder metadata; an agent can call `list_folders` again. |
+| Detect changed folder counts in the open UI | Complete | Equivalent | Synchronization pushes mailbox-change events to the page, which refetches lists and counts; the UI also polls folder metadata every 15 seconds. An agent can call `list_folders` again. |
 | Load more messages | Complete, cursor pages | Complete, cursor pages | `list_messages.cursor` / `search_messages.cursor`; one backend cursor across unified sources. |
 | Create provider folders or Gmail labels | Complete | Complete | `create_folder` updates the provider and the open UI. |
 | Rename custom provider folders or Gmail labels | Complete | Complete | `rename_folder` preserves an IMAP folder's parent path and updates the open UI. |
@@ -138,6 +138,8 @@ These features are not provider-backed today. Whether and how they should be exp
 | Inspect account synchronization health and retention policy | Complete | Complete | `inspect_synchronization`; reads local evidence. |
 | Retry account synchronization safely | Complete | Complete | `retry_synchronization`; does not mutate provider mail. |
 | Request human reauthorization instructions | Complete | Complete | `request_reauthorization`; consent and credentials stay in the human authorization flow. |
+| Receive new mail promptly | Complete | Not applicable | IMAP accounts hold one IDLE connection on INBOX and synchronize it as soon as the server reports a change, falling back to the 60-second poll without IDLE. Gmail history is polled every 20 seconds. |
+| Desktop notifications for new mail | Complete | Not applicable | **Settings → Notifications** turns notifications on and mutes accounts. Unread Inbox arrivals notify while the window is in the background; clicking opens the message. Backfill and repair do not notify. Page-local presentation, not an agent workflow. |
 | Bounded preview/body retention | Complete | Complete | Defaults to 30 days since refresh and 100 MiB per account. Retained preview and searchable body text expire together. Headers, locations, canonical identities and workflow history remain retained; this is not a total database-size limit. |
 
 ## Current WebMCP tool set

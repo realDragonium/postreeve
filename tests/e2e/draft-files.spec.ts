@@ -18,6 +18,8 @@ test("real API keeps rejected and uncertain attachments recoverable without auto
     await request.post(`${base}/scenario`, { data: { reject: true, uncertain: false } });
     await page.route("**/api/**", async (route) => {
       const url = new URL(route.request().url());
+      // route.fetch buffers whole responses, so it cannot relay the never-ending event stream.
+      if (url.pathname === "/api/events") return route.abort();
       const response = await route.fetch({ url: `${base}${url.pathname}${url.search}` });
       await route.fulfill({ response });
     });

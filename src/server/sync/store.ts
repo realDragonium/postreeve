@@ -7,6 +7,7 @@ import { messageSummarySchema, type CanonicalMessage, type CanonicalMessageSumma
 import { toCanonicalObservation, type ProviderMessageSummary } from "../mail/provider";
 import { syncPageSchema, syncScopeKey, type SyncAccount, type SyncPage, type SyncScope, type SyncFailureKind } from "../mail/synchronization";
 import type { MailboxSnapshot } from "../db/store";
+import { isInbox, type NewMailArrival } from "../../shared/mailbox-events";
 
 const jobSchema = z.object({
   tenant_id: z.string(), account_id: z.string(), provider: z.enum(["gmail", "imap"]),
@@ -123,7 +124,28 @@ export class SynchronizationStore {
       .all(account.tenantId, account.accountId) as ScopeRow[];
   }
 
-  commit(claim: SyncClaim, scope: SyncScope, rawPage: SyncPage, now: number, pollMs: number, limit: number): void {
+  /**
+   * Makes a discovered scope and its queued job due now; paused, retrying and canceled jobs keep their schedule.
+   * The scope stays expedited until a page fetched afterwards starts a fresh view of it (see `commit`).
+   */
+  expedite(tenantId: string, accountId: string, scope: SyncScope, now: number): boolean {
+    return this.sqlite.transaction(() => {
+      const changed = this.sqlite.query("UPDATE sync_scopes SET due_at=MIN(due_at,?),expedited_at=? WHERE tenant_id=? AND account_id=? AND scope=?")
+        .run(now, now, tenantId, accountId, syncScopeKey(scope)).changes > 0;
+      if (changed) {
+        this.sqlite.query(`UPDATE sync_jobs SET due_at=MIN(due_at,?),updated_at=? WHERE tenant_id=? AND account_id=?
+          AND state='queued' AND provider_unavailable=0`).run(now, now, tenantId, accountId);
+      }
+      return changed;
+    }).immediate();
+  }
+
+  /**
+   * Returns the page's new arrivals (unread Inbox messages first indexed after the scope completed a snapshot) and
+   * whether indexed locations changed. `fetchedAt` is when the page's provider request began.
+   */
+  commit(claim: SyncClaim, scope: SyncScope, rawPage: SyncPage, now: number, pollMs: number, limit: number,
+    fetchedAt = now): { arrivals: NewMailArrival[]; changed: boolean } {
     if (JSON.stringify(rawPage).length > 2 * 1024 * 1024) throw new Error("Synchronization page byte limit exceeded");
     const page = syncPageSchema.parse(rawPage);
     const counts = [page.messages.length, page.removed.length, page.moves.length, page.locationSets.length,
@@ -147,10 +169,15 @@ export class SynchronizationStore {
         if (snapshot.scope.kind === "mailbox" && ref.mailbox !== snapshot.scope.mailbox) throw new Error("Snapshot reference crossed its mailbox");
       }
     }
-    this.sqlite.transaction(() => {
+    return this.sqlite.transaction(() => {
       this.#requireClaim(claim, now);
-      const existing = this.sqlite.query("SELECT cursor FROM sync_scopes WHERE tenant_id=? AND account_id=? AND scope=?")
-        .get(claim.tenantId, claim.accountId, scopeKey) as { cursor: string | null } | null;
+      const ready = this.sqlite.query("SELECT 1 FROM sync_scans WHERE tenant_id=? AND account_id=? AND scope=? AND completed_generation IS NOT NULL")
+        .get(claim.tenantId, claim.accountId, scopeKey) !== null;
+      const firstIndexed = new Set<string>();
+      const arrivals = new Map<string, NewMailArrival>();
+      const existing = this.sqlite.query("SELECT cursor,expedited_at FROM sync_scopes WHERE tenant_id=? AND account_id=? AND scope=?")
+        .get(claim.tenantId, claim.accountId, scopeKey) as { cursor: string | null; expedited_at: number | null } | null;
+      let changed = false;
       if (!existing) throw new Error("Synchronization scope no longer exists");
       if (page.hasMore && page.cursor === existing.cursor) throw new Error("Synchronization cursor did not progress");
       for (const parsedMessage of page.messages) {
@@ -159,20 +186,35 @@ export class SynchronizationStore {
           ...(providerConversationId === undefined ? {} : { providerConversationId }),
           ...(canonicalReceivedAt === undefined ? {} : { canonicalReceivedAt }),
           ...(referenceSequences === undefined ? {} : { referenceSequences }) };
+        const prior = this.#location(claim, message.ref);
+        if (!prior || prior.read !== Number(message.read) || prior.flagged !== Number(message.flagged)) changed = true;
         const canonical = this.reconcile({ ...claim, mailbox: message.ref.mailbox,
           observations: [toCanonicalObservation(claim.tenantId, claim.provider, message)], authoritative: false })[0]!;
+        if (ready && !firstIndexed.has(canonical.id) && this.sqlite.query("SELECT 1 FROM indexed_messages WHERE tenant_id=? AND account_id=? AND message_id=?")
+          .get(claim.tenantId, claim.accountId, canonical.id) === null) firstIndexed.add(canonical.id);
+        if (firstIndexed.has(canonical.id) && !message.read && isInbox(message.ref.mailbox) && !arrivals.has(canonical.id)) {
+          const sender = message.from[0];
+          arrivals.set(canonical.id, { canonicalId: canonical.id, mailbox: message.ref.mailbox,
+            sender: sender ? sender.name || sender.address : "", subject: message.subject, receivedAt: message.receivedAt });
+        }
         this.#index(claim, canonical.id, message, now);
       }
       this.enforceRetention(claim.tenantId, claim.accountId, now);
-      for (const move of page.moves) this.move(claim.tenantId, claim.provider, move.previous, move.current);
-      for (const ref of page.removed) this.#remove(claim, ref);
+      for (const move of page.moves) if (this.move(claim.tenantId, claim.provider, move.previous, move.current)) changed = true;
+      for (const ref of page.removed) if (this.#remove(claim, ref)) changed = true;
       for (const set of page.locationSets) {
-        this.sqlite.query(`DELETE FROM message_locations WHERE tenant_id=? AND account_id=? AND provider='gmail' AND provider_id=?
-          AND mailbox NOT IN (SELECT value FROM json_each(?))`).run(claim.tenantId, claim.accountId, set.providerId, JSON.stringify(set.mailboxes));
+        if (this.sqlite.query(`DELETE FROM message_locations WHERE tenant_id=? AND account_id=? AND provider='gmail' AND provider_id=?
+          AND mailbox NOT IN (SELECT value FROM json_each(?))`).run(claim.tenantId, claim.accountId, set.providerId, JSON.stringify(set.mailboxes)).changes) changed = true;
       }
-      for (const snapshot of page.snapshots) this.#snapshot(claim, snapshot);
-      this.sqlite.query(`UPDATE sync_scopes SET cursor=?,due_at=?,coverage=? WHERE tenant_id=? AND account_id=? AND scope=?`)
-        .run(page.cursor, page.hasMore ? now : now + pollMs, page.coverage, claim.tenantId, claim.accountId, scopeKey);
+      for (const snapshot of page.snapshots) if (this.#snapshot(claim, snapshot)) changed = true;
+      // A continuing scan page cannot observe changes beyond its fixed range; only a page that starts a fresh view
+      // (no snapshot, or a snapshot start) and was requested after the latest expedite satisfies it.
+      const freshView = page.snapshots.every(snapshot => snapshot.phase === "start" || snapshot.phase === "start-and-complete");
+      const expedited = existing.expedited_at !== null && !(freshView && fetchedAt >= existing.expedited_at);
+      this.sqlite.query(`UPDATE sync_scopes SET cursor=?,due_at=?,coverage=?,expedited_at=? WHERE tenant_id=? AND account_id=? AND scope=?`)
+        .run(page.cursor, page.hasMore || expedited ? now : now + pollMs, page.coverage, expedited ? existing.expedited_at : null,
+          claim.tenantId, claim.accountId, scopeKey);
+      return { arrivals: [...arrivals.values()], changed };
     }).immediate();
   }
 
@@ -313,11 +355,17 @@ export class SynchronizationStore {
   }
 
   #requireClaim(claim: SyncClaim, now: number): void { if (!this.current(claim, now)) throw new Error("Synchronization claim expired or was canceled"); }
-  #remove(claim: SyncAccount, ref: MessageRef): void {
-    this.sqlite.query(`DELETE FROM message_locations WHERE tenant_id=? AND account_id=? AND provider=? AND mailbox=? AND
+  #location(claim: SyncAccount, ref: MessageRef): { read: number; flagged: number } | null {
+    return this.sqlite.query(`SELECT read,flagged FROM message_locations WHERE tenant_id=? AND account_id=? AND provider=? AND mailbox=? AND
+      ((? IS NOT NULL AND provider_id=?) OR (? IS NULL AND uid_validity=? AND uid=?)) LIMIT 1`)
+      .get(claim.tenantId, claim.accountId, claim.provider, ref.mailbox, ref.providerId ?? null, ref.providerId ?? null,
+        ref.providerId ?? null, ref.uidValidity, ref.uid) as { read: number; flagged: number } | null;
+  }
+  #remove(claim: SyncAccount, ref: MessageRef): boolean {
+    return this.sqlite.query(`DELETE FROM message_locations WHERE tenant_id=? AND account_id=? AND provider=? AND mailbox=? AND
       ((? IS NOT NULL AND provider_id=?) OR (? IS NULL AND uid_validity=? AND uid=?))`)
       .run(claim.tenantId, claim.accountId, claim.provider, ref.mailbox, ref.providerId ?? null, ref.providerId ?? null,
-        ref.providerId ?? null, ref.uidValidity, ref.uid);
+        ref.providerId ?? null, ref.uidValidity, ref.uid).changes > 0;
   }
   #index(claim: SyncAccount, id: string, message: ProviderMessageSummary, now: number): void {
     const content = indexedContentSchema.parse(message);
@@ -343,7 +391,8 @@ export class SynchronizationStore {
       ON CONFLICT(tenant_id,account_id,message_id) DO UPDATE SET received_at=excluded.received_at,content=excluded.content,updated_at=excluded.updated_at`)
       .run(claim.tenantId, claim.accountId, id, message.receivedAt, serialized, now);
   }
-  #snapshot(claim: SyncAccount, snapshot: z.infer<typeof syncPageSchema>["snapshots"][number]): void {
+  /** Returns whether completing the snapshot removed locations. */
+  #snapshot(claim: SyncAccount, snapshot: z.infer<typeof syncPageSchema>["snapshots"][number]): boolean {
     const key = syncScopeKey(snapshot.scope);
     const prior = this.sqlite.query("SELECT generation,completed_generation FROM sync_scans WHERE tenant_id=? AND account_id=? AND scope=?")
       .get(claim.tenantId, claim.accountId, key) as { generation: string; completed_generation: string | null } | null;
@@ -369,19 +418,19 @@ export class SynchronizationStore {
         .run(claim.tenantId, claim.accountId, key, claim.tenantId, claim.accountId, claim.provider, ref.mailbox,
           ref.providerId ?? null, ref.providerId ?? null, ref.providerId ?? null, ref.uidValidity, ref.uid);
     }
-    if (snapshot.phase === "complete" || snapshot.phase === "start-and-complete") {
-      this.sqlite.query(`DELETE FROM message_locations WHERE tenant_id=? AND account_id=? AND provider=? AND (? IS NULL OR mailbox=?)
-        AND EXISTS(SELECT 1 FROM sync_candidates candidate WHERE candidate.tenant_id=message_locations.tenant_id
-          AND candidate.account_id=message_locations.account_id AND candidate.location_id=message_locations.id
-          AND candidate.revision=message_locations.sync_revision AND candidate.scope=?)
-        AND id NOT IN (SELECT location_id FROM sync_seen WHERE tenant_id=? AND account_id=? AND scope=?)`)
-        .run(claim.tenantId, claim.accountId, claim.provider, snapshot.scope.kind === "mailbox" ? snapshot.scope.mailbox : null,
-          snapshot.scope.kind === "mailbox" ? snapshot.scope.mailbox : null, key, claim.tenantId, claim.accountId, key);
-      this.sqlite.query("UPDATE sync_scans SET completed_generation=? WHERE tenant_id=? AND account_id=? AND scope=?")
-        .run(snapshot.generation, claim.tenantId, claim.accountId, key);
-      this.sqlite.query("DELETE FROM sync_candidates WHERE tenant_id=? AND account_id=? AND scope=?").run(claim.tenantId, claim.accountId, key);
-      this.sqlite.query("DELETE FROM sync_seen WHERE tenant_id=? AND account_id=? AND scope=?").run(claim.tenantId, claim.accountId, key);
-    }
+    if (snapshot.phase !== "complete" && snapshot.phase !== "start-and-complete") return false;
+    const removed = this.sqlite.query(`DELETE FROM message_locations WHERE tenant_id=? AND account_id=? AND provider=? AND (? IS NULL OR mailbox=?)
+      AND EXISTS(SELECT 1 FROM sync_candidates candidate WHERE candidate.tenant_id=message_locations.tenant_id
+        AND candidate.account_id=message_locations.account_id AND candidate.location_id=message_locations.id
+        AND candidate.revision=message_locations.sync_revision AND candidate.scope=?)
+      AND id NOT IN (SELECT location_id FROM sync_seen WHERE tenant_id=? AND account_id=? AND scope=?)`)
+      .run(claim.tenantId, claim.accountId, claim.provider, snapshot.scope.kind === "mailbox" ? snapshot.scope.mailbox : null,
+        snapshot.scope.kind === "mailbox" ? snapshot.scope.mailbox : null, key, claim.tenantId, claim.accountId, key);
+    this.sqlite.query("UPDATE sync_scans SET completed_generation=? WHERE tenant_id=? AND account_id=? AND scope=?")
+      .run(snapshot.generation, claim.tenantId, claim.accountId, key);
+    this.sqlite.query("DELETE FROM sync_candidates WHERE tenant_id=? AND account_id=? AND scope=?").run(claim.tenantId, claim.accountId, key);
+    this.sqlite.query("DELETE FROM sync_seen WHERE tenant_id=? AND account_id=? AND scope=?").run(claim.tenantId, claim.accountId, key);
+    return removed.changes > 0;
   }
   #migrate(): void {
     const columns = this.sqlite.query("PRAGMA table_info(message_locations)").all() as Array<{ name: string }>;
@@ -448,6 +497,8 @@ export class SynchronizationStore {
           WHERE tenant_id=OLD.tenant_id AND account_id=OLD.account_id;
       END;
     `);
+    const scopeColumns = this.sqlite.query("PRAGMA table_info(sync_scopes)").all() as Array<{ name: string }>;
+    if (!scopeColumns.some(column => column.name === "expedited_at")) this.sqlite.exec("ALTER TABLE sync_scopes ADD COLUMN expedited_at INTEGER");
     const scanColumns = this.sqlite.query("PRAGMA table_info(sync_scans)").all() as Array<{ name: string }>;
     if (!scanColumns.some(column => column.name === "completed_generation")) {
       this.sqlite.exec("ALTER TABLE sync_scans ADD COLUMN completed_generation TEXT");

@@ -16,6 +16,8 @@ test("pages beyond 100 across accounts and searches unopened retained body conte
   try {
     await page.route("**/api/**", async route => {
       const url = new URL(route.request().url());
+      // route.fetch buffers whole responses, so it cannot relay the never-ending event stream.
+      if (url.pathname === "/api/events") return route.abort();
       await route.fulfill({ response: await route.fetch({ url: `${base}${url.pathname}${url.search}` }) });
     });
     await page.goto("/");

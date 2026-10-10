@@ -1,6 +1,7 @@
 import { mailboxQuerySchema } from "../shared/mailbox-query";
 import { zValidator } from "@hono/zod-validator";
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import {
   accountIdSchema,
@@ -51,6 +52,9 @@ const messageQuerySchema = z.object({
 const accountQuerySchema = z.object({ accountId: accountIdSchema });
 const readMessagesSchema = z.object({ references: z.array(messageRefSchema).min(1).max(100) });
 
+// Below Bun's configured idle timeout so a quiet event stream is not closed.
+const EVENT_KEEP_ALIVE_MS = 15_000;
+
 export interface ApiOptions {
   readonly oauthReturnUrl?: string | undefined;
   readonly discoverAccount?: DiscoverAccount;
@@ -77,6 +81,21 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         return context.redirect(oauthResultUrl(options.oauthReturnUrl, "error"));
       }
     })
+    .get("/events", (context) => streamSSE(context, async (stream) => {
+      const ignore = () => undefined;
+      const unsubscribe = service.synchronization.events.subscribe(event => {
+        void stream.writeSSE({ data: JSON.stringify(event) }).catch(ignore);
+      });
+      const keepAlive = setInterval(() => { void stream.write(": keep-alive\n\n").catch(ignore); }, EVENT_KEEP_ALIVE_MS);
+      keepAlive.unref();
+      try {
+        await stream.write(": connected\n\n");
+        await new Promise<void>(resolve => stream.onAbort(resolve));
+      } finally {
+        clearInterval(keepAlive);
+        unsubscribe();
+      }
+    }))
     .get("/synchronization", async (context) => context.json(await service.synchronizationStatus()))
     .post("/accounts/:accountId/synchronization/retry", zValidator("param", accountParamsSchema), async (context) =>
       context.json(await service.retrySynchronization(context.req.valid("param").accountId)))

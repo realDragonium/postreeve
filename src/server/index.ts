@@ -109,12 +109,14 @@ app.route("/", createApi(service, googleOAuth, {
 app.use("/*", serveStatic({ root: "./dist" }));
 app.get("/*", serveStatic({ path: "./dist/index.html" }));
 
-const server = Bun.serve({ hostname: serverConfig.hostname, port: serverConfig.port, fetch: app.fetch });
+// The mailbox event stream sends a keep-alive every 15 seconds, so idle connections must outlive that.
+const server = Bun.serve({ hostname: serverConfig.hostname, port: serverConfig.port, idleTimeout: 60, fetch: app.fetch });
 console.info(`Postreeve listening on http://${server.hostname}:${server.port}`);
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
-    void service.synchronization.stop().finally(() => { server.stop(); store.close(); });
+    // Open mailbox event streams never finish, so shutdown closes active connections instead of waiting for them.
+    void service.synchronization.stop().finally(() => { server.stop(true); store.close(); });
   });
 }
 

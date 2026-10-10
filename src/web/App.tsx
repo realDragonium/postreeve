@@ -37,8 +37,24 @@ import {
 import { migrateLocalDraftsOnce } from "./draft-state";
 import { migrateLocalIdentitiesOnce } from "./identities";
 import { useTheme } from "./theme";
+import type { MailboxEvent } from "../shared/mailbox-events";
+import { subscribeToMailboxEvents } from "./mailbox-events";
+import {
+  loadNotificationPreferences,
+  notificationsFor,
+  storeNotificationPreferences,
+  type NotificationAccess,
+  type NotificationPreferences,
+  type PlannedNotification,
+} from "./notifications";
 
 const folderPollIntervalMs = 15_000;
+/** Synchronization can commit several pages in a burst; refetch once per burst. */
+const mailboxEventCoalesceMs = 1_000;
+
+function notificationAccess(): NotificationAccess {
+  return typeof Notification === "undefined" ? "unsupported" : Notification.permission;
+}
 /** Below this the sidebar covers the list, so choosing a folder closes it again. */
 const narrowWidth = 900;
 const tabs = [["Mailbox", "mail"], ["Activity", "activity"], ["Settings", "settings"]] as const;
@@ -90,6 +106,9 @@ function App() {
   const [hiddenTools, setHiddenTools] = useState<ReadonlySet<string>>(loadHiddenTools);
   const [overlay, setOverlay] = useState<Overlay>(null);
   useEffect(() => storeHiddenTools(hiddenTools), [hiddenTools]);
+  const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>(() => loadNotificationPreferences(localStorage));
+  const [notificationPermission, setNotificationPermission] = useState<NotificationAccess>(notificationAccess);
+  useEffect(() => storeNotificationPreferences(localStorage, notificationPreferences), [notificationPreferences]);
 
   const toastTimer = useRef<number>(0);
   function flash(text: string): void {
@@ -343,6 +362,57 @@ function App() {
     setSelected(new Set());
     setLimit(50);
   }
+
+  async function enableNotifications(enabled: boolean): Promise<void> {
+    if (!enabled) {
+      setNotificationPreferences((current) => ({ ...current, enabled: false }));
+      return;
+    }
+    if (typeof Notification === "undefined") {
+      setNotificationPermission("unsupported");
+      return;
+    }
+    const permission = Notification.permission === "default" ? await Notification.requestPermission() : Notification.permission;
+    setNotificationPermission(permission);
+    if (permission === "granted") setNotificationPreferences((current) => ({ ...current, enabled: true }));
+  }
+
+  function openNotification({ accountId, mailbox, canonicalId }: PlannedNotification["open"]): void {
+    window.focus();
+    changeScope({ kind: "account", accountId, path: mailbox });
+    setQueryDraft("");
+    setQuery("");
+    setFilter("all");
+    if (canonicalId) setOpenKey(canonicalId);
+  }
+
+  // ── Mailbox events ──────────────────────────────────────────────────
+  const changedAccounts = useRef(new Set<string>());
+  const changeTimer = useRef<number>(0);
+  const handleMailboxEvent = useRef<(event: MailboxEvent) => void>(() => undefined);
+  handleMailboxEvent.current = (event) => {
+    changedAccounts.current.add(event.accountId);
+    window.clearTimeout(changeTimer.current);
+    changeTimer.current = window.setTimeout(() => {
+      const accountIds = [...changedAccounts.current];
+      changedAccounts.current.clear();
+      void queryClient.invalidateQueries({ queryKey: ["messages"] });
+      for (const accountId of accountIds) void queryClient.invalidateQueries({ queryKey: ["folders", accountId] });
+    }, mailboxEventCoalesceMs);
+    const account = accounts.find(({ id }) => id === event.accountId);
+    if (!account) return;
+    const planned = notificationsFor(event, notificationPreferences, {
+      access: notificationAccess(), focused: document.hasFocus(), accountLabel: account.email,
+    });
+    for (const { title, body, tag, open } of planned) {
+      const notification = new Notification(title, { body, tag });
+      notification.onclick = () => {
+        notification.close();
+        openNotification(open);
+      };
+    }
+  };
+  useEffect(() => subscribeToMailboxEvents((event) => handleMailboxEvent.current(event)), []);
 
   // ── WebMCP ──────────────────────────────────────────────────────────
   useEffect(() => {
@@ -657,6 +727,15 @@ function App() {
           themeMode={theme.mode}
           hiddenTools={hiddenTools}
           onThemePreference={theme.setPreference}
+          notificationPreferences={notificationPreferences}
+          notificationPermission={notificationPermission}
+          onEnableNotifications={(enabled) => void enableNotifications(enabled)}
+          onMuteAccount={(accountId, muted) => setNotificationPreferences((current) => ({
+            ...current,
+            mutedAccountIds: muted
+              ? [...new Set([...current.mutedAccountIds, accountId])]
+              : current.mutedAccountIds.filter((id) => id !== accountId),
+          }))}
           onToolExposure={(name, isExposed) => setHiddenTools((current) => {
             const next = new Set(current);
             if (isExposed) next.delete(name);

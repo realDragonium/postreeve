@@ -120,11 +120,15 @@ The web interface SHALL list each account's folders in the sidebar with the fold
 - **THEN** the Unified group shows no Spam row, while Inbox is always shown
 
 ### Requirement: Folder counts refresh while the page is open
-The web interface SHALL refetch every account's folder list every 15 seconds while the page is open, and after each mailbox action, undo, accepted proposal or sent message, so that counts reflect changes made elsewhere.
+The web interface SHALL refetch every account's folder list every 15 seconds while the page is open, after each mailbox action, undo, accepted proposal or sent message, and after a mailbox-change event for that account, so that counts reflect changes made elsewhere.
 
 #### Scenario: External change appears
 - **WHEN** a new message arrives in the Inbox from another client while Postreeve is open
 - **THEN** the Inbox counts update within about 15 seconds without a reload
+
+#### Scenario: Pushed change appears
+- **WHEN** the page receives a mailbox-change event for an account
+- **THEN** that account's folder list is requested again without waiting for the 15-second poll
 
 ### Requirement: The selected mailbox stays valid after folder changes
 When a folder change made through Manage folders affects the selected folder, the web interface SHALL keep a valid selection: after a rename it SHALL select the renamed folder, and after a delete it SHALL select another folder of that account. On first load it SHALL select the Unified Inbox when more than one account is connected, otherwise the only account's Inbox. Folder changes made by WebMCP tools follow agents/webmcp-tools.

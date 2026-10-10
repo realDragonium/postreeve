@@ -1432,10 +1432,32 @@ describe("IMAP synchronization", () => {
     inbox.messages.set(4, fakeMessage(4, 15n, "Arrived", "New", new Set()));
     inbox.nextUid = 5;
     inbox.highestModseq = 15n;
-    const changed = await page(provider, unchanged.cursor);
+    const arrived = await page(provider, unchanged.cursor);
+    expect(arrived.messages.map(message => message.ref.uid)).toEqual([4]);
+    expect(arrived.snapshots ?? []).toEqual([]);
+    const changed = await page(provider, arrived.cursor);
     expect(changed.messages.map(message => message.ref.uid)).toEqual([2, 4]);
     expect(changed.messages[0]).toMatchObject({ read: true, flagged: true });
-    expect(state.fetchRanges).toEqual([[2, 4]]);
+    expect(state.fetchRanges).toEqual([[4], [2, 4]]);
+  });
+
+  test("ingests new mail above a completed scan before rescanning the mailbox", async () => {
+    const state = fakeState();
+    const inbox = state.mailboxes.get("INBOX")!;
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    let cursor: string | null = null;
+    do cursor = (await page(provider, cursor, 1)).cursor;
+    while (JSON.parse(cursor!).scan !== null);
+    for (const uid of [4, 5, 6]) inbox.messages.set(uid, fakeMessage(uid, 20n, "Arrived", `New ${uid}`, new Set()));
+    inbox.nextUid = 7;
+    const first = await page(provider, cursor, 2);
+    expect(first.messages.map(message => message.ref.uid)).toEqual([4, 5]);
+    expect(first).toMatchObject({ hasMore: true, coverage: "complete" });
+    const second = await page(provider, first.cursor, 2);
+    expect(second.messages.map(message => message.ref.uid)).toEqual([6]);
+    const scan = await page(provider, second.cursor, 2);
+    expect(scan.messages.map(message => message.ref.uid)).toEqual([1, 2]);
+    expect(scan.snapshots?.[0]?.phase).toBe("start");
   });
 
   test.each(["absent", "nomodseq", "lost"])("falls back to summaries when MODSEQ is %s", async mode => {
