@@ -23,9 +23,14 @@ export class MailSendPreDispatchError extends Error {
   }
 }
 
+export interface SentMessage {
+  readonly receipt: SendReceipt;
+  readonly mime: Buffer;
+}
+
 export interface MailSender {
   verifyConnection(): Promise<void>;
-  send(input: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SendReceipt>;
+  send(input: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SentMessage>;
 }
 
 export class MailSenderRegistry {

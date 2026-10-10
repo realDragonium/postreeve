@@ -124,6 +124,7 @@ export interface MailProvider {
   createFolder(accountId: string, name: string): Promise<void>;
   renameFolder(accountId: string, path: string, name: string): Promise<void>;
   deleteFolder(accountId: string, path: string): Promise<void>;
+  appendSentMessage?(accountId: string, mime: Buffer, sentAt: string): Promise<ProviderMessageSummary | null>;
   createDraft(scope: ProviderDraftScope, draft: ProviderDraftInput): Promise<ProviderDraftRef>;
   updateDraft(scope: ProviderDraftScope, draft: ProviderDraftInput, ref: ProviderDraftRef): Promise<ProviderDraftRef>;
   listDrafts(scope: ProviderDraftScope): Promise<ProviderDraft[]>;

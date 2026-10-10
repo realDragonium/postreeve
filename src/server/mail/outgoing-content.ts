@@ -1,3 +1,4 @@
+import { domainToASCII } from "node:url";
 import MailComposer from "nodemailer/lib/mail-composer";
 import type { Attachment, Options } from "nodemailer/lib/mailer";
 import { MailSendPreDispatchError } from "./sender";
@@ -15,6 +16,11 @@ export interface OutgoingAttachment {
 export interface OutgoingContent {
   readonly files?: readonly OutgoingAttachment[];
   readonly maxMessageBytes?: number;
+}
+
+export function outgoingMessageId(fromAddress: string): string {
+  const domain = domainToASCII(fromAddress.slice(fromAddress.lastIndexOf("@") + 1).toLowerCase());
+  return `<${crypto.randomUUID()}@${domain || "localhost"}>`;
 }
 
 export function positiveByteLimit(value: number): number {

@@ -1,5 +1,6 @@
 import { createServer } from "node:net";
 import { MailSendPreDispatchError } from "../src/server/mail/sender";
+import { outgoingMessageId } from "../src/server/mail/outgoing-content";
 import { createEmptyTestHarness, testAccountInput } from "./support/test-mail";
 import { simpleParser } from "mailparser";
 import { describe, expect, spyOn, test } from "bun:test";
@@ -47,7 +48,7 @@ describe("Bun Nodemailer compatibility", () => {
       return transport;
     });
 
-    const receipt = await sender.send(messageInput());
+    const { receipt, mime } = await sender.send(messageInput());
 
     expect(transportOptions).toMatchObject({
       host: smtpConfig.host,
@@ -67,6 +68,8 @@ describe("Bun Nodemailer compatibility", () => {
     expect(parsed.text).toBe("The plain-text body.");
     expect(parsed.bcc).toBeUndefined();
     expect(parsed.from?.value[0]?.address).toBe(smtpConfig.fromAddress);
+    expect(parsed.messageId).toMatch(/^<[0-9a-f-]{36}@example\.test>$/);
+    expect(mime.equals(submitted.raw)).toBe(true);
     expect(submitted.disableFileAccess).toBe(true);
     expect(submitted.disableUrlAccess).toBe(true);
     expect(receipt).toMatchObject({
@@ -76,6 +79,11 @@ describe("Bun Nodemailer compatibility", () => {
       rejected: ["hidden@example.test"],
     });
     expect(Date.parse(receipt.submittedAt)).not.toBeNaN();
+  });
+
+  test("outgoing Message-IDs use the sender's lower-cased ASCII domain", () => {
+    expect(outgoingMessageId("Person@Example.TEST")).toMatch(/^<[0-9a-f-]{36}@example\.test>$/);
+    expect(outgoingMessageId("person@bücher.example")).toMatch(/@xn--bcher-kva\.example>$/);
   });
 
   test("validates direct sender input before calling the transport", async () => {
@@ -91,7 +99,7 @@ describe("Bun Nodemailer compatibility", () => {
     const transport = new FakeSmtpTransport(deliveredResult());
     const sender = new SmtpMailSender(smtpConfig, () => transport);
 
-    const receipt = await sender.send(messageInput(), {
+    const { receipt } = await sender.send(messageInput(), {
       type: "reply_all",
       sourceMessageId: "canonical-parent",
       conversationId: "conversation-parent",

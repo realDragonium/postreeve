@@ -1232,6 +1232,7 @@ test("shows and selects a newly connected account without a reload", async ({ pa
   const personal: Account = { id: "account-personal", name: "Personal", email: "person@example.com", kind: "imap" };
   const work: Account = { id: "account-new-work", name: "New work", email: "person@work.example", kind: "imap" };
   let created = false;
+  let saveSentCopy: boolean | undefined;
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -1240,7 +1241,7 @@ test("shows and selects a newly connected account without a reload", async ({ pa
     if (method === "GET" && url.pathname === "/api/accounts") return json(route, created ? [personal, work] : [personal]);
     if (method === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
     if (method === "POST" && url.pathname === "/api/accounts") {
-      createAccountInputSchema.parse(request.postDataJSON());
+      saveSentCopy = createAccountInputSchema.parse(request.postDataJSON()).saveSentCopy;
       created = true;
       return json(route, work, 201);
     }
@@ -1258,7 +1259,11 @@ test("shows and selects a newly connected account without a reload", async ({ pa
   await page.getByRole("button", { name: "Add account" }).click();
   await page.getByLabel("Name", { exact: true }).fill(work.name);
   await page.getByLabel("Email address").fill(work.email);
+  const saveCopy = page.getByLabel("Save a copy to Sent");
+  await page.getByLabel("IMAP host").fill("imap.gmail.com");
+  await expect(saveCopy).not.toBeChecked();
   await page.getByLabel("IMAP host").fill("imap.work.example");
+  await expect(saveCopy).toBeChecked();
   await page.getByLabel("Username").first().fill(work.email);
   await page.getByLabel(/Password/).first().fill("incoming-password");
   await page.getByRole("button", { name: "Connect account" }).click();
@@ -1266,6 +1271,7 @@ test("shows and selects a newly connected account without a reload", async ({ pa
   await expect(page.getByText(work.email, { exact: true })).toBeVisible();
   await expect(page.getByText(`${work.email} · Inbox`, { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Unified" })).toBeVisible();
+  expect(saveSentCopy).toBe(true);
 });
 
 test("starts with real account onboarding when no mailbox is connected", async ({ page }) => {

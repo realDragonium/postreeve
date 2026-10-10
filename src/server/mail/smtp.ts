@@ -1,4 +1,4 @@
-import { composeMime, type OutgoingContent } from "./outgoing-content";
+import { composeMime, outgoingMessageId, type OutgoingContent } from "./outgoing-content";
 import { MailSendPreDispatchError } from "./sender";
 import { createTransport } from "nodemailer";
 import type { SendMailOptions } from "nodemailer";
@@ -9,9 +9,8 @@ import {
   sendMessageInputSchema,
   sendReceiptSchema,
   type SendMessageInput,
-  type SendReceipt,
 } from "../../shared/contracts";
-import type { ConversationSendContext, MailSender } from "./sender";
+import type { ConversationSendContext, MailSender, SentMessage } from "./sender";
 
 const smtpAccountConfigSchema = z.object({
   accountId: z.string().min(1),
@@ -77,12 +76,12 @@ export class SmtpMailSender implements MailSender {
     if (!verified) throw new Error("SMTP server rejected the connection");
   }
 
-  async send(rawInput: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SendReceipt> {
+  async send(rawInput: SendMessageInput, context?: ConversationSendContext, content?: OutgoingContent): Promise<SentMessage> {
     const input = sendMessageInputSchema.parse(rawInput);
     this.#assertAccount(input.accountId);
     const reply = context?.type === "reply" || context?.type === "reply_all" ? context : undefined;
 
-    const messageId = `<${crypto.randomUUID()}@postreeve.local>`;
+    const messageId = outgoingMessageId(this.#config.fromAddress);
     const submittedAt = new Date().toISOString();
     let raw: Buffer;
     try {
@@ -119,7 +118,7 @@ export class SmtpMailSender implements MailSender {
       throw error;
     }
 
-    return sendReceiptSchema.parse({
+    const receipt = sendReceiptSchema.parse({
       id: crypto.randomUUID(),
       accountId: this.#config.accountId,
       messageId: result.messageId,
@@ -127,6 +126,7 @@ export class SmtpMailSender implements MailSender {
       rejected: result.rejected.map(deliveryAddress),
       submittedAt,
     });
+    return { receipt, mime: raw };
   }
 
   #assertAccount(accountId: string): void {

@@ -221,6 +221,7 @@ export const createAccountInputSchema = z.object({
   smtpSecure: z.boolean(),
   smtpUsername: z.string().min(1),
   smtpPassword: z.string().min(1),
+  saveSentCopy: z.boolean().optional(),
 });
 
 export const accountSettingsSchema = z.object({
@@ -236,9 +237,11 @@ export const accountSettingsSchema = z.object({
   smtpPort: z.number().int().min(1).max(65535),
   smtpSecure: z.boolean(),
   smtpUsername: z.string().min(1),
+  saveSentCopy: z.boolean(),
 });
 
 export const updateAccountInputSchema = accountSettingsSchema.omit({ id: true, kind: true }).extend({
+  saveSentCopy: z.boolean().optional(),
   password: z.string().min(1).optional(),
   smtpPassword: z.string().min(1).optional(),
 });

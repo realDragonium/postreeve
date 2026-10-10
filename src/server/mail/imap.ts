@@ -200,6 +200,20 @@ export class ImapMailProvider implements MailProvider {
     });
   }
 
+  async appendSentMessage(accountId: string, mime: Buffer, sentAt: string): Promise<ProviderMessageSummary | null> {
+    this.#assertAccount(accountId);
+    return this.#withClient(async (client) => {
+      const mailbox = await findSentMailbox(client);
+      const appended = await client.append(mailbox, mime, [SEEN_FLAG], new Date(sentAt));
+      if (!appended) throw new Error("IMAP server refused to store the sent copy");
+      if (appended.uid === undefined || appended.uidValidity === undefined) return null;
+      const opened = await client.mailboxOpen(mailbox, { readOnly: true });
+      if (opened.uidValidity !== appended.uidValidity) return null;
+      const [summary] = await this.#fetchSummaries(client, opened, [appended.uid], true);
+      return summary ?? null;
+    });
+  }
+
   async createDraft(scope: ProviderDraftScope, draft: ProviderDraftInput): Promise<ProviderDraftRef> {
     this.#assertDraftScope(scope, draft);
     return this.#withClient((client) => this.#replaceDraft(client, scope, draft));
@@ -806,6 +820,13 @@ async function findDraftsMailbox(client: ImapClient): Promise<string> {
   const drafts = mailboxes.find((mailbox) => specialUseFor(mailbox) === "drafts" && !hasFlag(mailbox.flags, "\\Noselect"));
   if (!drafts) throw new Error("This account has no discoverable special-use Drafts mailbox");
   return drafts.path;
+}
+
+async function findSentMailbox(client: ImapClient): Promise<string> {
+  const mailboxes = await client.list();
+  const sent = mailboxes.find((mailbox) => specialUseFor(mailbox) === "sent" && !hasFlag(mailbox.flags, "\\Noselect"));
+  if (!sent) throw new Error("This account has no discoverable special-use Sent mailbox");
+  return sent.path;
 }
 
 function assertLimit(limit: number): void {

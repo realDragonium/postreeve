@@ -12,6 +12,7 @@ import type {
   SendReceipt,
   UpdateAccountInput,
 } from "../shared/contracts";
+import { defaultSaveSentCopy } from "../shared/sent-copy";
 import { api } from "./api";
 import {
   addressList,
@@ -715,6 +716,8 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
   const [smtpHostEdited, setSmtpHostEdited] = useState(false);
   const [smtpUsernameEdited, setSmtpUsernameEdited] = useState(false);
   const [smtpPasswordEdited, setSmtpPasswordEdited] = useState(false);
+  const [saveSentCopy, setSaveSentCopy] = useState(true);
+  const [saveSentCopyEdited, setSaveSentCopyEdited] = useState(false);
   const [confirmRemoval, setConfirmRemoval] = useState(false);
   const connectionFieldsComplete = [name, email, host, port, username, smtpHost, smtpPort, smtpUsername]
     .every((value) => value.trim().length > 0)
@@ -744,6 +747,7 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
     setSmtpPort(String(settings.smtpPort));
     setSmtpSecure(settings.smtpSecure);
     setSmtpUsername(settings.smtpUsername);
+    setSaveSentCopy(settings.saveSentCopy);
   }, [settingsQuery.data]);
 
   function updateInput(): UpdateAccountInput {
@@ -752,6 +756,7 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
       username: username.trim(), ...(password ? { password } : {}),
       smtpHost: smtpHost.trim(), smtpPort: Number(smtpPort), smtpSecure,
       smtpUsername: smtpUsername.trim(), ...(smtpPassword ? { smtpPassword } : {}),
+      saveSentCopy,
     };
   }
   function createInput(): CreateAccountInput {
@@ -837,7 +842,7 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
       <fieldset>
         <legend>Incoming mail (IMAP)</legend>
         <div className="field-grid">
-          <label className="field"><span className="field-label">IMAP host</span><input className="input" required value={host} placeholder="imap.example.com" onChange={(event) => { const value = event.target.value; setHost(value); if (!smtpHostEdited) setSmtpHost(value.replace(/^imap\./i, "smtp.")); }} /></label>
+          <label className="field"><span className="field-label">IMAP host</span><input className="input" required value={host} placeholder="imap.example.com" onChange={(event) => { const value = event.target.value; setHost(value); if (!smtpHostEdited) setSmtpHost(value.replace(/^imap\./i, "smtp.")); if (!accountId && !saveSentCopyEdited) setSaveSentCopy(defaultSaveSentCopy(value)); }} /></label>
           <label className="field"><span className="field-label">Port</span><input className="input" required type="number" min="1" max="65535" value={port} onChange={(event) => setPort(event.target.value)} /></label>
         </div>
         <label className="check" style={{ marginTop: 10 }}><input type="checkbox" checked={secure} onChange={(event) => setSecure(event.target.checked)} /><span>Use a secure TLS connection</span></label>
@@ -858,6 +863,8 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
           <label className="field"><span className="field-label">Username</span><input className="input" required autoComplete="username" value={smtpUsername} onChange={(event) => { setSmtpUsernameEdited(true); setSmtpUsername(event.target.value); }} /></label>
           <label className="field"><span className="field-label">Password {accountId ? "(leave blank to keep current)" : ""}</span><input className="input" required={!accountId} type="password" autoComplete="current-password" value={smtpPassword} onChange={(event) => { setSmtpPasswordEdited(true); setSmtpPassword(event.target.value); }} /></label>
         </div>
+        <label className="check" style={{ marginTop: 10 }}><input type="checkbox" checked={saveSentCopy} onChange={(event) => { setSaveSentCopyEdited(true); setSaveSentCopy(event.target.checked); }} /><span>Save a copy to Sent</span></label>
+        <p className="t-dim" style={{ margin: "6px 0 0" }}>Turn this off if your provider already files sent mail, as Gmail and Outlook do, to avoid duplicates.</p>
       </fieldset>
       {testMutation.isSuccess ? <div className="alert">IMAP and SMTP connections succeeded.</div> : null}
       {testMutation.isError ? <div className="alert error">{testMutation.error.message}</div> : null}

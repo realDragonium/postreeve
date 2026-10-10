@@ -17,6 +17,7 @@ export const smtpCredentialsSchema = z.object({
   secure: z.boolean(),
   username: z.string().min(1),
   password: z.string().min(1),
+  saveSentCopy: z.boolean().optional(),
 });
 
 export const imapAccountCredentialsSchema = z.object({
