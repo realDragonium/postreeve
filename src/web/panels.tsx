@@ -27,6 +27,7 @@ import {
 import type { ComposeMode } from "./mail-ui-state";
 import { defaultFromAddress, ownAddresses } from "./identities";
 import { DraftSaveQueue } from "./draft-state";
+import { RecipientInput } from "./RecipientInput";
 
 export interface ComposeIntent {
   readonly mode: ComposeMode;
@@ -666,10 +667,10 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
         {identityOptions.map((identity) => <option value={identity.address} key={identity.address}>{identity.name} · {identity.address}</option>)}
       </select>
     </label>
-    <label className="field"><span className="field-label">To</span><input className="input" autoFocus required aria-label="To" placeholder="person@example.com, team@example.com" value={to} disabled={formBusy} onChange={(event) => { edited.current.to = true; setTo(event.target.value); }} /></label>
+    <RecipientInput label="To" autoFocus required placeholder="person@example.com, team@example.com" value={to} disabled={formBusy} onChange={(value) => { edited.current.to = true; setTo(value); }} />
     <div className="field-grid">
-      <label className="field"><span className="field-label">Cc</span><input className="input" aria-label="Cc" value={cc} disabled={formBusy} onChange={(event) => { edited.current.cc = true; setCc(event.target.value); }} /></label>
-      <label className="field"><span className="field-label">Bcc</span><input className="input" aria-label="Bcc" value={bcc} disabled={formBusy} onChange={(event) => { edited.current.bcc = true; setBcc(event.target.value); }} /></label>
+      <RecipientInput label="Cc" value={cc} disabled={formBusy} onChange={(value) => { edited.current.cc = true; setCc(value); }} />
+      <RecipientInput label="Bcc" value={bcc} disabled={formBusy} onChange={(value) => { edited.current.bcc = true; setBcc(value); }} />
     </div>
     <label className="field"><span className="field-label">Subject</span><input className="input" maxLength={998} aria-label="Subject" value={subject} disabled={formBusy} onChange={(event) => setSubject(event.target.value)} /></label>
     <label className="field"><span className="field-label">Message</span><textarea className="input" required rows={12} maxLength={2_000_000} aria-label="Message" value={body} disabled={formBusy} onChange={(event) => setBody(event.target.value)} /></label>

@@ -87,6 +87,7 @@ Every WebMCP mutation revalidates the stable message reference, records an audit
 | Add Cc recipients | Complete | Complete | `send_message.cc` |
 | Add Bcc recipients | Complete | Complete | `send_message.bcc` |
 | Validate recipient addresses | Complete | Complete | UI and WebMCP inputs reject invalid addresses. |
+| Suggest recipients from mail history | Complete | Not covered | To, Cc and Bcc suggest addresses from synchronized headers across all accounts, ranked by sends, then received mail and recency, without your own addresses. Arrow keys move, Enter or Tab accepts, Escape closes. Local data only; `send_message` takes explicit addresses. |
 | Show accepted and rejected recipients | Complete | Complete | Returned in the send receipt. |
 | Keep a copy of IMAP/SMTP sends in Sent | Complete | Complete | `send_message` uses the same send path. The per-account **Save a copy to Sent** setting is UI-only and starts off for Gmail and Outlook hosts, which file sent mail themselves. |
 | Require approval before an agent sends real mail | Not applicable | Complete contract requirement | The `send_message` description requires explicit approval of recipients, subject, and message before invocation. |
@@ -140,7 +141,7 @@ These features are not provider-backed today. Whether and how they should be exp
 | Request human reauthorization instructions | Complete | Complete | `request_reauthorization`; consent and credentials stay in the human authorization flow. |
 | Receive new mail promptly | Complete | Not applicable | IMAP accounts hold one IDLE connection on INBOX and synchronize it as soon as the server reports a change, falling back to the 60-second poll without IDLE. Gmail history is polled every 20 seconds. |
 | Desktop notifications for new mail | Complete | Not applicable | **Settings → Notifications** turns notifications on and mutes accounts. Unread Inbox arrivals notify while the window is in the background; clicking opens the message. Backfill and repair do not notify. Page-local presentation, not an agent workflow. |
-| Bounded preview/body retention | Complete | Complete | Defaults to 30 days since refresh and 100 MiB per account. Retained preview and searchable body text expire together. Headers, locations, canonical identities and workflow history remain retained; this is not a total database-size limit. |
+| Bounded preview/body retention | Complete | Complete | Defaults to 30 days since refresh and 100 MiB per account. Retained preview and searchable body text expire together. Headers, locations, canonical identities and workflow history remain retained, so recipient suggestions survive preview expiry and disappear only when the message leaves the index or its account is removed; this is not a total database-size limit. |
 
 ## Current WebMCP tool set
 

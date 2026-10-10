@@ -33,6 +33,16 @@ export const createIdentityInputSchema = z.object({
   address: z.email().transform((address) => address.toLowerCase()),
 });
 
+export const recipientSuggestionSchema = z.object({
+  name: z.string(),
+  address: z.string().min(1),
+});
+
+export const recipientSuggestionQuerySchema = z.object({
+  q: z.string().trim().min(1).max(100),
+  limit: z.coerce.number().int().min(1).max(20).default(8),
+});
+
 export const folderSchema = z.object({
   path: z.string().min(1),
   name: z.string().min(1),
@@ -475,6 +485,8 @@ export type ConnectionTestResult = z.infer<typeof connectionTestResultSchema>;
 export type OutboundAddress = z.infer<typeof outboundAddressSchema>;
 export type Identity = z.infer<typeof identitySchema>;
 export type CreateIdentityInput = z.input<typeof createIdentityInputSchema>;
+export type RecipientSuggestion = z.infer<typeof recipientSuggestionSchema>;
+export type RecipientSuggestionQuery = z.input<typeof recipientSuggestionQuerySchema>;
 export type ConversationSendSource = z.infer<typeof conversationSendSourceSchema>;
 export type SendMessageIntent = z.infer<typeof sendMessageIntentSchema>;
 export type SendMessageInput = z.infer<typeof sendMessageInputSchema>;
