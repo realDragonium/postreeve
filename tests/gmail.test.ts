@@ -236,6 +236,31 @@ describe("Gmail compatibility", () => {
     expect(labels).toEqual(["UNREAD", "INBOX"]);
   });
 
+  test("spam and archive from a label view keep the label and undo restores INBOX", async () => {
+    let labels = ["INBOX", "Label_1"];
+    const request: HttpFetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.hostname === "oauth2.googleapis.com") return json({ access_token: "fixture", expires_in: 3600 });
+      if (url.pathname.endsWith("/modify")) {
+        const change = z.object({ addLabelIds: z.array(z.string()), removeLabelIds: z.array(z.string()) }).parse(JSON.parse(String(init?.body)));
+        labels = [...new Set([...labels.filter(label => !change.removeLabelIds.includes(label)), ...change.addLabelIds])];
+      }
+      return json({ id: "labelled", threadId: "thread", labelIds: labels, historyId: "1", internalDate: "1788000000000" });
+    };
+    const client = new GmailMailClient({ account, credentials: { kind: "gmail", refreshToken: "token" }, clientId: "client", fetch: request });
+    const ref = { accountId: account.id, mailbox: "Label_1", uidValidity: "gmail", uid: 1, modseq: null, providerId: "labelled" };
+
+    const spam = await client.apply(ref, { type: "move", destination: "SPAM" });
+    expect(labels.toSorted()).toEqual(["Label_1", "SPAM"]);
+    await client.undo(spam);
+    expect(labels.toSorted()).toEqual(["INBOX", "Label_1"]);
+
+    const archived = await client.apply(ref, { type: "move", destination: "__archive__" });
+    expect(labels).toEqual([]);
+    await client.undo(archived);
+    expect(labels.toSorted()).toEqual(["INBOX", "Label_1"]);
+  });
+
   test("lists ordinary files from MIME metadata and fetches bytes only on download", async () => {
     const requests: string[] = [];
     const external = Buffer.from("file!");

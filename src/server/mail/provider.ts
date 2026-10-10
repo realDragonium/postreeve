@@ -92,6 +92,8 @@ export interface AppliedMailAction {
   previousRead: boolean;
   /** Recorded by `flag` and `unflag`, the only actions whose undo needs it. */
   previousFlagged?: boolean;
+  /** Recorded by Gmail moves, whose undo restores `INBOX` when the message carried it. */
+  previousInInbox?: boolean;
 }
 
 export interface ProviderLocationMove {

@@ -1231,7 +1231,7 @@ test("reports spam and unsubscribes only after confirmation", async ({ page }) =
   await page.keyboard.press("Control+!");
   await page.keyboard.press("!");
   await expect.poll(() => applied).toEqual([JSON.stringify([{ type: "move", destination: "Junk" }])]);
-  await expect(page.getByText("Moved 1 to Junk", { exact: true })).toBeVisible();
+  await expect(page.getByText("Moved 1 to Spam", { exact: true })).toBeVisible();
 
   await page.keyboard.press("Enter");
   await expect(page.getByRole("button", { name: "Spam", exact: true })).toBeEnabled();

@@ -433,7 +433,8 @@ export class GmailMailClient implements MailProvider, MailSender {
         break;
       case "move": {
         const add = action.destination === GMAIL_ARCHIVE ? [] : [action.destination];
-        const remove = reference.mailbox === GMAIL_ARCHIVE
+        // Like Gmail's own Report spam, spam keeps user labels and only leaves the inbox.
+        const remove = reference.mailbox === GMAIL_ARCHIVE || action.destination === "SPAM"
           ? []
           : [reference.mailbox];
         if ((action.destination === GMAIL_ARCHIVE || action.destination === "SPAM") && !remove.includes("INBOX")) remove.push("INBOX");
@@ -449,6 +450,7 @@ export class GmailMailClient implements MailProvider, MailSender {
       action,
       previousRead,
       ...(action.type === "flag" || action.type === "unflag" ? { previousFlagged: before.labelIds.includes("STARRED") } : {}),
+      ...(action.type === "move" ? { previousInInbox: before.labelIds.includes("INBOX") } : {}),
     };
   }
 
@@ -472,7 +474,7 @@ export class GmailMailClient implements MailProvider, MailSender {
       case "move": {
         const add = applied.previous.mailbox === GMAIL_ARCHIVE ? [] : [applied.previous.mailbox];
         const remove = applied.current.mailbox === GMAIL_ARCHIVE ? [] : [applied.current.mailbox];
-        if (applied.current.mailbox === GMAIL_ARCHIVE && applied.previous.mailbox === "INBOX") add.push("INBOX");
+        if ((applied.previousInInbox ?? applied.previous.mailbox === "INBOX") && !add.includes("INBOX")) add.push("INBOX");
         await this.#modify(id, add, remove.filter((label) => !add.includes(label)));
         return null;
       }

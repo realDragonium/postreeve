@@ -32,6 +32,20 @@ The system SHALL apply a direct action request to exactly one account. Every ite
 - **WHEN** a person archives a selection containing messages from two accounts in the unified view
 - **THEN** the UI sends two requests, one per account, and records one batch for each
 
+### Requirement: Folder actions resolve per message in the UI
+For Archive, Spam and Not spam on a selection, the UI SHALL resolve each message's destination from its own account's folders and SHALL skip messages for which the action is a no-op: already in the archive folder for Archive, already in the junk folder for Spam, and outside the junk folder for Not spam. The status SHALL read `Moved <n> to Archive`, `Moved <n> to Spam` or `Moved <n> to Inbox` with the number moved.
+
+#### Scenario: Unified spam across a Gmail and an IMAP account
+- **WHEN** a person selects a Gmail and an IMAP inbox message in the unified Inbox and presses `!`
+- **THEN** the Gmail request moves its message to `SPAM` and the IMAP request moves its message to that account's `\Junk` mailbox
+
+### Requirement: A failing account does not lose the others' undo
+When the UI sends one request per account and some of them fail, it SHALL still record an undo entry holding the batches that were created and SHALL report the number of failed accounts and their errors in the status. Only when every request fails SHALL the action be reported as a failure without an undo entry.
+
+#### Scenario: One account's request fails
+- **WHEN** a selection spans two accounts and the request for one of them fails
+- **THEN** the other account's batch is added to the undo list and the status names the failure
+
 ### Requirement: Stable references are revalidated before each action
 Before applying each item the system SHALL revalidate its reference against the provider: for IMAP the folder's UIDVALIDITY MUST match, the UID MUST exist and, when the reference carries a `modseq`, the message's MODSEQ MUST equal it; for Gmail the message MUST exist and, when the reference carries a `modseq`, its `historyId` MUST equal it. An item that fails revalidation SHALL be recorded as `failed` with error `Message is stale, changed, or missing` and its message SHALL NOT be changed.
 
@@ -74,11 +88,15 @@ The system SHALL apply `move` by moving the message to the folder path in `desti
 - **THEN** the operation is `applied` with an `error` warning and the batch can still be undone
 
 ### Requirement: Archive is a move to the account's archive folder
-The system SHALL treat archiving as a `move` to the account's folder whose `specialUse` is `archive`; there SHALL be no separate archive action. For Gmail, the archive folder is the synthetic path `__archive__`, and moving there removes the `INBOX` label and the source label. The UI SHALL disable its Archive control when the account has no archive folder, and the `e` shortcut SHALL show `This account has no Archive folder.` instead of acting.
+The system SHALL treat archiving as a `move` to the account's folder whose `specialUse` is `archive`; there SHALL be no separate archive action. For Gmail, the archive folder is the synthetic path `__archive__`, and moving there removes `INBOX` and the source label, which undo restores as the message carried them. The UI SHALL disable Archive when no targeted account has an archive folder, and `e` SHALL then show `This account has no Archive folder.` instead of acting.
 
 #### Scenario: Archive with the keyboard
 - **WHEN** a person presses `e` on a focused message in an account with an archive folder
 - **THEN** the UI sends a `move` action whose `destination` is that folder's path
+
+#### Scenario: Undo a Gmail archive from a label
+- **WHEN** a person archives a Gmail message carrying `INBOX` and `Clients` from the `Clients` view and undoes it
+- **THEN** the message carries `INBOX` and `Clients` again
 
 #### Scenario: Account without an archive folder
 - **WHEN** the open message's account has no folder with `specialUse` `archive`
@@ -151,18 +169,22 @@ The system SHALL treat Spam as a `move` to the account's folder whose `specialUs
 - **THEN** the message returns to the folder it was moved from
 
 ### Requirement: Gmail spam label handling
-For Gmail, moving a message to `SPAM` SHALL add the `SPAM` label and remove the source label and `INBOX`; moving it from `SPAM` to `INBOX` SHALL add `INBOX` and remove `SPAM`.
+For Gmail, moving a message to `SPAM` SHALL add the `SPAM` label and remove only `INBOX`, keeping user labels as Gmail's own Report spam does; undoing it SHALL remove `SPAM` and restore `INBOX` when the message carried it. Moving a message from `SPAM` to `INBOX` SHALL add `INBOX` and remove `SPAM`.
 
 #### Scenario: Gmail inbox message reported as spam
 - **WHEN** a person chooses Spam for a Gmail message in `INBOX`
 - **THEN** the message gains `SPAM` and loses `INBOX`
+
+#### Scenario: Gmail spam from a label view and undo
+- **WHEN** a person reports a Gmail message carrying `INBOX` and `Clients` as spam from the `Clients` view, then undoes it
+- **THEN** the message first carries `SPAM` and `Clients`, and after the undo `INBOX` and `Clients`
 
 #### Scenario: Gmail not spam
 - **WHEN** a person chooses Not spam for a Gmail message in `SPAM`
 - **THEN** the message gains `INBOX` and loses `SPAM`
 
 ### Requirement: Spam controls in the UI
-The reader and the selection toolbar SHALL offer Spam, labelled Not spam when the open message (or, for the selection, the first selected message) is in the junk folder. Spam SHALL be disabled with the title `This account has no Junk folder` when the account has none.
+The reader and the selection toolbar SHALL offer Spam, labelled Not spam when the open message (or, for the selection, the first selected message) is in the junk folder. Spam SHALL be disabled with the title `This account has no Junk folder` when no targeted message's account has one.
 
 #### Scenario: Not spam from the reader
 - **WHEN** a person opens a message in the junk folder and chooses Not spam
@@ -172,12 +194,16 @@ The reader and the selection toolbar SHALL offer Spam, labelled Not spam when th
 - **WHEN** the open message's account has no folder with `specialUse` `junk`
 - **THEN** the Spam button is disabled with the title `This account has no Junk folder`
 
+#### Scenario: Not spam on a mixed selection
+- **WHEN** the first selected message is in the junk folder, another selected message is in the inbox, and the person chooses Not spam
+- **THEN** only the junk message is moved to its account's inbox and the inbox message is left in place
+
 ### Requirement: Spam keyboard shortcut
-The `!` shortcut SHALL send Not spam when the open or focused message is in the junk folder and Spam otherwise, applied to the selection or else that message. It SHALL show `This account has no Junk folder.` instead of acting when there is none, and like other shortcuts it SHALL be ignored with Command, Control or Alt held and while typing.
+The `!` shortcut SHALL send Not spam when the open or focused message is in the junk folder and Spam otherwise, applied to the selection or else that message, resolved per message as for the selection toolbar. It SHALL show `This account has no Junk folder.` instead of acting when no message can be moved because its account has none, and like other shortcuts it SHALL be ignored with Command, Control or Alt held and while typing.
 
 #### Scenario: Spam with the keyboard
 - **WHEN** a person presses `!` on a focused inbox message in an account with a junk folder
-- **THEN** the UI sends a `move` whose `destination` is the junk folder's path
+- **THEN** the UI sends a `move` whose `destination` is the junk folder's path and the status reads `Moved 1 to Spam`
 
 #### Scenario: Modifier held
 - **WHEN** a person presses `!` with Control held
