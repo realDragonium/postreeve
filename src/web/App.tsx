@@ -21,6 +21,7 @@ import {
   messageMatchesKey,
   mergeMessages,
   scopeSources,
+  spamToggle,
   specialUseName,
   type Scope,
 } from "./mail-view";
@@ -467,6 +468,13 @@ function App() {
         const archive = folders.find((folder) => folder.specialUse === "archive");
         if (archive) applyTo(targets, { type: "move", destination: archive.path });
         else flash("This account has no Archive folder.");
+      }
+      if (event.key === "!") {
+        event.preventDefault();
+        const targets = targetsFor(current);
+        const spam = spamToggle(current, foldersByAccount.get(current.ref.accountId) ?? []);
+        if (spam.action) applyTo(targets, spam.action);
+        else flash("This account has no Junk folder.");
       }
       if (event.key === "u") {
         event.preventDefault();

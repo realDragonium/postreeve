@@ -23,6 +23,7 @@ const shortcuts: readonly (readonly [string, string])[] = [
   ["⌘-click", "add one message to the selection"],
   ["shift-click", "select a range"],
   ["e", "archive the selection"],
+  ["!", "move the selection to Spam, or out of Spam"],
   ["u", "toggle read and unread"],
   ["/", "focus the search box"],
   ["[", "hide or show the sidebar"],

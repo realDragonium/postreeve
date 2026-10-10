@@ -1,4 +1,5 @@
 import type { SynchronizationOptions } from "../../src/server/sync/runner";
+import type { UnsubscribeFetch } from "../../src/server/mail/unsubscribe";
 import { simpleParser, type AddressObject } from "mailparser";
 import { composeMime, type OutgoingContent } from "../../src/server/mail/outgoing-content";
 import {
@@ -91,6 +92,7 @@ interface TestHarnessOptions {
     references: string[];
   };
   readOverrides?: Partial<ProviderMessageDetail>;
+  unsubscribeFetch?: UnsubscribeFetch;
   onDraftMirror?: (draft: Draft) => void | Promise<void>;
   onDraftUpdate?: (draft: Draft, ref: ProviderDraftRef) => void | Promise<void>;
   rotateDraftRefOnUpdate?: boolean;
@@ -130,7 +132,8 @@ export async function createEmptyTestHarness(options: TestHarnessOptions = {}) {
     store,
     { tenantId, ...(options.synchronization ? { synchronization: options.synchronization } : {}), ...(options.maxAttachmentBytes === undefined ? {} : { maxAttachmentBytes: options.maxAttachmentBytes }),
       ...(options.maxUploadBytes === undefined ? {} : { maxUploadBytes: options.maxUploadBytes }),
-      ...(options.maxMessageBytes === undefined ? {} : { maxMessageBytes: options.maxMessageBytes }) },
+      ...(options.maxMessageBytes === undefined ? {} : { maxMessageBytes: options.maxMessageBytes }),
+      ...(options.unsubscribeFetch ? { unsubscribeFetch: options.unsubscribeFetch } : {}) },
     new MailProviderRegistry(),
     new MailSenderRegistry(),
     new CredentialVault(testMasterKey),

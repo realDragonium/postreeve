@@ -1,7 +1,7 @@
 import type { Folder, MessageSummary, TriageAction } from "../shared/contracts";
 import type { MessageFilter, MessageSort } from "./mail-ui-state";
 import { formatListTime } from "./format";
-import { messageIsSelected, messageKey, messageMatchesKey, senderName } from "./mail-view";
+import { messageIsSelected, messageKey, messageMatchesKey, senderName, spamToggle } from "./mail-view";
 import type { MessageProvenance } from "./provenance";
 import { provenanceKey } from "./provenance";
 import { railFor } from "./theme";
@@ -55,6 +55,8 @@ export function MessageList(props: MessageListProps) {
   const archive = props.folders.find((folder) => folder.specialUse === "archive");
   const destinations = props.folders.filter((folder) => folder.specialUse !== "trash");
   const hasTrash = props.folders.some((folder) => folder.specialUse === "trash");
+  const firstSelected = props.messages.find((message) => messageIsSelected(message, props.selected));
+  const spam = firstSelected ? spamToggle(firstSelected, props.folders) : null;
 
   return <>
     <div className="scope">
@@ -74,6 +76,7 @@ export function MessageList(props: MessageListProps) {
         ) : null}
         {selectionCount > 0 ? <>
           <button className="chip" disabled={props.busy || !archive} title={archive ? undefined : "This account has no Archive folder"} onClick={() => archive && props.onBulk({ type: "move", destination: archive.path })}>Archive</button>
+          {spam ? <button className="chip" disabled={props.busy || !spam.action} title={spam.action ? undefined : "This account has no Junk folder"} onClick={() => spam.action && props.onBulk(spam.action)}>{spam.label}</button> : null}
           <button className="chip" disabled={props.busy} onClick={() => props.onBulk({ type: "mark_read" })}>Mark read</button>
           <button className="chip" disabled={props.busy} onClick={() => props.onBulk({ type: "mark_unread" })}>Unread</button>
           <button className="chip" disabled={props.busy} onClick={() => props.onBulk({ type: "flag" })}>Flag</button>
@@ -143,7 +146,7 @@ export function MessageList(props: MessageListProps) {
     </div>
 
     <div className="hintbar">
-      <span className="t-dim">click or ↵ open · j k move · x multi-select · ⌘-click add · shift-click range · e archive · u unread · s flag · / search · ⌘Z undo</span>
+      <span className="t-dim">click or ↵ open · j k move · x multi-select · ⌘-click add · shift-click range · e archive · ! spam · u unread · s flag · / search · ⌘Z undo</span>
     </div>
   </>;
 }

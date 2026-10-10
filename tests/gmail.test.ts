@@ -210,6 +210,32 @@ describe("Gmail compatibility", () => {
     } finally { store.close(); }
   });
 
+  test("reporting spam removes INBOX and not spam restores it", async () => {
+    let labels = ["INBOX", "UNREAD"];
+    let history = 1;
+    const modifications: Array<{ addLabelIds: string[]; removeLabelIds: string[] }> = [];
+    const request: HttpFetch = async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.hostname === "oauth2.googleapis.com") return json({ access_token: "fixture", expires_in: 3600 });
+      if (url.pathname.endsWith("/modify")) {
+        const change = z.object({ addLabelIds: z.array(z.string()), removeLabelIds: z.array(z.string()) }).parse(JSON.parse(String(init?.body)));
+        modifications.push(change);
+        labels = [...new Set([...labels.filter(label => !change.removeLabelIds.includes(label)), ...change.addLabelIds])];
+        history++;
+      }
+      return json({ id: "junk", threadId: "thread", labelIds: labels, historyId: String(history), internalDate: "1788000000000" });
+    };
+    const client = new GmailMailClient({ account, credentials: { kind: "gmail", refreshToken: "token" }, clientId: "client", fetch: request });
+    const ref = { accountId: account.id, mailbox: "INBOX", uidValidity: "gmail", uid: 1, modseq: null, providerId: "junk" };
+
+    const spam = await client.apply(ref, { type: "move", destination: "SPAM" });
+    expect(labels).toEqual(["UNREAD", "SPAM"]);
+    expect(spam.current.mailbox).toBe("SPAM");
+    await client.apply(spam.current, { type: "move", destination: "INBOX" });
+    expect(modifications.at(-1)).toEqual({ addLabelIds: ["INBOX"], removeLabelIds: ["SPAM"] });
+    expect(labels).toEqual(["UNREAD", "INBOX"]);
+  });
+
   test("lists ordinary files from MIME metadata and fetches bytes only on download", async () => {
     const requests: string[] = [];
     const external = Buffer.from("file!");
@@ -480,6 +506,7 @@ describe("Gmail compatibility", () => {
       "Reply-To: Planning replies <planning-replies@example.test>",
       "To: Person <person@example.test>",
       "Subject: Gmail test",
+      "List-Unsubscribe: <mailto:leave@example.test?subject=stop>",
       "Message-ID: <gmail-test@example.test>",
       "Date: Sat, 29 Aug 2026 10:00:00 +0200",
       "MIME-Version: 1.0",
@@ -580,6 +607,7 @@ describe("Gmail compatibility", () => {
     expect(details[0]?.text.trim()).toBe("Hello from Gmail.");
     expect(details[0]?.replyTo).toEqual([{ name: "Planning replies", address: "planning-replies@example.test" }]);
     expect(details[0]?.providerConversationId).toBe("thread-1");
+    expect(details[0]?.unsubscribe).toEqual({ https: null, mailto: "mailto:leave@example.test?subject=stop", oneClick: false });
     expect(details[0]?.html).toContain("data:image/png;base64,");
     expect(details[0]?.attachments.map(({ filename }) => filename)).toContain("logo.png");
     const logo = details[0]?.attachments.find(({ filename }) => filename === "logo.png");

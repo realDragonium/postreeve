@@ -10,9 +10,10 @@ import {
   fromAddress,
   recipients,
 } from "./format";
-import { messageKey, senderName } from "./mail-view";
+import { messageKey, senderName, spamToggle } from "./mail-view";
 import type { MessageProvenance } from "./provenance";
 import { railFor } from "./theme";
+import { unsubscribePlan } from "./unsubscribe";
 
 type ComposeFromMode = "reply" | "reply_all" | "forward";
 
@@ -44,6 +45,7 @@ export function Reader(props: ReaderProps) {
   const destinations = props.folders.filter((folder) => folder.path !== message.ref.mailbox && folder.specialUse !== "trash");
   const inTrash = props.folders.some((folder) => folder.path === message.ref.mailbox && folder.specialUse === "trash");
   const hasTrash = props.folders.some((folder) => folder.specialUse === "trash");
+  const spam = spamToggle(message, props.folders);
   const proposed = props.provenance?.kind === "proposed";
 
   useEffect(() => {
@@ -60,6 +62,7 @@ export function Reader(props: ReaderProps) {
       </span>
       <span className="toolbar-end">
         <button className="chip" disabled={props.busy || !archive} title={archive ? undefined : "This account has no Archive folder"} onClick={() => archive && props.onAction({ type: "move", destination: archive.path })}>Archive</button>
+        <button className="chip" disabled={props.busy || !spam.action} title={spam.action ? undefined : "This account has no Junk folder"} onClick={() => spam.action && props.onAction(spam.action)}>{spam.label}</button>
         <button className="chip" disabled={props.busy} onClick={() => props.onAction({ type: message.read ? "mark_unread" : "mark_read" })}>{message.read ? "Mark unread" : "Mark read"}</button>
         <button className="chip" disabled={props.busy} onClick={() => props.onAction({ type: message.flagged ? "unflag" : "flag" })}>{message.flagged ? "Unflag" : "Flag"}</button>
         <select
@@ -113,7 +116,7 @@ export function Reader(props: ReaderProps) {
     </div>
 
     <div className="hintbar">
-      <span className="t-dim">esc back to list · j k previous and next message · e archive · u unread · ⌘Z undo</span>
+      <span className="t-dim">esc back to list · j k previous and next message · e archive · ! spam · u unread · ⌘Z undo</span>
     </div>
   </>;
 }
@@ -135,6 +138,9 @@ function ConversationMessage(props: {
     enabled: expanded,
   });
   const detail = detailQuery.data;
+  const [unsubscribing, setUnsubscribing] = useState(false);
+  const [unsubscribeStatus, setUnsubscribeStatus] = useState<{ readonly error: boolean; readonly text: string } | null>(null);
+  const plan = detail?.unsubscribe ? unsubscribePlan(detail.unsubscribe) : null;
   const deliveredTo = additionalDeliveryAddresses(message);
   const sender = senderName(message);
 
@@ -179,6 +185,30 @@ function ConversationMessage(props: {
           </button>)}
         </div>
         {downloadError ? <div className="alert error" role="alert" style={{ marginTop: 8 }}>{downloadError}</div> : null}
+      </section> : null}
+
+      {detail && plan ? <section aria-label="Mailing list" style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 10 }}>
+        <button
+          className="chip"
+          disabled={unsubscribing}
+          onClick={() => {
+            if (!window.confirm(plan.confirmation)) return;
+            setUnsubscribeStatus(null);
+            if (plan.kind === "link") {
+              window.open(plan.url, "_blank", "noopener,noreferrer");
+              return;
+            }
+            setUnsubscribing(true);
+            void api.unsubscribe({ message: detail.ref, method: plan.kind })
+              .then((result) => setUnsubscribeStatus({
+                error: false,
+                text: result.method === "mailto" ? `Unsubscribe email sent to ${result.target}.` : "Unsubscribe request sent.",
+              }))
+              .catch((error: unknown) => setUnsubscribeStatus({ error: true, text: error instanceof Error ? error.message : "Unsubscribe failed" }))
+              .finally(() => setUnsubscribing(false));
+          }}
+        >{unsubscribing ? "Unsubscribing…" : "Unsubscribe"}</button>
+        {unsubscribeStatus ? <span role={unsubscribeStatus.error ? "alert" : "status"} className={unsubscribeStatus.error ? "alert error" : "t-dim"}>{unsubscribeStatus.text}</span> : null}
       </section> : null}
 
       {detail ? <>

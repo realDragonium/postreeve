@@ -257,7 +257,7 @@ export function createPostreeveWebMcpTools(services: WebMcpServices): readonly W
       name: "apply_message_actions",
       title: "Apply mailbox actions",
       description:
-        "Immediately apply explicit move, trash, read-state, or flag actions to messages in one account. Messages are revalidated before each action, every result is audited, and supported operations can be undone. Trash moves mail to the Trash folder; permanent deletion is never performed.",
+        "Immediately apply explicit move, trash, read-state, or flag actions to messages in one account. Messages are revalidated before each action, every result is audited, and supported operations can be undone. Trash moves mail to the Trash folder; permanent deletion is never performed. To report spam, move the message to the account's folder whose specialUse is junk; to mark it not spam, move it from there to the inbox.",
       inputSchema: inputJsonSchema(applyMessageActionsInputSchema),
       annotations: mutatingAnnotations,
       execute: async (input, { signal }) => {

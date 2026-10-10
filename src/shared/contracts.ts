@@ -141,10 +141,18 @@ export const canonicalMessageSchema = z.object({
   updatedAt: z.iso.datetime(),
 });
 
+/** A message's own `List-Unsubscribe` targets; `oneClick` means RFC 8058 POST to `https`. */
+export const unsubscribeOptionsSchema = z.object({
+  https: z.url({ protocol: /^https$/ }).nullable(),
+  mailto: z.string().startsWith("mailto:").nullable(),
+  oneClick: z.boolean(),
+});
+
 export const messageDetailSchema = messageSummarySchema.extend({
   text: z.string(),
   html: z.string().nullable(),
   attachments: z.array(receivedAttachmentSchema),
+  unsubscribe: unsubscribeOptionsSchema.optional(),
 });
 
 export const canonicalMessageDetailSchema = messageDetailSchema.required({ canonicalId: true }).extend({
@@ -312,6 +320,16 @@ export const sendReceiptSchema = z.object({
   warning: z.string().min(1).optional(),
 });
 
+export const unsubscribeInputSchema = z.object({
+  message: messageRefSchema,
+  method: z.enum(["one_click", "mailto"]),
+});
+
+export const unsubscribeResultSchema = z.discriminatedUnion("method", [
+  z.object({ method: z.literal("one_click"), target: z.string() }),
+  z.object({ method: z.literal("mailto"), target: z.string(), receipt: sendReceiptSchema }),
+]);
+
 export const draftComposeModeSchema = z.enum(["new", "reply", "reply_all", "forward"]);
 export const draftRecipientFieldSchema = z.union([
   z.string(),
@@ -453,6 +471,9 @@ export type MessageRef = z.infer<typeof messageRefSchema>;
 export type MessageSummary = z.infer<typeof messageSummarySchema>;
 export type CanonicalMessageSummary = z.infer<typeof canonicalMessageSummarySchema>;
 export type MessageDetail = z.infer<typeof messageDetailSchema>;
+export type UnsubscribeOptions = z.infer<typeof unsubscribeOptionsSchema>;
+export type UnsubscribeInput = z.infer<typeof unsubscribeInputSchema>;
+export type UnsubscribeResult = z.infer<typeof unsubscribeResultSchema>;
 export type CanonicalMessageDetail = z.infer<typeof canonicalMessageDetailSchema>;
 export type ReceivedAttachment = z.infer<typeof receivedAttachmentSchema>;
 export type MailProviderKind = z.infer<typeof mailProviderKindSchema>;
