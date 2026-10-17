@@ -10,6 +10,7 @@ import {
   createDraftInputSchema,
   createFolderInputSchema,
   createIdentityInputSchema,
+  folderMappingsSchema,
   putSignatureInputSchema,
   createProposalInputSchema,
   deleteFolderInputSchema,
@@ -171,6 +172,14 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         ...context.req.valid("json"),
       })),
     )
+    .get("/accounts/:accountId/folder-mappings", zValidator("param", accountParamsSchema), async (context) =>
+      context.json(await service.getFolderMappings(context.req.valid("param").accountId)))
+    .put(
+      "/accounts/:accountId/folder-mappings",
+      zValidator("param", accountParamsSchema),
+      zValidator("json", folderMappingsSchema),
+      async (context) => context.json(await service.putFolderMappings(context.req.valid("param").accountId, context.req.valid("json"))),
+    )
     .get("/accounts/:accountId/identities", zValidator("param", accountParamsSchema), async (context) =>
       context.json(await service.listIdentities(context.req.valid("param").accountId)))
     .post(
@@ -182,6 +191,8 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         return context.json(identity, created ? 201 : 200);
       },
     )
+    .post("/accounts/:accountId/identities/import", zValidator("param", accountParamsSchema), async (context) =>
+      context.json(await service.importSendAsIdentities(context.req.valid("param").accountId)))
     .get("/accounts/:accountId/signatures", zValidator("param", accountParamsSchema), async (context) =>
       context.json(await service.listSignatures(context.req.valid("param").accountId)))
     .put(

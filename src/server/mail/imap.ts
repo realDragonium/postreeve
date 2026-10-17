@@ -31,6 +31,8 @@ import type {
   TriageAction,
   ProviderDraftRef,
 } from "../../shared/contracts";
+import type { FolderMappings, SpecialFolderRole } from "../../shared/contracts";
+import { resolveSpecialUses, type ResolvedSpecialUse } from "../../shared/special-folders";
 import type {
   AppliedMailAction,
   MailboxPage,
@@ -147,6 +149,7 @@ const defaultClientFactory: ImapClientFactory = (options) => {
 };
 
 export class ImapMailProvider implements MailProvider {
+  #folderOverrides: FolderMappings = {};
   readonly #config: ImapAccountConfig;
   readonly #createClient: ImapClientFactory;
   readonly #createIdleClient: IdleClientFactory;
@@ -174,6 +177,11 @@ export class ImapMailProvider implements MailProvider {
     });
   }
 
+  /** Owner overrides for special folders; they win over SPECIAL-USE attributes and folder names. */
+  setFolderOverrides(overrides: FolderMappings): void {
+    this.#folderOverrides = { ...overrides };
+  }
+
   async verifyConnection(): Promise<void> {
     await this.#withClient(async (client) => {
       await client.list();
@@ -187,12 +195,13 @@ export class ImapMailProvider implements MailProvider {
         statusQuery: { messages: true, unseen: true },
       });
 
+      const resolved = resolveMailboxRoles(mailboxes, this.#folderOverrides);
       return mailboxes
         .filter((mailbox) => !hasFlag(mailbox.flags, "\\Noselect"))
         .map((mailbox) => ({
           path: mailbox.path,
           name: mailbox.name,
-          specialUse: specialUseFor(mailbox),
+          ...resolved.get(mailbox.path) ?? { specialUse: null, specialUseSource: null },
           unread: mailbox.status?.unseen ?? 0,
           total: mailbox.status?.messages ?? 0,
         }));
@@ -209,7 +218,7 @@ export class ImapMailProvider implements MailProvider {
   async renameFolder(accountId: string, path: string, name: string): Promise<void> {
     this.#assertAccount(accountId);
     await this.#withClient(async (client) => {
-      const mailbox = await manageableMailbox(client, path);
+      const mailbox = await manageableMailbox(client, path, this.#folderOverrides);
       const newPath = renamedMailboxPath(mailbox, name);
       if (newPath !== path) await client.mailboxRename(path, newPath);
     });
@@ -218,7 +227,7 @@ export class ImapMailProvider implements MailProvider {
   async deleteFolder(accountId: string, path: string): Promise<void> {
     this.#assertAccount(accountId);
     await this.#withClient(async (client) => {
-      const mailbox = await manageableMailbox(client, path, true);
+      const mailbox = await manageableMailbox(client, path, this.#folderOverrides, true);
       if ((mailbox.status?.messages ?? 0) > 0) {
         throw new Error("Move every message out of this IMAP folder before deleting it");
       }
@@ -229,7 +238,7 @@ export class ImapMailProvider implements MailProvider {
   async appendSentMessage(accountId: string, mime: Buffer, sentAt: string): Promise<ProviderMessageSummary | null> {
     this.#assertAccount(accountId);
     return this.#withClient(async (client) => {
-      const mailbox = await findSentMailbox(client);
+      const mailbox = await findSpecialMailbox(client, "sent", this.#folderOverrides);
       const appended = await client.append(mailbox, mime, [SEEN_FLAG], new Date(sentAt));
       if (!appended) throw new Error("IMAP server refused to store the sent copy");
       if (appended.uid === undefined || appended.uidValidity === undefined) return null;
@@ -260,7 +269,7 @@ export class ImapMailProvider implements MailProvider {
     this.#assertDraftScope(scope);
     if (ref?.kind === "gmail") throw new Error("IMAP cannot remove a draft reference from another provider");
     await this.#withClient(async (client) => {
-      const mailbox = await findDraftsMailbox(client);
+      const mailbox = await findSpecialMailbox(client, "drafts", this.#folderOverrides);
       const opened = await client.mailboxOpen(mailbox);
       const matches = (await this.#listSelectedProviderDrafts(
         client,
@@ -448,7 +457,7 @@ export class ImapMailProvider implements MailProvider {
         case "move":
           return this.#move(client, reference, opened, action.destination, action, previous, previousRead);
         case "trash": {
-          const destination = await findTrashMailbox(client);
+          const destination = await findSpecialMailbox(client, "trash", this.#folderOverrides);
           return this.#move(client, reference, opened, destination, action, previous, previousRead);
         }
       }
@@ -522,7 +531,7 @@ export class ImapMailProvider implements MailProvider {
     draft: ProviderDraftInput,
     ref?: Extract<ProviderDraftRef, { kind: "imap" }>,
   ): Promise<ProviderDraftRef> {
-    const mailbox = await findDraftsMailbox(client);
+    const mailbox = await findSpecialMailbox(client, "drafts", this.#folderOverrides);
     let priorMatches: ListedProviderDraft[] = [];
     if (ref) {
       const opened = await client.mailboxOpen(mailbox);
@@ -643,7 +652,7 @@ export class ImapMailProvider implements MailProvider {
   }
 
   async #listProviderDrafts(client: ImapClient, scope: ProviderDraftScope): Promise<ProviderDraft[]> {
-    const mailbox = await findDraftsMailbox(client);
+    const mailbox = await findSpecialMailbox(client, "drafts", this.#folderOverrides);
     const opened = await client.mailboxOpen(mailbox, { readOnly: true });
     return (await this.#listSelectedProviderDrafts(client, mailbox, opened, scope))
       .map(({ deleted: _deleted, ...draft }) => draft);
@@ -865,20 +874,6 @@ async function exactUidExists(client: ImapClient, uid: number): Promise<boolean>
   return newestUidsFromSequenceSet(result.all, 2).length > 0;
 }
 
-async function findDraftsMailbox(client: ImapClient): Promise<string> {
-  const mailboxes = await client.list();
-  const drafts = mailboxes.find((mailbox) => specialUseFor(mailbox) === "drafts" && !hasFlag(mailbox.flags, "\\Noselect"));
-  if (!drafts) throw new Error("This account has no discoverable special-use Drafts mailbox");
-  return drafts.path;
-}
-
-async function findSentMailbox(client: ImapClient): Promise<string> {
-  const mailboxes = await client.list();
-  const sent = mailboxes.find((mailbox) => specialUseFor(mailbox) === "sent" && !hasFlag(mailbox.flags, "\\Noselect"));
-  if (!sent) throw new Error("This account has no discoverable special-use Sent mailbox");
-  return sent.path;
-}
-
 function assertLimit(limit: number): void {
   if (!Number.isInteger(limit) || limit < 1) throw new Error("Message limit must be a positive integer");
 }
@@ -932,11 +927,28 @@ function movedIdentityFor(moved: CopyResponseObject, sourceUid: number): { uidVa
   return { uidValidity: moved.uidValidity, uid };
 }
 
-async function findTrashMailbox(client: ImapClient): Promise<string> {
+const specialFolderNames: Record<SpecialFolderRole, string> = {
+  archive: "Archive", sent: "Sent", drafts: "Drafts", trash: "Trash", junk: "Junk",
+};
+
+async function findSpecialMailbox(client: ImapClient, role: SpecialFolderRole, overrides: FolderMappings): Promise<string> {
   const mailboxes = await client.list();
-  const trash = mailboxes.find((mailbox) => specialUseFor(mailbox) === "trash");
-  if (!trash) throw new Error("This account has no discoverable special-use Trash mailbox");
-  return trash.path;
+  const resolved = resolveMailboxRoles(mailboxes, overrides);
+  const mailbox = mailboxes.find((candidate) => resolved.get(candidate.path)?.specialUse === role);
+  if (!mailbox) throw new Error(`This account has no ${specialFolderNames[role]} folder; choose one under Manage folders`);
+  return mailbox.path;
+}
+
+/** Roles of the selectable mailboxes: owner overrides, then SPECIAL-USE attributes, then common folder names. */
+function resolveMailboxRoles(mailboxes: readonly ListResponse[], overrides: FolderMappings): Map<string, ResolvedSpecialUse> {
+  return resolveSpecialUses(mailboxes
+    .filter((mailbox) => !hasFlag(mailbox.flags, "\\Noselect"))
+    .map((mailbox) => ({
+      path: mailbox.path,
+      name: mailbox.name,
+      parentPath: mailbox.parentPath ?? "",
+      flagged: specialUseFor(mailbox),
+    })), overrides);
 }
 
 function specialUseFor(mailbox: Pick<ListResponse, "path" | "specialUse">): Folder["specialUse"] {
@@ -961,12 +973,13 @@ function specialUseFor(mailbox: Pick<ListResponse, "path" | "specialUse">): Fold
 async function manageableMailbox(
   client: ImapClient,
   path: string,
+  overrides: FolderMappings,
   includeStatus = false,
 ): Promise<ListResponse> {
   const mailboxes = await client.list(includeStatus ? { statusQuery: { messages: true } } : undefined);
   const mailbox = mailboxes.find((candidate) => candidate.path === path);
   if (!mailbox || hasFlag(mailbox.flags, "\\Noselect")) throw new Error(`Folder ${path} does not exist`);
-  if (specialUseFor(mailbox) !== null) throw new Error("System and special-use folders cannot be changed");
+  if (resolveMailboxRoles(mailboxes, overrides).has(path)) throw new Error("System and special-use folders cannot be changed");
   return mailbox;
 }
 

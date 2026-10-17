@@ -27,7 +27,9 @@ import type {
   DraftRecipientField,
   DraftVersionInput,
   Folder,
+  FolderMappings,
   Identity,
+  IdentityImportResult,
   RecipientSuggestion,
   RecipientSuggestionQuery,
   PutSignatureInput,
@@ -54,6 +56,7 @@ import {
   createFolderInputSchema,
   createDraftInputSchema,
   createIdentityInputSchema,
+  folderMappingsSchema,
   putSignatureInputSchema,
   createProposalInputSchema,
   deleteFolderInputSchema,
@@ -98,7 +101,7 @@ import {
 } from "./attachment-reference";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
 import { mailtoUnsubscribe, postOneClickUnsubscribe, type UnsubscribeFetch } from "../mail/unsubscribe";
-import { defaultFromAddress } from "../../shared/identities";
+import { defaultFromAddress, identityFor, isWildcardAddress } from "../../shared/identities";
 import {
   CredentialVault,
   type AccountCredentials,
@@ -361,12 +364,41 @@ export class PostreeveService {
     if (existing) await this.#store.updateAccount(stored);
     else await this.#store.insertAccount(stored);
     this.#registerClients(publicAccount.id, clients);
+    // A connection must not fail because the Send mail as list is unreadable; the identity sheet can retry.
+    await this.importSendAsIdentities(publicAccount.id).catch(() => undefined);
     return publicAccount;
   }
 
   async listFolders(accountId: string): Promise<Folder[]> {
     await this.#requireAccount(accountId);
     return this.#providers.forAccount(accountId).listFolders(accountId);
+  }
+
+  async getFolderMappings(accountId: string): Promise<FolderMappings> {
+    await this.#requireAccount(accountId);
+    return this.#store.folderMappings(this.#context.tenantId, accountId);
+  }
+
+  /** Replaces the account's special-folder overrides and answers with the folder list they produce. */
+  async putFolderMappings(accountId: string, rawInput: FolderMappings): Promise<Folder[]> {
+    const mappings = folderMappingsSchema.parse(rawInput);
+    const account = await this.#requireAccount(accountId);
+    const provider = this.#providers.forAccount(accountId);
+    if (account.kind === "gmail") throw new Error("Gmail folders are fixed system labels");
+    if (!provider.setFolderOverrides) throw new Error("This account's folders cannot be mapped");
+    const folders = await provider.listFolders(accountId);
+    const used = new Set<string>();
+    for (const path of Object.values(mappings)) {
+      if (path === null || path === undefined) continue;
+      const folder = folders.find((candidate) => candidate.path === path);
+      if (!folder) throw new Error(`Folder ${path} does not exist`);
+      if (folder.specialUse === "inbox") throw new Error("The inbox cannot be used as another special folder");
+      if (used.has(path)) throw new Error(`Folder ${path} cannot be used for two special folders`);
+      used.add(path);
+    }
+    await this.#store.replaceFolderMappings(this.#context.tenantId, accountId, mappings, new Date().toISOString());
+    provider.setFolderOverrides(mappings);
+    return provider.listFolders(accountId);
   }
 
   async createFolder(rawInput: CreateFolderInput): Promise<Folder[]> {
@@ -586,6 +618,9 @@ export class PostreeveService {
     const input = createIdentityInputSchema.parse(rawInput);
     const account = await this.#requireAccount(accountId);
     if (input.address === account.email.toLowerCase()) throw new Error("The primary address is already an identity");
+    if (account.kind === "gmail" && isWildcardAddress(input.address)) {
+      throw new Error("Gmail sends only from verified addresses, so wildcard identities are IMAP-only");
+    }
     return this.#store.addIdentity(this.#context.tenantId, {
       id: crypto.randomUUID(),
       accountId,
@@ -593,6 +628,21 @@ export class PostreeveService {
       address: input.address,
       createdAt: new Date().toISOString(),
     }, identityLimit);
+  }
+
+  /** Adds the verified Gmail Send mail as addresses that are not identities yet; never removes or renames one. */
+  async importSendAsIdentities(accountId: string): Promise<IdentityImportResult> {
+    const account = await this.#requireAccount(accountId);
+    const provider = this.#providers.forAccount(accountId);
+    if (account.kind !== "gmail" || !provider.listSendAsIdentities) {
+      throw new Error("Only Gmail accounts have Send mail as addresses");
+    }
+    let imported = 0;
+    for (const { name, address } of await provider.listSendAsIdentities()) {
+      const { created } = await this.addIdentity(accountId, { name: name || account.name, address });
+      if (created) imported += 1;
+    }
+    return { imported, identities: await this.#store.listIdentities(this.#context.tenantId, accountId) };
   }
 
   async removeIdentity(accountId: string, id: string): Promise<void> {
@@ -1210,13 +1260,9 @@ export class PostreeveService {
 
   async #draftSender(accountId: string, identity: OutboundAddress): Promise<OutboundAddress> {
     const account = await this.#requireAccount(accountId);
-    const address = identity.address.toLowerCase();
-    const storedName = address === account.email.toLowerCase()
-      ? account.name
-      : (await this.#store.listIdentities(this.#context.tenantId, accountId))
-        .find((candidate) => candidate.address === address)?.name;
-    if (storedName === undefined) throw new Error("Draft identity does not belong to the selected account");
-    return { name: identity.name || storedName, address: identity.address };
+    const stored = identityFor(identity.address, account, await this.#store.listIdentities(this.#context.tenantId, accountId));
+    if (!stored) throw new Error("Draft identity does not belong to the selected account");
+    return { name: identity.name || stored.name, address: identity.address };
   }
 
   async #prepareMessageSend(sendInput: SendMessageInput, from?: OutboundAddress, html?: string): Promise<PreparedMessageSend> {
@@ -1751,6 +1797,7 @@ export class PostreeveService {
   }
 
   #registerClients(accountId: string, clients: { provider: MailProvider; sender: MailSender }, replace = true): void {
+    clients.provider.setFolderOverrides?.(this.#store.folderMappings(this.#context.tenantId, accountId));
     this.#providers.register(accountId, clients.provider);
     this.synchronization.schedule(accountId, replace);
     this.#senders.register(accountId, clients.sender);

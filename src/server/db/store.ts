@@ -1,5 +1,6 @@
 import { SynchronizationStore } from "../sync/store";
 import { migrateCorrespondents, suggestRecipients } from "../contacts/correspondents";
+import { migrateFolderMappings, readFolderMappings, replaceFolderMappings as writeFolderMappings } from "./folder-mappings";
 import type { OutgoingAttachment } from "../mail/outgoing-content";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -14,6 +15,7 @@ import type {
   CanonicalMessageObservation,
   Draft,
   DraftContent,
+  FolderMappings,
   Identity,
   Signature,
   MailProviderKind,
@@ -96,6 +98,7 @@ export class Store {
       (tenantId, provider, previous, current) => this.#recordProviderMove(tenantId, provider, previous, current),
       (tenantId, id) => this.#getMessage(tenantId, id));
     migrateCorrespondents(this.#sqlite);
+    migrateFolderMappings(this.#sqlite);
   }
 
   close(): void {
@@ -153,6 +156,7 @@ export class Store {
       this.#sqlite.query("DELETE FROM drafts WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM identities WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM signatures WHERE account_id = ?").run(accountId);
+      this.#sqlite.query("DELETE FROM folder_mappings WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM draft_tombstones WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_provider_conversations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_locations WHERE account_id = ?").run(accountId);
@@ -204,6 +208,14 @@ export class Store {
           .run(tenantId, accountId, removed.address);
       }
     }).immediate();
+  }
+
+  folderMappings(tenantId: string, accountId: string): FolderMappings {
+    return readFolderMappings(this.#sqlite, tenantId, accountId);
+  }
+
+  async replaceFolderMappings(tenantId: string, accountId: string, mappings: FolderMappings, updatedAt: string): Promise<void> {
+    writeFolderMappings(this.#sqlite, tenantId, accountId, mappings, updatedAt);
   }
 
   async listSignatures(tenantId: string, accountId: string): Promise<Signature[]> {

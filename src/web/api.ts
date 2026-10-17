@@ -7,11 +7,13 @@ import {
   accountSchema,
   accountSettingsSchema,
   connectionTestResultSchema,
+  folderMappingsSchema,
   folderSchema,
   canonicalMessageDetailSchema,
   canonicalMessageSummarySchema,
   canonicalConversationSchema,
   draftSchema,
+  identityImportResultSchema,
   identitySchema,
   signatureSchema,
   outgoingMailLimitsSchema,
@@ -31,6 +33,8 @@ import {
   type UnsubscribeInput,
   type UnsubscribeResult,
   type Folder,
+  type FolderMappings,
+  type IdentityImportResult,
   type CreateIdentityInput,
   type Identity,
   type PutSignatureInput,
@@ -201,6 +205,14 @@ export const api = {
       ...jsonBody({ path: input.path }),
       ...withSignal(signal),
     }),
+  folderMappings: (accountId: string, signal?: AbortSignal): Promise<FolderMappings> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/folder-mappings`, folderMappingsSchema, withSignal(signal)),
+  putFolderMappings: (accountId: string, mappings: FolderMappings, signal?: AbortSignal): Promise<Folder[]> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/folder-mappings`, folderSchema.array(), {
+      method: "PUT",
+      ...jsonBody(mappings),
+      ...withSignal(signal),
+    }),
   recipientSuggestions: (query: string, signal?: AbortSignal): Promise<RecipientSuggestion[]> =>
     request(`/recipient-suggestions?${new URLSearchParams({ q: query })}`, recipientSuggestionSchema.array(), withSignal(signal)),
   identities: (accountId: string, signal?: AbortSignal): Promise<Identity[]> =>
@@ -209,6 +221,11 @@ export const api = {
     request(`/accounts/${encodeURIComponent(accountId)}/identities`, identitySchema, {
       method: "POST",
       ...jsonBody(input),
+      ...withSignal(signal),
+    }),
+  importSendAsIdentities: (accountId: string, signal?: AbortSignal): Promise<IdentityImportResult> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/identities/import`, identityImportResultSchema, {
+      method: "POST",
       ...withSignal(signal),
     }),
   signatures: (accountId: string, signal?: AbortSignal): Promise<Signature[]> =>

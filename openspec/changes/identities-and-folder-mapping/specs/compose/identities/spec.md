@@ -42,7 +42,7 @@ The system SHALL list signatures at `GET /api/accounts/<accountId>/signatures` a
 ## ADDED Requirements
 
 ### Requirement: Wildcard identities cover their domain
-An address SHALL belong to an account when it is the primary address, an identity's address, or an address whose domain equals the domain of one of the account's wildcard identities, case-insensitively; subdomains SHALL NOT be covered. A covered address SHALL be sendable as a draft identity, named after the wildcard when the draft's name is empty; any other address SHALL be refused as today. Gmail accounts SHALL refuse wildcard identities. Recipient suggestions SHALL treat covered addresses as own.
+An address SHALL belong to an account when it is the primary address, an identity's address, or an address whose domain equals the domain of one of the account's wildcard identities, case-insensitively; subdomains SHALL NOT be covered. A covered address SHALL be sendable as a draft identity; any other address SHALL be refused as today. Gmail accounts SHALL refuse wildcard identities. Recipient suggestions SHALL skip covered addresses.
 
 #### Scenario: Send from a covered address
 - **WHEN** an IMAP account with identity `*@example.com` sends a draft whose identity is `orders@example.com`
