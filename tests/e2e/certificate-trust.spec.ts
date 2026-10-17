@@ -1,4 +1,4 @@
-import { expect, test, type Route } from "@playwright/test";
+import { expect, test, type Route } from "./support/owner-session";
 import { createAccountInputSchema, type CreateAccountInput, type PresentedCertificate } from "../../src/shared/contracts";
 
 const fingerprint = "a92cab64b20587d047c8d348faa24f2924dd6033d5f8d24360bfda1696364562";

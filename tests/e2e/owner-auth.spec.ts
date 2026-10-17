@@ -141,8 +141,12 @@ test("returns to sign-in when the session is revoked elsewhere", async ({ browse
     await other.close();
   }
 
-  // The next API call from the first browser finds its session gone.
+  // The next API call from the first browser finds its session gone. Opening Settings may already make that call,
+  // in which case the sign-in screen replaces Settings before Security can be clicked.
+  const signIn = page.getByRole("heading", { name: "Sign in" });
+  const security = page.getByRole("button", { name: "Security", exact: true });
   await page.getByRole("button", { name: "Settings", exact: true }).click();
-  await page.getByRole("button", { name: "Security", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible();
+  await expect(signIn.or(security)).toBeVisible();
+  if (!(await signIn.isVisible())) await security.click({ timeout: 2_000 }).catch(() => undefined);
+  await expect(signIn).toBeVisible();
 });

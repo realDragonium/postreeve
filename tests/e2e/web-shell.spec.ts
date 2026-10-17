@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, test, type Page, type Route } from "./support/owner-session";
 import { mailboxQuerySchema } from "../../src/shared/mailbox-query";
 import {
   canonicalMessageSummarySchema,
