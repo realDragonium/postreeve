@@ -1,21 +1,23 @@
 import type { MiddlewareHandler } from "hono";
-import { expectedOrigins, hostnameOf, untrustedNetwork, type RequestTrust } from "./request-context";
+import { expectedOrigins, forwardedHeader, hostnameOf, untrustedNetwork, type RequestTrust } from "./request-context";
 
 const loopbackHostnames = ["127.0.0.1", "localhost", "[::1]"];
 const wildcardHostnames = new Set(["0.0.0.0", "[::]"]);
 const safeMethods = new Set(["GET", "HEAD", "OPTIONS"]);
 const crossSiteFetches = new Set(["cross-site", "same-site"]);
 
-export function allowedHostGuard(configuredHostname: string, publicUrl: URL | null = null): MiddlewareHandler {
+export function allowedHostGuard(configuredHostname: string, trust: RequestTrust = untrustedNetwork): MiddlewareHandler {
   const bracketed = bracketIpv6(configuredHostname.trim());
   const configured = hostnameOf(bracketed) ?? bracketed.toLowerCase();
   const allowed = new Set(loopbackHostnames);
   if (!wildcardHostnames.has(configured)) allowed.add(configured);
-  if (publicUrl) allowed.add(publicUrl.hostname);
+  if (trust.publicUrl) allowed.add(trust.publicUrl.hostname);
 
   return async (context, next) => {
+    // Both names must be allowed: a rebinding page can add X-Forwarded-Host but cannot change Host.
     const hostname = hostnameOf(context.req.header("Host"));
-    if (!hostname || !allowed.has(hostname)) {
+    const forwarded = forwardedHeader(context, trust, "X-Forwarded-Host");
+    if (!hostname || !allowed.has(hostname) || (forwarded !== undefined && !allowed.has(hostnameOf(forwarded) ?? ""))) {
       return context.json({ error: "Forbidden host" }, 403);
     }
     return next();

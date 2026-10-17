@@ -139,9 +139,9 @@ describe("password sign-in", () => {
     const { app } = await fixture({ trust: { publicUrl: null, trustProxy: true } });
     await setUp(app);
     for (let attempt = 0; attempt < 50; attempt += 1) {
-      await post(app, "/api/auth/login/password", { password: "wrong password" }, { "Fly-Client-IP": `203.0.113.${attempt}` });
+      await post(app, "/api/auth/login/password", { password: "wrong password" }, { "X-Forwarded-For": `198.51.100.7, 203.0.113.${attempt}` });
     }
-    const fresh = await post(app, "/api/auth/login/password", { password: PASSWORD }, { "Fly-Client-IP": "198.51.100.7" });
+    const fresh = await post(app, "/api/auth/login/password", { password: PASSWORD }, { "X-Forwarded-For": "198.51.100.7" });
     expect(fresh.status).toBe(429);
   });
 
@@ -359,6 +359,46 @@ describe("requireOwner and getOwnerSession", () => {
     expect(await (await app.request("/peek", { headers: { Host: LOOPBACK } })).json()).toEqual({ session: null });
     const allowed = await app.request("/consent", { headers: { Host: LOOPBACK, Cookie: cookie } });
     expect(await allowed.json()).toEqual({ session: "password" });
+  });
+});
+
+describe("tailscale serve", () => {
+  const tailnet: RequestTrust = { publicUrl: new URL("https://box.tail1234.ts.net"), trustProxy: true };
+  const proxied = { Host: "127.0.0.1:3000", "X-Forwarded-Host": "box.tail1234.ts.net", "X-Forwarded-Proto": "https" };
+
+  test("uses the ts.net host for passkeys and Secure cookies", async () => {
+    const { app } = await fixture({ trust: tailnet });
+    const options = await post(app, "/api/auth/login/passkey/options", {}, { ...proxied, Origin: "https://box.tail1234.ts.net" });
+    expect(await options.json()).toMatchObject({ rpId: "box.tail1234.ts.net" });
+    const setup = await post(app, "/api/auth/setup", { setupToken: SETUP_TOKEN, password: PASSWORD }, {
+      ...proxied,
+      Origin: "https://box.tail1234.ts.net",
+    });
+    expect(setup.status).toBe(201);
+    expect(setup.headers.get("Set-Cookie")).toStartWith("__Host-postreeve-session=");
+  });
+
+  test("never treats Tailscale identity headers as authentication", async () => {
+    const { app } = await fixture({ trust: tailnet });
+    await setUp(app);
+    const response = await get(app, "/api/accounts", {
+      ...proxied,
+      "Tailscale-User-Login": "owner@example.test",
+      "Tailscale-User-Name": "Owner",
+    });
+    expect(response.status).toBe(401);
+  });
+
+  test("rate-limits by the address the proxy appended, not a client-supplied one", async () => {
+    const { app } = await fixture({ trust: tailnet });
+    await setUp(app);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await post(app, "/api/auth/login/password", { password: "wrong password" }, {
+        "X-Forwarded-For": `10.0.0.${attempt}, 100.64.0.9`,
+      });
+    }
+    const blocked = await post(app, "/api/auth/login/password", { password: PASSWORD }, { "X-Forwarded-For": "10.9.9.9, 100.64.0.9" });
+    expect(blocked.status).toBe(429);
   });
 });
 

@@ -24,7 +24,7 @@ export function createServerApp(options: ServerAppOptions): Hono {
   const { auth } = options;
   const app = new Hono();
   app.use("*", postreeveSecureHeaders);
-  app.use("*", allowedHostGuard(options.hostname, auth.trust.publicUrl));
+  app.use("*", allowedHostGuard(options.hostname, auth.trust));
   app.use("*", ownerAuthContext(auth));
   if (options.desktopToken?.trim()) {
     // The desktop token authenticates every API call, and the protocol proxy forwards a postreeve:// Origin.

@@ -49,8 +49,8 @@ The desktop app does not use owner sign-in; its per-launch token authenticates i
 
 | Variable | Purpose |
 | --- | --- |
-| `POSTREEVE_PUBLIC_URL` | The https origin people open, for example `https://postreeve.fly.dev`. Its host is accepted by the host check, it is the passkey origin and relying party, and session cookies are `Secure` there. |
-| `POSTREEVE_TRUST_PROXY` | Set to `1` behind a reverse proxy such as Fly.io so the server believes `Fly-Forwarded-Proto`/`X-Forwarded-Proto` and `Fly-Client-IP`/`X-Forwarded-For`. Leave it unset when clients reach Postreeve directly, or they could forge these headers. |
+| `POSTREEVE_PUBLIC_URL` | The https origin people open, for example `https://box.tail1234.ts.net` behind `tailscale serve`. Its host is accepted by the host check, it is the passkey origin and relying party, and session cookies are `Secure` there. |
+| `POSTREEVE_TRUST_PROXY` | Set to `1` behind a reverse proxy such as `tailscale serve` so the server believes the rightmost `X-Forwarded-Proto`, `X-Forwarded-Host` and `X-Forwarded-For` values. Leave it unset when clients reach Postreeve directly, or they could forge these headers. Tailscale identity headers such as `Tailscale-User-Login` are never treated as sign-in: anything that reaches the port can send them. |
 | `POSTREEVE_SETUP_TOKEN` | Optional fixed setup token for claiming a new instance. |
 
 ## Desktop app

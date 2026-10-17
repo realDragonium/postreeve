@@ -50,11 +50,11 @@ While no owner exists, `GET /api/auth/session` SHALL answer `{ state: "setup" }`
 - **THEN** the second verification answers 401
 
 ### Requirement: Passkey origin and relying party
-The WebAuthn RP ID and expected origin SHALL be the `POSTREEVE_PUBLIC_URL` host name and origin for requests to that host, and `localhost` with the request's own origin for requests to `localhost`. For any other host, passkey endpoints SHALL answer 400 and `GET /api/auth/session` SHALL report `passkeys: false`.
+The WebAuthn RP ID and expected origin SHALL be the `POSTREEVE_PUBLIC_URL` host name and origin for requests to that host, and `localhost` with the request's own origin for requests to `localhost`, where the host is the trusted `X-Forwarded-Host` or else `Host`. For any other host, passkey endpoints SHALL answer 400 and `GET /api/auth/session` SHALL report `passkeys: false`.
 
 #### Scenario: Hosted passkey
-- **WHEN** `POSTREEVE_PUBLIC_URL` is `https://postreeve.fly.dev` and the owner registers a passkey there
-- **THEN** the passkey's RP ID is `postreeve.fly.dev`
+- **WHEN** `POSTREEVE_PUBLIC_URL` is `https://box.tail1234.ts.net` and the owner registers a passkey there through `tailscale serve`
+- **THEN** the passkey's RP ID is `box.tail1234.ts.net`
 
 #### Scenario: Passkeys on an IP address
 - **WHEN** the owner opens `http://127.0.0.1:3000`
@@ -75,10 +75,10 @@ The signed-in owner SHALL list passkeys at `GET /api/auth/passkeys`, register on
 - **THEN** the old password no longer signs in and the other browser's session is ended
 
 ### Requirement: Session cookie
-A session SHALL be a random 32-byte token in an `HttpOnly; Path=/; SameSite=Lax` cookie, named `__Host-postreeve-session` with `Secure` when the request is secure and `postreeve-session` otherwise. The server SHALL store only the token's SHA-256 hash. A request is secure when its scheme is https, using forwarded-scheme headers only when `POSTREEVE_TRUST_PROXY` is `1` or `true`, or when it targets the host of an https `POSTREEVE_PUBLIC_URL`.
+A session SHALL be a random 32-byte token in an `HttpOnly; Path=/; SameSite=Lax` cookie, named `__Host-postreeve-session` with `Secure` when the request is secure and `postreeve-session` otherwise. The server SHALL store only the token's SHA-256 hash. A request is secure when its scheme is https, using `X-Forwarded-Proto` only when `POSTREEVE_TRUST_PROXY` is `1` or `true`, or when it targets the host of an https `POSTREEVE_PUBLIC_URL`.
 
 #### Scenario: Hosted cookie
-- **WHEN** `POSTREEVE_PUBLIC_URL` is `https://postreeve.fly.dev` and the owner signs in there
+- **WHEN** `POSTREEVE_PUBLIC_URL` is `https://box.tail1234.ts.net` and the owner signs in there
 - **THEN** the cookie is `__Host-postreeve-session` with `Secure`
 
 #### Scenario: Forged forwarded scheme
@@ -108,11 +108,15 @@ The signed-in owner SHALL list sessions, with the current one marked, at `GET /a
 - **THEN** every session except the current one stops authorizing requests
 
 ### Requirement: Sign-in attempts are rate-limited per client
-The server SHALL count failed setup, password and passkey attempts per client, identified by `Fly-Client-IP` or the first `X-Forwarded-For` address when the proxy is trusted and by the connection's address otherwise. After 5 failures within 15 minutes it SHALL answer that client's attempts with 429 and `Retry-After` until the window passes. A successful sign-in SHALL clear the client's count.
+The server SHALL count failed setup, password and passkey attempts per client, identified by the rightmost `X-Forwarded-For` address when the proxy is trusted and by the connection's address otherwise. After 5 failures within 15 minutes it SHALL answer that client's attempts with 429 and `Retry-After` until the window passes. A successful sign-in SHALL clear the client's count.
 
 #### Scenario: Password guessing
 - **WHEN** one client fails password sign-in 5 times in a minute
 - **THEN** its sixth attempt answers 429, even with the right password
+
+#### Scenario: Client-supplied forwarding entries
+- **WHEN** a client behind the trusted proxy varies the leftmost `X-Forwarded-For` entries across failed attempts
+- **THEN** its attempts still count against the address the proxy appended
 
 ### Requirement: Distributed guessing is capped
 After 50 failed setup or password attempts across all clients within 15 minutes, the server SHALL answer further setup and password attempts with 429 until the window passes. Passkey sign-in SHALL remain available.
@@ -163,3 +167,10 @@ Settings SHALL have a **Security** section, reachable before any account is conn
 #### Scenario: Adding a passkey later
 - **WHEN** the owner opens Settings → Security and chooses **Add passkey**
 - **THEN** the browser's passkey prompt appears and the new passkey is listed afterwards
+
+### Requirement: Proxy identity headers are not authentication
+The server SHALL NOT authenticate a request by `Tailscale-User-Login`, `Tailscale-User-Name` or any other proxy identity header; only an owner session or the desktop token SHALL authorize API requests.
+
+#### Scenario: Forged Tailscale login
+- **WHEN** a request without a session sends `Tailscale-User-Login: owner@example.test` to `/api/accounts`
+- **THEN** the response is 401
