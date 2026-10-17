@@ -16,6 +16,9 @@ import { CredentialVault } from "./security/credentials";
 import { desktopApiAuthentication } from "./security/desktop-auth";
 import { postreeveSecureHeaders } from "./security/headers";
 import { allowedHostGuard, sameOriginGuard } from "./security/request-origin";
+import { defaultDnsLookup } from "./stalwart/dns";
+import { createMailServerRoutes } from "./stalwart/routes";
+import { MailServerAdmin } from "./stalwart/service";
 
 const store = new Store();
 const providers = new MailProviderRegistry();
@@ -106,6 +109,9 @@ app.use("/api/*", desktopApiAuthentication(desktopToken));
 app.route("/", createApi(service, googleOAuth, {
   oauthReturnUrl: process.env.POSTREEVE_DESKTOP_URL,
 }));
+app.route("/", createMailServerRoutes(new MailServerAdmin({
+  store: store.mailServers, vault, accounts: service, dns: defaultDnsLookup(),
+})));
 app.use("/*", serveStatic({ root: "./dist" }));
 app.get("/*", serveStatic({ path: "./dist/index.html" }));
 

@@ -1,0 +1,22 @@
+v1-ed25519-20261017._domainkey.example.org. IN TXT "v=DKIM1; k=ed25519; h=sha256; p=Wo0dAtfRDMCKQBF5C2zOjHZ9AGG/EE/xrljJe1oBjs8="
+v1-rsa-20261017._domainkey.example.org. IN TXT (
+    "v=DKIM1; k=rsa; h=sha256; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvVfHaZveB3J24wOo5Hu8wLstASetrW+bpdVm2VoDnRRo8vkX/5GEpRfJLG3zG06k9N5u8OXd+OJP0jUF9mNkfvNl0aNT3pFFR03qd69tcxJobnXdxBdgCca9hlUKNx/7VibOo7L+ha/OzNDBKZYY9Kan/cPK9BNyRp68RxdaGjIkbyWoAse+z2v"
+    "4MGtb6h9F8TAZ4YlQXnqu1IIIBt65Hjm2ZvJOIgh4tRhQSZt1GEXmHeTskszV++GvzjbLGVomFuzX62h6hQ7qqz3ZebjDpBikyrVtTkIyRi3K6oVhaq+P4GXq95d+gctqFUHBUd3xsjI1kFWgcA+cVcZ82tF6ywIDAQAB"
+)
+mail.example.org. IN TXT "v=spf1 a -all"
+example.org. IN TXT "v=spf1 mx -all"
+example.org. IN MX 10 mail.example.org.
+_dmarc.example.org. IN TXT "v=DMARC1; p=reject; rua=mailto:postmaster@example.org"
+_caldavs._tcp.example.org. IN SRV 0 1 443 mail.example.org.
+_carddavs._tcp.example.org. IN SRV 0 1 443 mail.example.org.
+_imaps._tcp.example.org. IN SRV 0 1 993 mail.example.org.
+_jmap._tcp.example.org. IN SRV 0 1 443 mail.example.org.
+_pop3s._tcp.example.org. IN SRV 0 1 995 mail.example.org.
+_submissions._tcp.example.org. IN SRV 0 1 465 mail.example.org.
+mta-sts.example.org. IN CNAME mail.example.org.
+_mta-sts.example.org. IN TXT "v=STSv1; id=6649334383955330841"
+_smtp._tls.example.org. IN TXT "v=TLSRPTv1; rua=mailto:postmaster@example.org"
+ua-auto-config.example.org. IN CNAME mail.example.org.
+_ua-auto-config.example.org. IN TXT "v=UAAC1; a=sha256; d=lMetMCttk3N22k9iZMxPCz6ergnNu7Pp5xukQd5xKOw="
+autoconfig.example.org. IN CNAME mail.example.org.
+autodiscover.example.org. IN CNAME mail.example.org.

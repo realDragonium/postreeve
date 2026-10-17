@@ -1,5 +1,6 @@
 import { SynchronizationStore } from "../sync/store";
 import { migrateCorrespondents, suggestRecipients } from "../contacts/correspondents";
+import { MailServerStore, migrateMailServers } from "../stalwart/store";
 import type { OutgoingAttachment } from "../mail/outgoing-content";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -81,6 +82,7 @@ export class Store {
   readonly #db: BunSQLiteDatabase;
   readonly coordinationIdentity: string;
   readonly synchronization: SynchronizationStore;
+  readonly mailServers: MailServerStore;
 
   constructor(path = process.env.POSTREEVE_DB_PATH ?? "./data/postreeve.sqlite") {
     this.coordinationIdentity = path === ":memory:"
@@ -96,6 +98,8 @@ export class Store {
       (tenantId, provider, previous, current) => this.#recordProviderMove(tenantId, provider, previous, current),
       (tenantId, id) => this.#getMessage(tenantId, id));
     migrateCorrespondents(this.#sqlite);
+    migrateMailServers(this.#sqlite);
+    this.mailServers = new MailServerStore(this.#sqlite);
   }
 
   close(): void {
