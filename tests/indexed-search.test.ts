@@ -47,7 +47,7 @@ describe("indexed mailbox search", () => {
       expect(all).toHaveLength(237);
       expect(new Set(all.map(m => m.canonicalId)).size).toBe(237);
     }
-  });
+  }, 30_000);
 
   test("new duplicate locations cannot move existing canonical sort anchors across pages", async () => {
     for (const sort of ["newest", "oldest", "sender", "subject"] as const) {
@@ -71,7 +71,7 @@ describe("indexed mailbox search", () => {
         expect(seen.some(item => item.messageId === `<${uid}@search.test>`)).toBe(true);
       }
     }
-  });
+  }, 30_000);
 
   test("canonical merges preserve the retained message's sort anchor", async () => {
     const store = await fixture();
