@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type Ref } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { CanonicalMessageDetail, Folder, MessageSummary, ReceivedAttachment, TriageAction } from "../shared/contracts";
 import { api } from "./api";
+import { autoPreviewReferences, previewBlob, previewKind } from "./attachment-preview";
 import { initiallyExpanded } from "./conversation-view";
 import { EmailBody } from "./EmailBody";
 import {
@@ -116,7 +117,7 @@ export function Reader(props: ReaderProps) {
     </div>
 
     <div className="hintbar">
-      <span className="t-dim">esc back to list · j k previous and next message · e archive · ! spam · u unread · ⌘Z undo</span>
+      <span className="t-dim">esc back to list · j k previous and next · r reply · a reply all · f forward · e archive · # trash · ! spam · u unread · ⌘Z undo · ? all shortcuts</span>
     </div>
   </>;
 }
@@ -185,6 +186,7 @@ function ConversationMessage(props: {
           </button>)}
         </div>
         {downloadError ? <div className="alert error" role="alert" style={{ marginTop: 8 }}>{downloadError}</div> : null}
+        <AttachmentPreviews accountId={message.ref.accountId} attachments={detail.attachments} />
       </section> : null}
 
       {detail && plan ? <section aria-label="Mailing list" style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 10 }}>
@@ -227,6 +229,78 @@ function ConversationMessage(props: {
       </> : null}
     </> : null}
   </article>;
+}
+
+type PreviewState = { readonly status: "loading" } | { readonly status: "ready"; readonly url: string } | { readonly status: "error"; readonly message: string };
+
+/** Inline images and PDF tabs, built from downloaded bytes so the reader needs no frame or policy change. */
+function AttachmentPreviews({ accountId, attachments }: { accountId: string; attachments: readonly ReceivedAttachment[] }) {
+  const previewable = attachments.filter((attachment) => previewKind(attachment) !== null);
+  const [states, setStates] = useState<ReadonlyMap<string, PreviewState>>(() => new Map());
+  const urls = useRef(new Set<string>());
+  const requested = useRef(new Set<string>());
+
+  useEffect(() => () => {
+    for (const url of urls.current) URL.revokeObjectURL(url);
+  }, []);
+
+  function load(attachment: ReceivedAttachment): Promise<string> {
+    requested.current.add(attachment.reference);
+    setStates((current) => new Map(current).set(attachment.reference, { status: "loading" }));
+    return api.downloadAttachment(accountId, attachment).then((content) => {
+      const blob = previewBlob(content, attachment);
+      if (!blob) throw new Error("This attachment cannot be previewed");
+      const url = URL.createObjectURL(blob);
+      urls.current.add(url);
+      setStates((current) => new Map(current).set(attachment.reference, { status: "ready", url }));
+      return url;
+    }).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : "Preview failed";
+      setStates((current) => new Map(current).set(attachment.reference, { status: "error", message }));
+      throw error;
+    });
+  }
+
+  const auto = autoPreviewReferences(attachments);
+  useEffect(() => {
+    for (const attachment of attachments) {
+      if (auto.has(attachment.reference) && !requested.current.has(attachment.reference)) void load(attachment).catch(() => undefined);
+    }
+  });
+
+  function openPdf(attachment: ReceivedAttachment): void {
+    // Open the tab inside the click so mobile popup blockers allow it, then point it at the bytes.
+    const tab = window.open("", "_blank");
+    if (tab) tab.opener = null;
+    const ready = states.get(attachment.reference);
+    const url = ready?.status === "ready" ? Promise.resolve(ready.url) : load(attachment);
+    void url.then((href) => {
+      if (tab) tab.location.href = href;
+      else window.open(href, "_blank", "noopener,noreferrer");
+    }).catch(() => tab?.close());
+  }
+
+  if (previewable.length === 0) return null;
+  return <div className="attachment-previews" aria-label="Attachment previews">
+    {previewable.map((attachment) => {
+      const state = states.get(attachment.reference);
+      const kind = previewKind(attachment);
+      return <figure key={attachment.reference} className="attachment-preview">
+        {kind === "image" && state?.status === "ready" ? <img src={state.url} alt={attachment.filename} /> : null}
+        <figcaption className="t-dim" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span className="truncate">{attachment.filename}</span>
+          {kind === "pdf" ? <button className="btn-underline" aria-label={`Preview ${attachment.filename}`} disabled={state?.status === "loading"} onClick={() => openPdf(attachment)}>
+            {state?.status === "loading" ? "Opening…" : "Preview"}
+          </button> : null}
+          {kind === "image" && (state === undefined || state.status === "error") ? <button className="btn-underline" aria-label={`Preview ${attachment.filename}`} onClick={() => void load(attachment).catch(() => undefined)}>
+            {state?.status === "error" ? "Try again" : "Preview"}
+          </button> : null}
+          {state?.status === "loading" && kind === "image" ? <span>Loading preview…</span> : null}
+        </figcaption>
+        {state?.status === "error" ? <div className="alert error" role="alert">{state.message}</div> : null}
+      </figure>;
+    })}
+  </div>;
 }
 
 function formatAttachmentSize(bytes: number): string {

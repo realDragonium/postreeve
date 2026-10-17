@@ -37,7 +37,7 @@ Action shortcuts SHALL act on the selection, or else the open or focused message
 - **THEN** the UI sends a `trash` action for that message
 
 ### Requirement: Go-to shortcuts
-`g` followed within 1.5 seconds by `i`, `s`, `d` or `t` SHALL go to Inbox, Sent, Drafts or Trash in the current account. In the unified view `g i` and `g s` SHALL switch the unified folder, `g d` SHALL open the drafts list and `g t` SHALL open the first account's Trash. A `g` with no target key in time SHALL be dropped.
+`g` followed within 1.5 seconds by `i`, `s`, `d` or `t` SHALL go to Inbox, Sent, Drafts or Trash in the current account. In the unified view it SHALL switch the unified folder. An account without such a folder SHALL show `This account has no <folder> folder.` A `g` with no target key in time SHALL be dropped.
 
 #### Scenario: Go to Sent
 - **WHEN** a person viewing an account's Inbox presses `g` then `s`
