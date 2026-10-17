@@ -51,7 +51,7 @@ export function MailServerView() {
         {tab === "Reports" ? <ReportsPanel serverId={selected.id} /> : null}
         {tab === "Spam" ? <SpamPanel serverId={selected.id} /> : null}
         {tab === "DNS providers" ? <DnsProvidersPanel /> : null}
-        {tab === "Proposals" ? <ProposalsPanel proposals={(proposals.data ?? []).filter(({ serverId }) => serverId === selected.id)} /> : null}
+        {tab === "Proposals" ? <ProposalsPanel serverId={selected.id} proposals={(proposals.data ?? []).filter(({ serverId }) => serverId === selected.id)} /> : null}
       </> : null}
     </div></div>
     {connecting ? <ConnectSheet onClose={() => setConnecting(false)} onConnected={(id) => { setConnecting(false); setSelectedId(id); }} /> : null}
@@ -265,11 +265,26 @@ function SpamList({ serverId, list, title, hint }: { serverId: string; list: Spa
   </div>;
 }
 
-function ProposalsPanel({ proposals }: { proposals: readonly MailServerProposal[] }) {
+function ProposalsPanel({ serverId, proposals }: { serverId: string; proposals: readonly MailServerProposal[] }) {
+  const client = useQueryClient();
   const pending = proposals.filter(({ status }) => status === "pending");
   const decided = proposals.filter(({ status }) => status !== "pending");
+  // A migration plan file (scripts/migration/poste-inventory.ts) becomes a pending proposal to review like any other.
+  const importPlan = useMutation({
+    mutationFn: async (file: File) => {
+      const plan = JSON.parse(await file.text()) as { title?: unknown; operations?: unknown };
+      return api.createProposal(serverId, { title: String(plan.title ?? file.name), operations: plan.operations as never });
+    },
+    onSuccess: () => client.invalidateQueries({ queryKey: ["mail-server-proposals"] }),
+  });
   return <section>
     <p className="t-body" style={{ marginTop: 0 }}>Agents can prepare mail server changes; nothing happens until you approve them here.</p>
+    <label className="chip" style={{ cursor: "pointer", marginBottom: 12 }}>
+      Import migration plan
+      <input type="file" accept="application/json,.json" style={{ display: "none" }} aria-label="Import migration plan"
+        onChange={(event) => { const file = event.target.files?.[0]; if (file) importPlan.mutate(file); event.target.value = ""; }} />
+    </label>
+    <ErrorLine error={importPlan.error} />
     {pending.length === 0 ? <p className="t-dim">No proposals waiting.</p> : null}
     {pending.map((proposal) => <PendingProposal key={proposal.id} proposal={proposal} />)}
     {decided.length ? <>

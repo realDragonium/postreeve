@@ -120,4 +120,4 @@ test-results/
 backups/
 
 # Mail migration working files (addresses, passwords)
-migration/
+/migration/

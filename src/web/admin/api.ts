@@ -17,6 +17,7 @@ import {
   spamSettingsSchema,
   type ApproveMailServerProposalInput,
   type ConnectMailServerInput,
+  type CreateMailServerProposalInput,
   type CreateMailboxInput,
   type CreateMailingListInput,
   type DkimAlgorithm,
@@ -97,6 +98,7 @@ export const mailServerApi = {
   connectDnsProvider: (input: ConnectDnsProviderInput) => request("", dnsProviderSchema, "POST", input, "/api/dns-providers"),
   disconnectDnsProvider: (id: string) => request(`/${id}`, ok, "DELETE", undefined, "/api/dns-providers"),
 
+  createProposal: (id: string, input: CreateMailServerProposalInput) => request(`${server(id)}/proposals`, mailServerProposalSchema, "POST", input),
   proposals: () => request("/proposals", z.array(mailServerProposalSchema)),
   approve: (proposalId: string, input: ApproveMailServerProposalInput) => request(`/proposals/${proposalId}/approve`, mailServerProposalSchema, "POST", input),
   reject: (proposalId: string) => request(`/proposals/${proposalId}/reject`, mailServerProposalSchema, "POST"),

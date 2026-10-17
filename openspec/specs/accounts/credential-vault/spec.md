@@ -17,7 +17,7 @@ The system SHALL encrypt each account's credentials with AES-256-GCM before writ
 - **THEN** the two envelopes differ because each uses a new IV
 
 ### Requirement: What the vault protects
-The encrypted credentials SHALL hold the IMAP and SMTP host, port, TLS setting, username and password of an IMAP account, the refresh token of a Gmail account, and the API key or admin username and password of a connected mail server. The account's ID, name, email address and kind, and the mail server's ID, name, admin URL, credential kind and mail hostname, SHALL be stored unencrypted.
+The encrypted credentials SHALL hold the IMAP and SMTP host, port, TLS setting, username and password of an IMAP account, the refresh token of a Gmail account, the API key or admin username and password of a connected mail server, and the API token or key and secret of a DNS provider. The account's ID, name, email address and kind, the mail server's ID, name, admin URL, credential kind and mail hostname, and the DNS provider's ID, name and kind, SHALL be stored unencrypted.
 
 #### Scenario: Gmail account record
 - **WHEN** a Gmail account is connected
@@ -26,6 +26,10 @@ The encrypted credentials SHALL hold the IMAP and SMTP host, port, TLS setting, 
 #### Scenario: Mail server record
 - **WHEN** a Stalwart server is connected with an API key
 - **THEN** its database record contains an encrypted envelope that does not contain the API key, and its admin URL is stored in plain text
+
+#### Scenario: DNS provider record
+- **WHEN** a Cloudflare provider is connected with an API token
+- **THEN** its database record contains an encrypted envelope that does not contain the token, and its kind `cloudflare` is stored in plain text
 
 ### Requirement: The encryption key comes from POSTREEVE_MASTER_KEY
 The system SHALL read the key from `POSTREEVE_MASTER_KEY` as base64 that decodes to exactly 32 bytes. A set key of any other length SHALL stop the server from starting with `POSTREEVE_MASTER_KEY must be a base64-encoded 32-byte key`. When the variable is unset or empty the server SHALL start, but storing or reading credentials SHALL fail with `Set POSTREEVE_MASTER_KEY before adding or using mail accounts`.

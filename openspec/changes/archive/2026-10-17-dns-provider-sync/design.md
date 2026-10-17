@@ -29,9 +29,9 @@ See proposal.md. The Stalwart admin change (archived `2026-10-17-stalwart-mail-s
 
 5. **Approval boundary.** Plan and apply routes live under `/api/mail-servers/...`, behind the owner guard and same-origin check. Agents get the proposal operation `applyDnsChanges { domain }`; approving it computes the plan at that moment and applies only the default selection. Agents cannot select foreign changes.
 
-6. **GoDaddy 403.** GoDaddy limited its production DNS API in 2024 to accounts meeting its conditions (such as owning enough domains or a paid plan). Any 403 from GoDaddy becomes `status: "unavailable"` with that explanation, and the DNS tab keeps the copyable checklist. Connecting still succeeds when `GET /v1/domains` works but records are refused, so the owner sees the reason per domain. GoDaddy's field names and SRV shape follow its public v1 docs and were not verified against a live account; the fake follows the same docs.
+6. **GoDaddy 403.** GoDaddy limited its production DNS API in 2024 to accounts meeting its conditions (such as owning enough domains or a paid plan). Any 403 from GoDaddy becomes `status: "unavailable"` with that explanation, and the DNS tab keeps the copyable checklist. Connecting still succeeds when `GET /v1/domains` works but records are refused, so the owner sees the reason per domain. GoDaddy's field names follow its public v1 docs and were not verified against a live account; the fake follows the same docs. GoDaddy SRV records carry separate service and protocol fields whose exact shape I could not confirm, so the GoDaddy client does not write SRV records; they stay in the checklist as manual records, as CAA and TLSA do everywhere.
 
-7. **TTL.** New and updated records use 300 seconds. That suits the migration window; the owner can raise TTLs later at the provider.
+7. **TTL.** New and updated records use 300 seconds at Cloudflare and 600 at GoDaddy (its minimum). That suits the migration window; the owner can raise TTLs later at the provider.
 
 ### Host layout decisions (docs)
 
@@ -42,6 +42,10 @@ See proposal.md. The Stalwart admin change (archived `2026-10-17-stalwart-mail-s
 10. **How Postreeve reaches the admin API.** Postreeve runs in Docker (bridge network), so the host's `127.0.0.1:8080` is not loopback inside its container. Both compose projects join one external Docker network `mail-admin` marked `internal: true`; Postreeve connects to `http://stalwart:8080` (a single-label private name, which the admin URL policy already allows over HTTP). The owner's browser reaches Stalwart's admin through `tailscale serve --https=8443` on the host's `127.0.0.1:8080`. No admin port is published on a public interface, so Docker's ufw bypass does not matter.
 
 11. **Cutover: one maintenance window on the same host.** Stalwart is staged with its mail ports unpublished (IMAP on `127.0.0.1:1993` for the copy) while poste.io serves mail; principals come from the inventory proposal; DKIM records are published through this change before the window; inside the window poste.io stops, Stalwart publishes 25/465/587/993/4190, a final incremental imapsync runs from poste.io on a loopback port, and Postreeve applies the remaining DNS plan. Rollback: stop Stalwart, start poste.io; DNS needs nothing because poste.io's DKIM record is kept.
+
+12. **Migration plan import moved into the UI.** With owner login merged, every `/api` write needs the owner's browser session, so a command-line import would have to handle a session cookie. The Proposals tab reads `plan.json` in the browser and posts it as a proposal with the owner's own session instead; the earlier `import-plan.ts` is gone.
+
+13. **Merge with the integration branch.** The mail server and DNS routes mount through `createServerApp`, behind `ownerApiGuard` and the same-origin check. The mail server tools are added to the remote MCP tool list for grants that cover every account (a mail server spans all mailboxes), and catch-alls now register `*@domain` identities.
 
 ## Risks / Trade-offs
 

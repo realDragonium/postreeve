@@ -112,9 +112,11 @@ Search matches words and `"quoted phrases"` as literal case-insensitive text in 
 
 Creating a mailbox can also add it to Postreeve as an IMAP/SMTP account in one step: Postreeve creates a Stalwart app password named `Postreeve` and stores only that, never the mailbox password. Adding an alias or catch-all to such a mailbox registers the matching send-as identity.
 
-DNS checks use DNS-over-HTTPS (`https://cloudflare-dns.com/dns-query`, override with `POSTREEVE_DOH_URL`) and send only record names and types; set `POSTREEVE_DNS_RESOLVER=system` to use the operating system's resolver instead. Agents can read domains, DNS health and the queue and can prepare a mail server proposal, which only you approve under **Proposals**.
+Connect Cloudflare (an API token with Zone › DNS › Edit) or GoDaddy (API key and secret) under **Mail server › DNS providers**, and each domain's DNS tab shows the record changes needed to match the mail server. Nothing is written until you confirm; records Postreeve did not create change only when you tick them, and a zone that changed since you looked must be reviewed again. When GoDaddy refuses API access, which it does for many accounts since 2024, the values stay available to copy.
 
-Deployment next to Postreeve, with mail ports public and the admin on your tailnet only: `docs/stalwart.md`. Moving off poste.io: `docs/migrate-poste-io.md`. To test against a real but throwaway Stalwart: `bun scripts/stalwart-test-instance.ts`, then run `tests/stalwart-live.test.ts` with the variables it prints.
+DNS checks use DNS-over-HTTPS (`https://cloudflare-dns.com/dns-query`, override with `POSTREEVE_DOH_URL`) and send only record names and types; set `POSTREEVE_DNS_RESOLVER=system` to use the operating system's resolver instead. Agents can read domains, DNS health and the queue and can prepare a mail server proposal (including publishing a domain's DNS records), which only you approve under **Proposals**.
+
+Deployment next to Postreeve, with mail ports public, autoconfig and MTA-STS through Caddy and the admin on your tailnet only: `docs/stalwart.md` and `docs/self-host.md`. Moving off poste.io: `docs/migrate-poste-io.md`. To test against a real but throwaway Stalwart: `bun scripts/stalwart-test-instance.ts`, then run `tests/stalwart-live.test.ts` with the variables it prints.
 
 ## Use WebMCP with Codex
 

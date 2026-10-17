@@ -1,0 +1,8 @@
+# Staging overlay while poste.io still owns the mail ports on this host (docs/migrate-poste-io.md):
+#   docker compose -f compose.yaml -f compose.staging.yaml up -d
+# Publishes no mail port to the internet; IMAP only on loopback for imapsync.
+services:
+  stalwart:
+    ports: !override
+      - "127.0.0.1:8081:8080"   # admin and management API
+      - "127.0.0.1:1993:993"    # IMAP for the bulk copy

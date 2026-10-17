@@ -168,25 +168,28 @@ Verify the poste.io variable names against its documentation for your image vers
 
 ### Stalwart (after the cutover)
 
-`feat/stalwart-admin` writes the Stalwart Compose file. It must publish Stalwart's HTTP listener on `127.0.0.1` only. In Caddy, only the public mail routes are forwarded to it, and the admin UI is reachable only through `tailscale serve`:
+`deploy/stalwart/compose.yaml` runs Stalwart v0.16.26 as its own Compose project (setup in `docs/stalwart.md`). Its web listener (admin UI, management API, autoconfig, MTA-STS) publishes on `127.0.0.1:8081` only; host port 8081 because poste.io keeps `127.0.0.1:8080` until the cutover. The mail ports 25, 465, 587, 993 and 4190 publish directly and never go through Caddy.
+
+After the cutover, replace the poste.io `mail.<domain>` blocks with these. Caddy forwards only the paths mail clients and other servers fetch, and answers 404 for everything else, including `/admin`, `/api` and `/jmap`:
 
 ```caddyfile
+# Stalwart, public paths only. Stalwart serves its management API on /jmap, the same path as mail JMAP, so
+# /jmap stays private: Postreeve and phones use IMAP and SMTP.
 mail.<domain> {
-	@public path /.well-known/jmap /jmap /jmap/* /.well-known/autoconfig/* /autodiscover/* /mail/config-v1.1.xml
+	@public path /.well-known/autoconfig/* /mail/config-v1.1.xml /autodiscover/* /.well-known/mta-sts.txt
 	handle @public {
-		reverse_proxy 127.0.0.1:<stalwart-http-port>
+		reverse_proxy 127.0.0.1:8081
 	}
 	handle {
 		respond 404
 	}
 }
-autoconfig.<domain>, autodiscover.<domain> {
-	reverse_proxy 127.0.0.1:<stalwart-http-port>
-}
-mta-sts.<domain> {
-	@policy path /.well-known/mta-sts.txt
-	handle @policy {
-		reverse_proxy 127.0.0.1:<stalwart-http-port>
+
+# One block per mail domain: Thunderbird autoconfig, Outlook autodiscover and the MTA-STS policy.
+autoconfig.<domain>, autodiscover.<domain>, mta-sts.<domain> {
+	@public path /.well-known/autoconfig/* /mail/config-v1.1.xml /autodiscover/* /.well-known/mta-sts.txt
+	handle @public {
+		reverse_proxy 127.0.0.1:8081
 	}
 	handle {
 		respond 404
@@ -194,7 +197,14 @@ mta-sts.<domain> {
 }
 ```
 
-The exact paths and port come from `feat/stalwart-admin`. Stalwart's certificate for IMAP/SMTP needs the same arrangement as poste.io's: forward its ACME HTTP-01 path through Caddy, or point Stalwart at Caddy's certificate files.
+Add the `autoconfig`, `autodiscover` and `mta-sts` names of every mail domain to that second block (Caddy gets a certificate for each by HTTP-01 on port 80, which it owns). Postreeve's DNS checklist lists those CNAMEs per domain and can publish them at Cloudflare.
+
+**Certificates for IMAP and SMTP** come from Stalwart's own ACME client with Cloudflare DNS-01, not from Caddy: it works before the cutover while poste.io still answers on 80/443, needs no certificate files shared between Caddy and Stalwart, and renews inside Stalwart without restarts. Setup is in `docs/stalwart.md`.
+
+**The admin and management API** are tailnet-only:
+
+- Your devices: `sudo tailscale serve --bg --https=8443 http://127.0.0.1:8081`, then `https://<machine>.<tailnet>.ts.net:8443/admin`.
+- Postreeve: its container cannot reach the host's loopback, so both projects join the private Docker network `mail-admin` (`docker network create --internal mail-admin`, no route to the internet). Start Postreeve with `docker compose -f compose.yaml -f deploy/stalwart/postreeve-mail-admin.yaml up -d` and connect the server in Postreeve as `http://stalwart:8080`.
 
 ## Firewall
 
@@ -205,7 +215,7 @@ sudo ufw default deny incoming
 sudo ufw default allow outgoing
 sudo ufw allow 22/tcp                       # first, so enabling ufw cannot lock you out
 sudo ufw allow 80,443/tcp                   # Caddy
-sudo ufw allow 25,465,587,993/tcp           # mail
+sudo ufw allow 25,465,587,993,4190/tcp      # mail (4190: ManageSieve, Stalwart)
 sudo ufw allow 41641/udp                    # Tailscale direct connections (optional; it falls back to relays)
 sudo ufw allow in on tailscale0             # everything from your tailnet
 sudo ufw enable && sudo ufw status verbose
@@ -213,7 +223,7 @@ sudo ufw enable && sudo ufw status verbose
 
 Once `ssh <machine>` works over the tailnet, run `sudo ufw delete allow 22/tcp` so SSH is reachable only through Tailscale. Mirror the same rules in Contabo's firewall panel if you use it, as a second layer.
 
-**Docker-published ports bypass ufw.** Docker adds its own iptables rules that run before ufw's, so `ports: ["3000:3000"]` would be reachable from the internet even with ufw denying 3000. Every Postreeve, Stalwart and mail-admin port must publish as `127.0.0.1:<port>:<port>`. Postreeve's `compose.yaml` already does. Only the mail ports themselves, which are meant to be public, may publish on all interfaces. Check from outside the VPS with `nmap -Pn <public IP>`: only 22 (until removed), 25, 80, 443, 465, 587 and 993 should be open.
+**Docker-published ports bypass ufw.** Docker adds its own iptables rules that run before ufw's, so `ports: ["3000:3000"]` would be reachable from the internet even with ufw denying 3000. Every Postreeve, Stalwart and mail-admin port must publish as `127.0.0.1:<port>:<port>`. Postreeve's `compose.yaml` already does. Only the mail ports themselves, which are meant to be public, may publish on all interfaces. Check from outside the VPS with `nmap -Pn <public IP>`: only 22 (until removed), 25, 80, 443, 465, 587, 993 and 4190 should be open.
 
 ## Google accounts
 

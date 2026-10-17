@@ -1,0 +1,10 @@
+# Overlay for Postreeve's compose.yaml: joins the private `mail-admin` network so Postreeve reaches Stalwart's
+# management API as http://stalwart:8080 without any port on the host. From the repository root:
+#   docker compose -f compose.yaml -f deploy/stalwart/postreeve-mail-admin.yaml up -d
+services:
+  postreeve:
+    networks: [default, mail-admin]
+
+networks:
+  mail-admin:
+    external: true

@@ -186,7 +186,7 @@ Agents prepare drafts; only the person sends them, from the compose form.
 
 ## Mail server (Stalwart)
 
-The Mail server tools are shared agent tool definitions (`src/server/stalwart/agent-tools.ts`) for the remote agent layer; they are not part of the page's WebMCP tool set below.
+The Mail server tools are offered on remote MCP only (read tools under `mail:read`, the proposal tool under `mail:propose`), and only to agents granted every account; they are not part of the page's WebMCP tool set below.
 
 | Feature | Web UI | Agent tools | Tool or reason |
 | --- | --- | --- | --- |
@@ -201,6 +201,7 @@ The Mail server tools are shared agent tool definitions (`src/server/stalwart/ag
 | Delivery queue: view, retry, cancel | Complete | Partial | `inspect_mail_server_queue`; retry and cancel are proposal operations. |
 | Received DMARC and TLS reports | Complete | Not covered | |
 | Spam thresholds and trusted/blocked domains | Complete | Proposal only | Threshold changes are proposal operations; list edits are UI only. |
+| Publish DNS records at Cloudflare or GoDaddy after reviewing a diff | Complete | Proposal only | `applyDnsChanges` applies only the default selection; records Postreeve did not create need the owner's tick. |
 | Approve or reject a mail server proposal | Complete | Not available | Only the human-facing UI approves. |
 
 ## Current WebMCP tool set

@@ -17,7 +17,7 @@ The shared agent tool definitions SHALL include `list_mail_servers`, `list_mail_
 - **THEN** it receives each queued message's sender, recipient addresses, statuses, retry count and last error, without message bodies
 
 ### Requirement: Agents propose mail server changes
-The shared agent tool definitions SHALL include `propose_mail_server_change`, which stores a proposal holding a title and a list of typed operations (add or remove a domain, mailbox, alias, catch-all, mailing list or DKIM key, change a quota, display name or spam setting, retry or cancel a queued message). It SHALL validate each operation's shape and SHALL NOT change anything on the mail server.
+The shared agent tool definitions SHALL include `propose_mail_server_change`, which stores a proposal holding a title and a list of typed operations (add or remove a domain, mailbox, alias, catch-all, mailing list or DKIM key, change a quota, display name or spam setting, retry or cancel a queued message, apply a domain's DNS changes). It SHALL validate each operation's shape and SHALL NOT change anything on the mail server or in DNS.
 
 #### Scenario: Agent prepares a mailbox
 - **WHEN** an agent proposes creating `carol@example.org`
@@ -26,6 +26,10 @@ The shared agent tool definitions SHALL include `propose_mail_server_change`, wh
 #### Scenario: Agent supplies a password
 - **WHEN** an agent's proposed mailbox operation includes a password
 - **THEN** the tool rejects the input, because the owner sets passwords at approval time
+
+#### Scenario: Agent proposes DNS changes
+- **WHEN** an agent proposes applying the DNS changes of `example.org`
+- **THEN** the proposal is stored as `pending`, no DNS record changes, and approving it applies only the changes that are selected by default in the diff
 
 ### Requirement: Only the owner approves a mail server proposal
 Pending mail server proposals SHALL be listed in the Mail server area. Only the human-facing UI SHALL approve one, which applies its operations in order and records each result; an operation that fails SHALL stop the remaining ones. No agent tool SHALL approve, apply or edit the status of a proposal. The owner SHALL be able to reject a proposal.
