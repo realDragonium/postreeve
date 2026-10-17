@@ -301,8 +301,8 @@ export const api = {
   downloadAttachment: requestAttachment,
   conversation: (id: string, signal?: AbortSignal): Promise<CanonicalConversation> =>
     request(`/conversations/${encodeURIComponent(id)}`, canonicalConversationSchema, withSignal(signal)),
-  conversationMessages: (id: string, accountId: string, signal?: AbortSignal): Promise<CanonicalMessageSummary[]> =>
-    request(`/conversations/${encodeURIComponent(id)}/messages?accountId=${encodeURIComponent(accountId)}`,
+  conversationMessages: (id: string, accountId?: string, signal?: AbortSignal): Promise<CanonicalMessageSummary[]> =>
+    request(`/conversations/${encodeURIComponent(id)}/messages${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ""}`,
       canonicalMessageSummarySchema.array(), withSignal(signal)),
   sendMessage: (input: SendMessageInput, signal?: AbortSignal): Promise<SendReceipt> =>
     request("/messages/send", sendReceiptSchema, {
@@ -318,8 +318,8 @@ export const api = {
       ...jsonBody(input),
       ...withSignal(signal),
     }),
-  proposals: (accountId: string): Promise<Proposal[]> =>
-    request(`/proposals?accountId=${encodeURIComponent(accountId)}`, proposalSchema.array()),
+  proposals: (accountId: string, signal?: AbortSignal): Promise<Proposal[]> =>
+    request(`/proposals?accountId=${encodeURIComponent(accountId)}`, proposalSchema.array(), withSignal(signal)),
   updateProposal: (id: string, input: UpdateProposalInput, signal?: AbortSignal): Promise<Proposal> =>
     request(`/proposals/${encodeURIComponent(id)}`, proposalSchema, {
       method: "PUT",

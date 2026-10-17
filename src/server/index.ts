@@ -3,6 +3,7 @@ import { DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_MAX_MESSAGE_BYTES } from "./mail/outg
 import { serveStatic } from "hono/bun";
 import { Hono } from "hono";
 import { z } from "zod";
+import { createAgentAccess } from "./agent-access";
 import { createApi } from "./api";
 import { PostreeveService } from "./core/postreeve";
 import { Store } from "./db/store";
@@ -106,6 +107,7 @@ app.use("/api/*", desktopApiAuthentication(desktopToken));
 app.route("/", createApi(service, googleOAuth, {
   oauthReturnUrl: process.env.POSTREEVE_DESKTOP_URL,
 }));
+app.route("/", createAgentAccess({ service, store: store.agentAccess, publicUrl: process.env.POSTREEVE_PUBLIC_URL }));
 app.use("/*", serveStatic({ root: "./dist" }));
 app.get("/*", serveStatic({ path: "./dist/index.html" }));
 

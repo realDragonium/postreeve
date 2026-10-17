@@ -4,7 +4,7 @@ import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } f
 import type { Account, Draft, Folder, Identity, MessageSummary, ReceivedAttachment, TriageAction } from "../shared/contracts";
 import { api } from "./api";
 import { registerPostreeveWebMcp } from "../server/webmcp/register";
-import { subscribeToWebMcpFolderLists, subscribeToWebMcpMailboxViews, webMcpServices } from "./webmcp";
+import { subscribeToWebMcpFolderLists, subscribeToWebMcpMailboxViews, subscribeToWebMcpProposalChanges, webMcpServices } from "./webmcp";
 import { exposedToolNames, loadHiddenTools, storeHiddenTools } from "./assistant-tools";
 import { ActivityView } from "./ActivityView";
 import { MessageList } from "./MessageList";
@@ -470,9 +470,13 @@ function App() {
       setSelected(new Set());
       flash("WebMCP updated the folder list.");
     });
+    const unsubscribeProposals = subscribeToWebMcpProposalChanges((accountId) => {
+      void queryClient.invalidateQueries({ queryKey: ["proposals", accountId] });
+    });
     return () => {
       unsubscribeViews();
       unsubscribeFolders();
+      unsubscribeProposals();
     };
   }, [queryClient]);
 

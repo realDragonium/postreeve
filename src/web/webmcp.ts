@@ -1,12 +1,15 @@
 import type {
   CreateFolderInput,
+  CreateProposalInput,
   DeleteFolderInput,
   DirectActionInput,
   Folder,
   MessageRef,
   RenameFolderInput,
   SendMessageInput,
+  UpdateProposalInput,
 } from "../shared/contracts";
+import { readConversationDetails } from "../server/webmcp/conversation";
 import type {
   WebMcpListMessagesInput,
   WebMcpMailboxView,
@@ -19,7 +22,21 @@ import { recordAssistantBatch } from "./provenance";
 type MailboxViewListener = (view: WebMcpMailboxView) => void;
 type FolderListListener = (accountId: string, folders: readonly Folder[]) => void;
 
+type ProposalChangeListener = (accountId: string) => void;
+
 const mailboxViewListeners = new Set<MailboxViewListener>();
+const proposalChangeListeners = new Set<ProposalChangeListener>();
+
+/** Agent-prepared proposals must show on their messages without a reload. */
+export function subscribeToWebMcpProposalChanges(listener: ProposalChangeListener): () => void {
+  proposalChangeListeners.add(listener);
+  return () => proposalChangeListeners.delete(listener);
+}
+
+function proposalChanged<T extends { accountId: string }>(proposal: T): T {
+  for (const listener of proposalChangeListeners) listener(proposal.accountId);
+  return proposal;
+}
 const folderListListeners = new Set<FolderListListener>();
 
 export function subscribeToWebMcpMailboxViews(listener: MailboxViewListener): () => void {
@@ -65,6 +82,11 @@ export const webMcpServices: WebMcpServices = {
     api.queryMessages({ sources: input.sources ?? [{ accountId: input.accountId, mailbox: input.mailbox }],
       limit: input.limit, filter: input.filter, sort: input.sort, ...(input.cursor ? { cursor: input.cursor } : {}) }, signal),
   readMessages: (messages: readonly MessageRef[], signal) => api.readMessages(messages, signal),
+  readConversation: async (conversationId, signal) => readConversationDetails(
+    await api.conversationMessages(conversationId, undefined, signal),
+    (references) => api.readMessages(references, signal),
+    50,
+  ),
   searchMessages: (input: WebMcpSearchMessagesInput, signal) =>
     api.queryMessages({ sources: input.sources ?? [{ accountId: input.accountId, mailbox: input.mailbox }],
       query: input.query, limit: input.limit, filter: input.filter, sort: input.sort, ...(input.cursor ? { cursor: input.cursor } : {}) }, signal),
@@ -76,5 +98,9 @@ export const webMcpServices: WebMcpServices = {
   },
   listActivity: (accountId, signal) => api.batches(accountId, signal),
   undoBatch: (batchId, signal) => api.undoBatch(batchId, signal),
+  listProposals: (accountId, signal) => api.proposals(accountId, signal),
+  createProposal: async (input: CreateProposalInput, signal) => proposalChanged(await api.createProposal(input, signal)),
+  updateProposal: async (proposalId, input: UpdateProposalInput, signal) =>
+    proposalChanged(await api.updateProposal(proposalId, input, signal)),
   showMailboxView,
 };

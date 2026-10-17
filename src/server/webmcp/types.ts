@@ -3,6 +3,7 @@ import type { AccountHealth, SynchronizationStatus, Reauthorization } from "../.
 import type {
   Account,
   CanonicalMessageDetail,
+  CreateProposalInput,
   CanonicalMessageSummary,
   CreateFolderInput,
   DeleteFolderInput,
@@ -11,9 +12,11 @@ import type {
   ListMessagesInput,
   MessageRef,
   OperationBatch,
+  Proposal,
   RenameFolderInput,
   SendMessageInput,
   SendReceipt,
+  UpdateProposalInput,
 } from "../../shared/contracts.ts";
 
 export interface WebMcpServices {
@@ -27,11 +30,16 @@ export interface WebMcpServices {
   deleteFolder(input: DeleteFolderInput, signal: AbortSignal): Promise<readonly Folder[]>;
   listMessages(input: WebMcpListMessagesInput, signal: AbortSignal): Promise<MailboxPage>;
   readMessages(messages: readonly MessageRef[], signal: AbortSignal): Promise<readonly CanonicalMessageDetail[]>;
+  /** Every message of the conversation the caller may see, with full details, oldest first. */
+  readConversation(conversationId: string, signal: AbortSignal): Promise<readonly CanonicalMessageDetail[]>;
   searchMessages(input: WebMcpSearchMessagesInput, signal: AbortSignal): Promise<MailboxPage>;
   sendMessage(input: SendMessageInput, signal: AbortSignal): Promise<SendReceipt>;
   applyMessageActions(input: DirectActionInput, signal: AbortSignal): Promise<OperationBatch>;
   listActivity(accountId: string, signal: AbortSignal): Promise<readonly OperationBatch[]>;
   undoBatch(batchId: string, signal: AbortSignal): Promise<OperationBatch>;
+  listProposals(accountId: string, signal: AbortSignal): Promise<readonly Proposal[]>;
+  createProposal(input: CreateProposalInput, signal: AbortSignal): Promise<Proposal>;
+  updateProposal(proposalId: string, input: UpdateProposalInput, signal: AbortSignal): Promise<Proposal>;
   showMailboxView(view: WebMcpMailboxView): void;
 }
 
@@ -68,6 +76,17 @@ export interface WebMcpTool {
   inputSchema?: object;
   annotations?: WebMcpToolAnnotations;
   execute(input: unknown, options: WebMcpExecuteOptions): Promise<unknown>;
+}
+
+/** Which grant scope a tool needs on remote MCP; the page offers every tool the person exposes. */
+export type AgentToolScope = "read" | "propose" | "act";
+export type AgentToolSurface = "webmcp" | "remote";
+
+/** One definition shared by page WebMCP and remote MCP. */
+export interface AgentTool extends WebMcpTool {
+  readonly scope: AgentToolScope;
+  readonly surfaces: readonly AgentToolSurface[];
+  readonly destructive: boolean;
 }
 
 export interface WebMcpExecuteOptions {

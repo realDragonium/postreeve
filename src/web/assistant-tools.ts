@@ -15,13 +15,17 @@ export const assistantTools: readonly AssistantTool[] = [
   { name: "list_folders", effect: "read" },
   { name: "list_messages", effect: "read" },
   { name: "read_messages", effect: "read" },
+  { name: "read_conversation", effect: "read" },
   { name: "search_messages", effect: "read" },
   { name: "list_activity", effect: "read" },
+  { name: "list_proposals", effect: "read" },
   { name: "create_folder", effect: "write" },
   { name: "rename_folder", effect: "write" },
   { name: "delete_folder", effect: "write · destructive" },
   { name: "apply_message_actions", effect: "write · undoable" },
   { name: "undo_batch", effect: "write · undoable" },
+  { name: "create_proposal", effect: "write · proposal" },
+  { name: "update_proposal", effect: "write · proposal" },
   { name: "send_message", effect: "irreversible" },
 ];
 
