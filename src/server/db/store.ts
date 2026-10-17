@@ -1,5 +1,8 @@
 import { SynchronizationStore } from "../sync/store";
 import { migrateCorrespondents, suggestRecipients } from "../contacts/correspondents";
+import { OwnerStore } from "../security/owner-store";
+import { AgentAccessStore, migrateAgentAccess } from "../agent-access/store";
+import { migrateFolderMappings, readFolderMappings, replaceFolderMappings as writeFolderMappings } from "./folder-mappings";
 import type { OutgoingAttachment } from "../mail/outgoing-content";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -14,6 +17,7 @@ import type {
   CanonicalMessageObservation,
   Draft,
   DraftContent,
+  FolderMappings,
   Identity,
   Signature,
   MailProviderKind,
@@ -81,6 +85,8 @@ export class Store {
   readonly #db: BunSQLiteDatabase;
   readonly coordinationIdentity: string;
   readonly synchronization: SynchronizationStore;
+  readonly owner: OwnerStore;
+  readonly agentAccess: AgentAccessStore;
 
   constructor(path = process.env.POSTREEVE_DB_PATH ?? "./data/postreeve.sqlite") {
     this.coordinationIdentity = path === ":memory:"
@@ -88,7 +94,7 @@ export class Store {
       : `file:${resolve(path)}`;
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.#sqlite = new Database(path, { create: true, strict: true });
-    this.#sqlite.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+    this.#sqlite.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
     this.#migrate();
     this.#db = drizzle(this.#sqlite);
     this.synchronization = new SynchronizationStore(this.#sqlite,
@@ -96,6 +102,10 @@ export class Store {
       (tenantId, provider, previous, current) => this.#recordProviderMove(tenantId, provider, previous, current),
       (tenantId, id) => this.#getMessage(tenantId, id));
     migrateCorrespondents(this.#sqlite);
+    this.owner = new OwnerStore(this.#sqlite);
+    migrateAgentAccess(this.#sqlite);
+    this.agentAccess = new AgentAccessStore(this.#sqlite);
+    migrateFolderMappings(this.#sqlite);
   }
 
   close(): void {
@@ -153,6 +163,7 @@ export class Store {
       this.#sqlite.query("DELETE FROM drafts WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM identities WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM signatures WHERE account_id = ?").run(accountId);
+      this.#sqlite.query("DELETE FROM folder_mappings WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM draft_tombstones WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_provider_conversations WHERE account_id = ?").run(accountId);
       this.#sqlite.query("DELETE FROM message_locations WHERE account_id = ?").run(accountId);
@@ -204,6 +215,14 @@ export class Store {
           .run(tenantId, accountId, removed.address);
       }
     }).immediate();
+  }
+
+  folderMappings(tenantId: string, accountId: string): FolderMappings {
+    return readFolderMappings(this.#sqlite, tenantId, accountId);
+  }
+
+  async replaceFolderMappings(tenantId: string, accountId: string, mappings: FolderMappings, updatedAt: string): Promise<void> {
+    writeFolderMappings(this.#sqlite, tenantId, accountId, mappings, updatedAt);
   }
 
   async listSignatures(tenantId: string, accountId: string): Promise<Signature[]> {
@@ -1409,14 +1428,13 @@ export class Store {
   }
 
   #getMessage(tenantId: string, id: string): CanonicalMessage | null {
-    const row = this.#sqlite.query(`
-      SELECT message.*
-      FROM messages message
-      LEFT JOIN message_aliases alias
-        ON alias.tenant_id = message.tenant_id AND alias.message_id = message.id
-      WHERE message.tenant_id = ? AND (message.id = ? OR alias.alias_id = ?)
-      LIMIT 1
-    `).get(tenantId, id, id) as MessageRow | null;
+    // Two indexed lookups: an OR across the alias join would scan every message.
+    const row = (this.#sqlite.query("SELECT * FROM messages WHERE tenant_id = ? AND id = ?").get(tenantId, id)
+      ?? this.#sqlite.query(`
+        SELECT message.* FROM message_aliases alias
+        JOIN messages message ON message.tenant_id = alias.tenant_id AND message.id = alias.message_id
+        WHERE alias.tenant_id = ? AND alias.alias_id = ?
+      `).get(tenantId, id)) as MessageRow | null;
     const aliases = row
       ? this.#sqlite.query("SELECT alias_id FROM message_aliases WHERE tenant_id = ? AND message_id = ? ORDER BY created_at, alias_id")
         .all(tenantId, row.id) as Array<{ alias_id: string }>

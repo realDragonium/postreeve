@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./support/owner-session";
 
 test("suggests indexed correspondents in recipient fields and accepts them with the keyboard", async ({ page }) => {
   const server = spawn("bun", ["--no-env-file", "tests/fixtures/indexed-search-server.ts"], { stdio: ["ignore", "pipe", "pipe"] });

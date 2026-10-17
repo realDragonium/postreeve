@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./support/owner-session";
 import { draftSchema } from "../../src/shared/contracts";
 
 test("formats a message and swaps the identity signature without touching typed text", async ({ page, request }) => {

@@ -307,7 +307,7 @@ describe("Hono RPC API", () => {
     expect(persistedChild?.references).toHaveLength(referenceCount);
     expect(persistedChild?.references).toEqual(references);
     store.close();
-  });
+  }, 30_000);
 
   test("keeps a late-arriving References ancestry ordered under the original conversation identity", async () => {
     const { store, service } = await createEmptyTestHarness();

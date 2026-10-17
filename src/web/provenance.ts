@@ -1,10 +1,11 @@
+import type { AgentEvent } from "../shared/agent-access";
 import type { OperationBatch, Proposal } from "../shared/contracts";
 import { actionLabel, proposedActionLabel } from "./format";
 
 /**
- * The server records what an operation did, not who asked for it. The browser
- * is the only place that knows, so batches applied through WebMCP are tagged
- * here as they happen; anything else stays unattributed rather than guessed.
+ * The server records who asked only for remote agents (its audit names the batch).
+ * For WebMCP and the UI the browser is the only place that knows, so those batches
+ * are tagged here as they happen; anything else stays unattributed rather than guessed.
  */
 export type Actor = "assistant" | "you" | "unattributed";
 
@@ -35,8 +36,15 @@ export function recordUserBatch(batchId: string): void {
   userBatches.add(batchId);
 }
 
-export function actorOf(batchId: string): Actor {
-  if (assistantBatches.has(batchId)) return "assistant";
+/** Batch ID → remote agent name, from the server's audit of remote MCP calls. */
+export type AgentBatchNames = ReadonlyMap<string, string>;
+
+export function agentBatchNames(events: readonly AgentEvent[]): AgentBatchNames {
+  return new Map(events.flatMap((event) => event.targetKind === "batch" && event.targetId ? [[event.targetId, event.agentName] as const] : []));
+}
+
+export function actorOf(batchId: string, agents: AgentBatchNames = new Map()): Actor {
+  if (agents.has(batchId) || assistantBatches.has(batchId)) return "assistant";
   if (userBatches.has(batchId)) return "you";
   return "unattributed";
 }
@@ -62,6 +70,7 @@ function refKey(ref: { accountId: string; mailbox: string; uidValidity: string; 
 export function buildProvenance(
   batches: readonly OperationBatch[],
   proposals: readonly Proposal[],
+  agents: AgentBatchNames = new Map(),
 ): Map<string, MessageProvenance> {
   const provenance = new Map<string, MessageProvenance>();
   const ordered = [...batches].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -71,11 +80,12 @@ export function buildProvenance(
       if (operation.status !== "applied") continue;
       const key = refKey(operation.message);
       if (provenance.has(key)) continue;
-      const actor = actorOf(batch.id);
+      const actor = actorOf(batch.id, agents);
+      const agentName = agents.get(batch.id);
       provenance.set(key, {
         kind: "applied",
         mark: actorMarks[actor],
-        lead: `${actor === "assistant" ? "assistant " : actor === "you" ? "you " : ""}${actionLabel(operation.action)}`,
+        lead: `${agentName ? `${agentName} ` : actor === "assistant" ? "assistant " : actor === "you" ? "you " : ""}${actionLabel(operation.action)}`,
         batchId: batch.id,
         proposalId: null,
       });

@@ -1,17 +1,30 @@
 import { mailboxPageSchema, type MailboxQueryInput, type MailboxPage } from "../shared/mailbox-query";
 import { accountHealthSchema, reauthorizationSchema, synchronizationStatusSchema } from "../shared/synchronization";
 import type { ZodType } from "zod";
+import { notifyUnauthenticated } from "./auth-api";
+import {
+  agentEventSchema,
+  connectedAgentSchema,
+  createdPersonalTokenSchema,
+  type AgentEvent,
+  type ConnectedAgent,
+  type CreatedPersonalToken,
+  type CreatePersonalTokenInput,
+} from "../shared/agent-access";
 import { z } from "zod";
 import {
   accountDiscoverySchema,
   accountSchema,
   accountSettingsSchema,
   connectionTestResultSchema,
+  folderMappingsSchema,
+  presentedCertificateSchema,
   folderSchema,
   canonicalMessageDetailSchema,
   canonicalMessageSummarySchema,
   canonicalConversationSchema,
   draftSchema,
+  identityImportResultSchema,
   identitySchema,
   signatureSchema,
   outgoingMailLimitsSchema,
@@ -20,6 +33,9 @@ import {
   recipientSuggestionSchema,
   sendReceiptSchema,
   unsubscribeResultSchema,
+  permanentDeleteConfirmation,
+  permanentDeleteResultSchema,
+  type PermanentDeleteResult,
   type Account,
   type AccountDiscovery,
   type AccountSettings,
@@ -31,6 +47,9 @@ import {
   type UnsubscribeInput,
   type UnsubscribeResult,
   type Folder,
+  type FolderMappings,
+  type PresentedCertificate,
+  type IdentityImportResult,
   type CreateIdentityInput,
   type Identity,
   type PutSignatureInput,
@@ -54,22 +73,25 @@ import {
   type UpdateAccountInput,
 } from "../shared/contracts";
 
-export type ApiErrorCode = "account_conflict" | "draft_conflict" | "draft_deleted" | "draft_not_found";
+export type ApiErrorCode = "account_conflict" | "draft_conflict" | "draft_deleted" | "draft_not_found" | "unauthenticated" | "certificate_untrusted";
 
 export class ApiRequestError extends Error {
   readonly status: number;
   readonly code: ApiErrorCode | null;
+  /** The certificate a mail server presented when a connection test failed to verify it. */
+  readonly certificate: PresentedCertificate | null;
 
-  constructor(message: string, status: number, code: ApiErrorCode | null) {
+  constructor(message: string, status: number, code: ApiErrorCode | null, certificate: PresentedCertificate | null = null) {
     super(message);
     this.name = "ApiRequestError";
     this.status = status;
     this.code = code;
+    this.certificate = certificate;
   }
 }
 
-function apiError(value: unknown): { message: string | null; code: ApiErrorCode | null } {
-  if (typeof value !== "object" || value === null) return { message: null, code: null };
+function apiError(value: unknown): { message: string | null; code: ApiErrorCode | null; certificate: PresentedCertificate | null } {
+  if (typeof value !== "object" || value === null) return { message: null, code: null, certificate: null };
   const message = "error" in value && typeof value.error === "string"
     ? value.error
     : "message" in value && typeof value.message === "string"
@@ -80,10 +102,13 @@ function apiError(value: unknown): { message: string | null; code: ApiErrorCode 
       || value.code === "draft_conflict"
       || value.code === "draft_deleted"
       || value.code === "draft_not_found"
+      || value.code === "unauthenticated"
+      || value.code === "certificate_untrusted"
   )
     ? value.code
     : null;
-  return { message, code };
+  const certificate = "certificate" in value ? presentedCertificateSchema.safeParse(value.certificate).data ?? null : null;
+  return { message, code, certificate };
 }
 
 async function request<T>(path: string, schema: ZodType<T>, init?: RequestInit): Promise<T> {
@@ -98,7 +123,8 @@ async function request<T>(path: string, schema: ZodType<T>, init?: RequestInit):
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
     const error = apiError(body);
-    throw new ApiRequestError(error.message ?? `Request failed (${response.status})`, response.status, error.code);
+    if (error.code === "unauthenticated") notifyUnauthenticated();
+    throw new ApiRequestError(error.message ?? `Request failed (${response.status})`, response.status, error.code, error.certificate);
   }
 
   const direct = schema.safeParse(body);
@@ -128,6 +154,7 @@ async function requestAttachment(
   if (!response.ok) {
     const body: unknown = await response.json().catch(() => null);
     const error = apiError(body);
+    if (error.code === "unauthenticated") notifyUnauthenticated();
     throw new ApiRequestError(error.message ?? `Download failed (${response.status})`, response.status, error.code);
   }
   return response.blob();
@@ -201,6 +228,14 @@ export const api = {
       ...jsonBody({ path: input.path }),
       ...withSignal(signal),
     }),
+  folderMappings: (accountId: string, signal?: AbortSignal): Promise<FolderMappings> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/folder-mappings`, folderMappingsSchema, withSignal(signal)),
+  putFolderMappings: (accountId: string, mappings: FolderMappings, signal?: AbortSignal): Promise<Folder[]> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/folder-mappings`, folderSchema.array(), {
+      method: "PUT",
+      ...jsonBody(mappings),
+      ...withSignal(signal),
+    }),
   recipientSuggestions: (query: string, signal?: AbortSignal): Promise<RecipientSuggestion[]> =>
     request(`/recipient-suggestions?${new URLSearchParams({ q: query })}`, recipientSuggestionSchema.array(), withSignal(signal)),
   identities: (accountId: string, signal?: AbortSignal): Promise<Identity[]> =>
@@ -209,6 +244,11 @@ export const api = {
     request(`/accounts/${encodeURIComponent(accountId)}/identities`, identitySchema, {
       method: "POST",
       ...jsonBody(input),
+      ...withSignal(signal),
+    }),
+  importSendAsIdentities: (accountId: string, signal?: AbortSignal): Promise<IdentityImportResult> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/identities/import`, identityImportResultSchema, {
+      method: "POST",
       ...withSignal(signal),
     }),
   signatures: (accountId: string, signal?: AbortSignal): Promise<Signature[]> =>
@@ -301,14 +341,26 @@ export const api = {
   downloadAttachment: requestAttachment,
   conversation: (id: string, signal?: AbortSignal): Promise<CanonicalConversation> =>
     request(`/conversations/${encodeURIComponent(id)}`, canonicalConversationSchema, withSignal(signal)),
-  conversationMessages: (id: string, accountId: string, signal?: AbortSignal): Promise<CanonicalMessageSummary[]> =>
-    request(`/conversations/${encodeURIComponent(id)}/messages?accountId=${encodeURIComponent(accountId)}`,
+  conversationMessages: (id: string, accountId?: string, signal?: AbortSignal): Promise<CanonicalMessageSummary[]> =>
+    request(`/conversations/${encodeURIComponent(id)}/messages${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ""}`,
       canonicalMessageSummarySchema.array(), withSignal(signal)),
   sendMessage: (input: SendMessageInput, signal?: AbortSignal): Promise<SendReceipt> =>
     request("/messages/send", sendReceiptSchema, {
       method: "POST",
       ...jsonBody(input),
       ...withSignal(signal),
+    }),
+  /** Call only after the person confirmed in the UI; there is no undo. */
+  deletePermanently: (accountId: string, messages: readonly MessageRef[]): Promise<PermanentDeleteResult> =>
+    request("/messages/delete-permanently", permanentDeleteResultSchema, {
+      method: "POST",
+      ...jsonBody({ accountId, messages, confirm: permanentDeleteConfirmation }),
+    }),
+  /** Call only after the person confirmed in the UI; there is no undo. */
+  emptyFolder: (accountId: string, path: string): Promise<PermanentDeleteResult> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/folders/empty`, permanentDeleteResultSchema, {
+      method: "POST",
+      ...jsonBody({ path, confirm: permanentDeleteConfirmation }),
     }),
   unsubscribe: (input: UnsubscribeInput): Promise<UnsubscribeResult> =>
     request("/messages/unsubscribe", unsubscribeResultSchema, { method: "POST", ...jsonBody(input) }),
@@ -318,8 +370,8 @@ export const api = {
       ...jsonBody(input),
       ...withSignal(signal),
     }),
-  proposals: (accountId: string): Promise<Proposal[]> =>
-    request(`/proposals?accountId=${encodeURIComponent(accountId)}`, proposalSchema.array()),
+  proposals: (accountId: string, signal?: AbortSignal): Promise<Proposal[]> =>
+    request(`/proposals?accountId=${encodeURIComponent(accountId)}`, proposalSchema.array(), withSignal(signal)),
   updateProposal: (id: string, input: UpdateProposalInput, signal?: AbortSignal): Promise<Proposal> =>
     request(`/proposals/${encodeURIComponent(id)}`, proposalSchema, {
       method: "PUT",
@@ -334,6 +386,8 @@ export const api = {
     }),
   approveProposal: (id: string): Promise<Proposal> =>
     request(`/proposals/${encodeURIComponent(id)}/approve`, proposalSchema, { method: "POST" }),
+  declineProposal: (id: string): Promise<Proposal> =>
+    request(`/proposals/${encodeURIComponent(id)}/decline`, proposalSchema, { method: "POST" }),
   applyProposal: (id: string): Promise<Proposal | OperationBatch> =>
     request(
       `/proposals/${encodeURIComponent(id)}/apply`,
@@ -345,6 +399,16 @@ export const api = {
       method: "POST",
       ...withSignal(signal),
     }),
+  connectedAgents: (signal?: AbortSignal): Promise<ConnectedAgent[]> =>
+    request("/agent-access/agents", connectedAgentSchema.array(), withSignal(signal)),
+  agentEndpoint: (signal?: AbortSignal): Promise<{ mcpUrl: string }> =>
+    request("/agent-access/endpoint", z.object({ mcpUrl: z.url() }), withSignal(signal)),
+  revokeAgent: (id: string): Promise<{ ok: true }> =>
+    request(`/agent-access/agents/${encodeURIComponent(id)}`, z.object({ ok: z.literal(true) }), { method: "DELETE" }),
+  createPersonalToken: (input: CreatePersonalTokenInput): Promise<CreatedPersonalToken> =>
+    request("/agent-access/tokens", createdPersonalTokenSchema, { method: "POST", ...jsonBody(input) }),
+  agentEvents: (signal?: AbortSignal): Promise<AgentEvent[]> =>
+    request("/agent-access/events?limit=500", agentEventSchema.array(), withSignal(signal)),
   batches: (accountId: string, signal?: AbortSignal): Promise<OperationBatch[]> =>
     request(`/batches?accountId=${encodeURIComponent(accountId)}`, operationBatchSchema.array(), withSignal(signal)),
   undoBatch: (id: string, signal?: AbortSignal): Promise<OperationBatch> =>

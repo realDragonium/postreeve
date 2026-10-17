@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./support/owner-session";
 import { accountSchema, draftSchema } from "../../src/shared/contracts";
 
 test("real API keeps rejected and uncertain attachments recoverable without automatic delivery", async ({ page, request }) => {

@@ -1,4 +1,5 @@
 import { mailboxEventSchema, type MailboxEvent } from "../shared/mailbox-events";
+import { notifyUnauthenticated } from "./auth-api";
 
 /** Splits complete Server-Sent Events from a text buffer, returning their data and the unfinished remainder. */
 export function parseServerSentEvents(buffer: string): { readonly data: readonly string[]; readonly rest: string } {
@@ -38,6 +39,7 @@ async function follow(onEvent: (event: MailboxEvent) => void, fetcher: Fetcher,
   while (!signal.aborted) {
     try {
       const response = await fetcher("/api/events", { headers: { Accept: "text/event-stream" }, signal });
+      if (response.status === 401) notifyUnauthenticated();
       if (!response.ok || !response.body) throw new Error(`Event stream failed (${response.status})`);
       failures = 0;
       const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();

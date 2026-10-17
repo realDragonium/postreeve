@@ -103,6 +103,7 @@ const sentMessageSchema = z.object({ id: z.string().min(1), threadId: z.string()
 const sendAsListSchema = z.object({
   sendAs: z.array(z.object({
     sendAsEmail: z.string(),
+    displayName: z.string().optional(),
     isPrimary: z.boolean().optional(),
     verificationStatus: z.string().optional(),
   })).default([]),
@@ -126,6 +127,9 @@ export interface GmailClientConfig {
   clientSecret?: string;
   fetch?: HttpFetch;
 }
+
+export const GMAIL_PERMANENT_DELETE_UNAVAILABLE =
+  "Postreeve's Gmail access cannot delete mail permanently. Gmail removes messages from Trash and Spam after 30 days.";
 
 export class GmailMailClient implements MailProvider, MailSender {
   readonly #account: Account & { kind: "gmail" };
@@ -389,6 +393,17 @@ export class GmailMailClient implements MailProvider, MailSender {
     return decodeGmailPartBody(body.data, body.size);
   }
 
+  // Gmail's delete endpoints need the full https://mail.google.com/ scope; Postreeve asks only for gmail.modify.
+  async deletePermanently(accountId: string): Promise<number> {
+    this.#assertAccount(accountId);
+    throw new Error(GMAIL_PERMANENT_DELETE_UNAVAILABLE);
+  }
+
+  async emptyFolder(accountId: string): Promise<number> {
+    this.#assertAccount(accountId);
+    throw new Error(GMAIL_PERMANENT_DELETE_UNAVAILABLE);
+  }
+
   async revalidate(reference: MessageRef): Promise<boolean> {
     this.#assertReference(reference);
     try {
@@ -527,11 +542,19 @@ export class GmailMailClient implements MailProvider, MailSender {
     return { receipt, mime: raw };
   }
 
+  /** The verified Send mail as addresses other than the account's own address. */
+  async listSendAsIdentities(): Promise<Array<{ name: string; address: string }>> {
+    const { sendAs } = await this.#request("/settings/sendAs", sendAsListSchema);
+    const primary = this.#account.email.toLowerCase();
+    return sendAs.filter(isVerifiedSendAs)
+      .map((entry) => ({ name: entry.displayName?.trim() ?? "", address: entry.sendAsEmail.toLowerCase() }))
+      .filter(({ address }) => address !== primary);
+  }
+
   /** Gmail silently replaces a From it does not allow with the primary address, so check before sending. */
   async #assertSendAs(token: string, address: string): Promise<void> {
     const { sendAs } = await this.#requestWithToken(token, "/settings/sendAs", sendAsListSchema);
-    const allowed = sendAs.some((entry) => entry.sendAsEmail.toLowerCase() === address.toLowerCase()
-      && (entry.isPrimary === true || entry.verificationStatus !== "pending"));
+    const allowed = sendAs.some((entry) => entry.sendAsEmail.toLowerCase() === address.toLowerCase() && isVerifiedSendAs(entry));
     if (!allowed) {
       throw new MailSendPreDispatchError(
         `Gmail does not allow sending as ${address}; add and verify it under Gmail Settings > Accounts > Send mail as`,
@@ -777,6 +800,11 @@ function isVisibleLabel(label: z.infer<typeof labelSchema>): boolean {
 
 function labelName(label: z.infer<typeof labelSchema>): string {
   return ({ INBOX: "Inbox", SENT: "Sent", DRAFT: "Drafts", TRASH: "Trash", SPAM: "Spam", ALL: "All mail" } as const)[label.id as "INBOX"] ?? label.name;
+}
+
+/** Workspace domain aliases may omit the verification status, so only a pending one disqualifies. */
+function isVerifiedSendAs(entry: z.infer<typeof sendAsListSchema>["sendAs"][number]): boolean {
+  return entry.isPrimary === true || entry.verificationStatus !== "pending";
 }
 
 function specialUseFor(labelId: string): Folder["specialUse"] {

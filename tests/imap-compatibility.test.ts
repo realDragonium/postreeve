@@ -571,10 +571,10 @@ describe("Bun IMAP compatibility", () => {
     const folders = await provider.listFolders(config.accountId);
 
     expect(folders).toEqual([
-      { path: "INBOX", name: "Inbox", specialUse: "inbox", unread: 2, total: 3 },
-      { path: "Archive", name: "Archive", specialUse: "archive", unread: 0, total: 0 },
-      { path: "Bin", name: "Bin", specialUse: "trash", unread: 0, total: 0 },
-      { path: "Drafts", name: "Drafts", specialUse: "drafts", unread: 0, total: 0 },
+      { path: "INBOX", name: "Inbox", specialUse: "inbox", specialUseSource: "special-use", unread: 2, total: 3 },
+      { path: "Archive", name: "Archive", specialUse: "archive", specialUseSource: "special-use", unread: 0, total: 0 },
+      { path: "Bin", name: "Bin", specialUse: "trash", specialUseSource: "special-use", unread: 0, total: 0 },
+      { path: "Drafts", name: "Drafts", specialUse: "drafts", specialUseSource: "special-use", unread: 0, total: 0 },
     ]);
     expect(provider.listFolders("account-b")).rejects.toThrow("cannot access account account-b");
   });
@@ -1335,6 +1335,123 @@ describe("Bun IMAP compatibility", () => {
   });
 });
 
+describe("IMAP permanent delete", () => {
+  async function trashedState(count = 1) {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    const trashed: MessageRef[] = [];
+    for (const uid of [3, 2, 1].slice(0, count)) {
+      trashed.push((await provider.apply(messageRef({ uid, modseq: `1${uid}` }), { type: "trash" })).current);
+    }
+    return { state, provider, trashed };
+  }
+
+  function withoutUidplus(state: FakeState): ImapClientFactory {
+    return () => {
+      const client = new FakeImapClient(state);
+      client.capabilities.delete("UIDPLUS");
+      return client;
+    };
+  }
+
+  test("expunges exactly the named Trash UID", async () => {
+    const { state, provider, trashed } = await trashedState(2);
+    expect(await provider.deletePermanently(config.accountId, [trashed[0]!])).toBe(1);
+    expect(state.messageDeletes.at(-1)).toEqual({ uids: [trashed[0]!.uid], options: { uid: true } });
+    expect(state.mailboxes.get("Bin")?.messages.has(trashed[0]!.uid)).toBe(false);
+    expect(state.mailboxes.get("Bin")?.messages.has(trashed[1]!.uid)).toBe(true);
+  });
+
+  test("refuses messages outside Trash and Junk before touching the server", async () => {
+    const state = fakeState();
+    const provider = new ImapMailProvider(config, fakeFactory(state));
+    await expect(provider.deletePermanently(config.accountId, [messageRef()])).rejects.toThrow("Only messages in Trash or Spam can be deleted permanently");
+    await expect(provider.emptyFolder(config.accountId, "INBOX")).rejects.toThrow("Only messages in Trash or Spam can be deleted permanently");
+    await expect(provider.emptyFolder(config.accountId, "Archive")).rejects.toThrow("Only messages in Trash or Spam");
+    expect(state.messageDeletes).toEqual([]);
+    expect(state.mailboxes.get("INBOX")?.messages.size).toBe(3);
+  });
+
+  test("deletes nothing when any reference is stale", async () => {
+    const { state, provider, trashed } = await trashedState(2);
+    const stale = { ...trashed[1]!, modseq: "999" };
+    await expect(provider.deletePermanently(config.accountId, [trashed[0]!, stale])).rejects.toThrow("stale");
+    expect(state.messageDeletes).toEqual([]);
+    expect(state.mailboxes.get("Bin")?.messages.size).toBe(2);
+  });
+
+  test("refuses references from more than one folder or another account", async () => {
+    const { provider, trashed } = await trashedState(1);
+    await expect(provider.deletePermanently(config.accountId, [trashed[0]!, messageRef({ uid: 1 })])).rejects.toThrow("one folder at a time");
+    await expect(provider.deletePermanently("account-b", [trashed[0]!])).rejects.toThrow("cannot access account");
+  });
+
+  test("without UIDPLUS refuses when another message is already marked deleted", async () => {
+    const { state, trashed } = await trashedState(2);
+    state.mailboxes.get("Bin")!.messages.get(trashed[1]!.uid)!.flags = new Set(["\\Deleted"]);
+    const provider = new ImapMailProvider(config, withoutUidplus(state));
+    await expect(provider.deletePermanently(config.accountId, [trashed[0]!])).rejects.toThrow("other messages marked deleted");
+    expect(state.messageDeletes).toEqual([]);
+    expect(state.mailboxes.get("Bin")?.messages.size).toBe(2);
+  });
+
+  test("without UIDPLUS deletes when only the named message would be expunged", async () => {
+    const { state, trashed } = await trashedState(2);
+    const provider = new ImapMailProvider(config, withoutUidplus(state));
+    expect(await provider.deletePermanently(config.accountId, [trashed[0]!])).toBe(1);
+    expect(state.mailboxes.get("Bin")?.messages.size).toBe(1);
+  });
+
+  test("empties a Trash or Junk folder", async () => {
+    const { state, provider } = await trashedState(3);
+    expect(await provider.emptyFolder(config.accountId, "Bin")).toBe(3);
+    expect(state.mailboxes.get("Bin")?.messages.size).toBe(0);
+    expect(state.mailboxes.get("INBOX")?.messages.size).toBe(0);
+    state.mailboxes.set("Junk", { path: "Junk", name: "Junk", uidValidity: 606n, specialUse: "\\Junk", nextUid: 1, messages: new Map() });
+    expect(await provider.emptyFolder(config.accountId, "Junk")).toBe(0);
+  });
+
+  test("the API requires the confirmation field, removes deleted locations from the index and guards the folder", async () => {
+    const { provider, trashed } = await trashedState(1);
+    const providers = new MailProviderRegistry();
+    providers.register(config.accountId, provider);
+    const store = new Store(":memory:");
+    try {
+      await store.insertAccount({ id: config.accountId, name: "IMAP", email: config.username, kind: "imap", encryptedCredentials: null });
+      const unavailable = () => { throw new Error("Factory is not used by this fixture"); };
+      const service = new PostreeveService(store, { tenantId: "tenant-a" }, providers, new MailSenderRegistry(),
+        new CredentialVault(Buffer.alloc(32, 7).toString("base64")), unavailable, unavailable);
+      store.synchronization.observe({ tenantId: "tenant-a", accountId: config.accountId, provider: "imap" },
+        await provider.listMessages(config.accountId, "Bin", 50), Date.now());
+      expect(store.synchronization.indexed("tenant-a", config.accountId, "Bin")).toHaveLength(1);
+
+      const api = createApi(service);
+      const refused = await api.request("/api/messages/delete-permanently", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId: config.accountId, messages: [trashed[0]] }),
+      });
+      expect(refused.status).toBe(400);
+      expect(store.synchronization.indexed("tenant-a", config.accountId, "Bin")).toHaveLength(1);
+
+      const response = await api.request("/api/messages/delete-permanently", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId: config.accountId, messages: [trashed[0]], confirm: "delete permanently" }),
+      });
+      expect(await response.json()).toEqual({ deleted: 1 });
+      expect(store.synchronization.indexed("tenant-a", config.accountId, "Bin")).toEqual([]);
+
+      const emptied = await api.request(`/api/accounts/${config.accountId}/folders/empty`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: "INBOX", confirm: "delete permanently" }),
+      });
+      expect(emptied.status).toBe(400);
+      expect(await emptied.json()).toEqual({ error: "Only messages in Trash or Spam can be deleted permanently" });
+    } finally {
+      store.close();
+    }
+  });
+});
+
 describe("IMAP sent copies", () => {
   const sentMime = Buffer.from([
     "From: Person <person@example.test>",
@@ -1389,13 +1506,13 @@ describe("IMAP sent copies", () => {
     expect(sent.messages.size).toBe(1);
   });
 
-  test("fails without a selectable special-use Sent mailbox", async () => {
+  test("fails without a selectable Sent mailbox", async () => {
     const state = fakeState();
     state.mailboxes.set("Sent", { path: "Sent", name: "Sent", uidValidity: 1n, specialUse: "\\Sent", flags: new Set(["\\Noselect"]), nextUid: 1, messages: new Map() });
     const provider = new ImapMailProvider(config, fakeFactory(state));
 
     await expect(provider.appendSentMessage(config.accountId, sentMime, "2026-10-10T09:00:00.000Z"))
-      .rejects.toThrow("This account has no discoverable special-use Sent mailbox");
+      .rejects.toThrow("This account has no Sent folder; choose one under Manage folders");
   });
 });
 
@@ -1806,8 +1923,8 @@ class FakeImapClient implements ImapClient {
       pathAsListed: mailbox.path,
       name: mailbox.name,
       delimiter: "/",
-      parent: [],
-      parentPath: "",
+      parent: mailbox.path.split("/").slice(0, -1),
+      parentPath: mailbox.path.split("/").slice(0, -1).join("/"),
       flags: mailbox.flags ?? new Set<string>(),
       ...(mailbox.specialUse === undefined ? {} : { specialUse: mailbox.specialUse }),
       listed: true,

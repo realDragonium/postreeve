@@ -17,7 +17,7 @@ export type IdleClientFactory = (options: ImapFlowOptions) => IdleClient;
 export const defaultIdleClientFactory: IdleClientFactory = (options) => new ImapFlow(options);
 
 export interface ImapInboxWatchOptions {
-  readonly connection: Pick<ImapFlowOptions, "host" | "port" | "secure" | "auth">;
+  readonly connection: Pick<ImapFlowOptions, "host" | "port" | "secure" | "auth" | "tls">;
   readonly createClient: IdleClientFactory;
   readonly onChange: (mailbox: string) => void;
   readonly now?: () => number;

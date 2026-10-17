@@ -1,6 +1,7 @@
-import type { OperationBatch } from "../shared/contracts";
+import type { AgentEvent } from "../shared/agent-access";
+import type { Account, OperationBatch } from "../shared/contracts";
 import { actionLabel, formatRelative } from "./format";
-import { actorMarks, actorOf, type Actor } from "./provenance";
+import { actorMarks, actorOf, agentBatchNames, type Actor } from "./provenance";
 
 const actorFilters: readonly (Actor | "all")[] = ["all", "assistant", "you", "unattributed"];
 const actorLabels: Record<Actor | "all", string> = {
@@ -14,6 +15,9 @@ const columns = "14px 92px minmax(200px,1.4fr) minmax(140px,1fr) 92px 60px";
 
 export interface ActivityViewProps {
   batches: readonly OperationBatch[];
+  /** Remote agent calls from the server's audit; batch calls label batch rows, the rest get rows of their own. */
+  agentEvents: readonly AgentEvent[];
+  accounts: readonly Account[];
   loading: boolean;
   error: string | null;
   actorFilter: Actor | "all";
@@ -24,24 +28,40 @@ export interface ActivityViewProps {
 }
 
 export function ActivityView(props: ActivityViewProps) {
-  const rows = [...props.batches]
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-    .flatMap((batch) => {
-      const actor = actorOf(batch.id);
-      const undoable = batch.status === "applied" || batch.status === "partially_applied";
-      return batch.operations.map((operation, index) => ({
-        key: `${batch.id}:${operation.itemId}`,
-        batchId: batch.id,
-        actor,
-        mark: operation.status === "undone" ? "·" : actorMarks[actor],
-        what: actionLabel(operation.action),
-        target: `${operation.message.mailbox} · UID ${operation.message.uid}`,
-        when: formatRelative(batch.updatedAt),
-        status: operation.status,
-        error: operation.error,
-        undoable: undoable && index === 0,
-      }));
-    })
+  const agents = agentBatchNames(props.agentEvents);
+  const batchRows = props.batches.flatMap((batch) => {
+    const actor = actorOf(batch.id, agents);
+    const undoable = batch.status === "applied" || batch.status === "partially_applied";
+    return batch.operations.map((operation, index) => ({
+      key: `${batch.id}:${operation.itemId}`,
+      batchId: batch.id,
+      actor,
+      actorLabel: agents.get(batch.id) ?? (actor === "unattributed" ? "—" : actor),
+      mark: operation.status === "undone" ? "·" : actorMarks[actor],
+      what: actionLabel(operation.action),
+      target: `${operation.message.mailbox} · UID ${operation.message.uid}`,
+      at: batch.updatedAt,
+      status: operation.status,
+      error: operation.error,
+      undoable: undoable && index === 0,
+    }));
+  });
+  const emails = new Map(props.accounts.map((account) => [account.id, account.email]));
+  const eventRows = props.agentEvents.filter((event) => event.targetKind !== "batch").map((event) => ({
+    key: `event:${event.id}`,
+    batchId: "",
+    actor: "assistant" as Actor,
+    actorLabel: event.agentName,
+    mark: actorMarks.assistant,
+    what: `${event.tool}${event.summary ? ` · ${event.summary}` : ""}`,
+    target: event.accountId ? emails.get(event.accountId) ?? "removed account" : "—",
+    at: event.createdAt,
+    status: event.outcome,
+    error: event.error,
+    undoable: false,
+  }));
+  const rows = [...batchRows, ...eventRows]
+    .sort((left, right) => right.at.localeCompare(left.at))
     .filter((row) => props.actorFilter === "all" || row.actor === props.actorFilter);
 
   return <>
@@ -63,7 +83,7 @@ export function ActivityView(props: ActivityViewProps) {
           <span />
           <span className="t-sec">Actor</span>
           <span className="t-sec">Operation</span>
-          <span className="t-sec">Message</span>
+          <span className="t-sec">Message or account</span>
           <span className="t-sec">When</span>
           <span />
         </div>
@@ -80,10 +100,10 @@ export function ActivityView(props: ActivityViewProps) {
         {rows.map((row) => (
           <div className="grid-row" key={row.key}>
             <span style={{ fontSize: 11, lineHeight: 1, color: "var(--dim)" }}>{row.mark}</span>
-            <span className="t-body" style={{ fontWeight: 500 }}>{row.actor === "unattributed" ? "—" : row.actor}</span>
+            <span className="t-body truncate" style={{ fontWeight: 500 }} title={row.actorLabel}>{row.actorLabel}</span>
             <span className="t-ink truncate" style={{ fontSize: 11, paddingRight: 16 }}>{row.what}{row.status === "undone" ? " (undone)" : ""}{row.error ? ` — ${row.error}` : ""}</span>
             <span className="t-dim truncate" style={{ paddingRight: 16 }}>{row.target}</span>
-            <span className="t-dim t-num">{row.when}</span>
+            <span className="t-dim t-num">{formatRelative(row.at)}</span>
             <span style={{ display: "flex", justifyContent: "flex-end" }}>
               {row.undoable ? (
                 <button className="btn-underline" disabled={props.undoing === row.batchId} onClick={() => props.onUndo(row.batchId)}>
@@ -95,9 +115,9 @@ export function ActivityView(props: ActivityViewProps) {
         ))}
 
         <p className="t-dim" style={{ maxWidth: 760, margin: "20px 0 0" }}>
-          The server records what each operation did, not who asked for it. Operations this browser sent through WebMCP are
-          attributed to the assistant, ones you triggered here to you; anything from an earlier session stays unattributed
-          rather than guessed.
+          Remote agents are named by the server, which records every call they make. Operations this browser sent through
+          WebMCP are attributed to the assistant, ones you triggered here to you; anything else from an earlier session stays
+          unattributed rather than guessed.
         </p>
       </div>
     </div>

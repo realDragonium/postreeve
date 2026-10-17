@@ -7,7 +7,7 @@ import {
 import { ApiRequestError } from "./api";
 import type { DraftMigrationStorage } from "./draft-state";
 
-export { defaultFromAddress, ownAddresses } from "../shared/identities";
+export { defaultFromAddress, identityFor, isOwnAddress, isWildcardAddress, signatureHtmlFor } from "../shared/identities";
 
 export const localIdentitiesKey = "postreeve.local-identities.v1";
 export const localIdentityMigrationKey = "postreeve.local-identities.migrated.v1";

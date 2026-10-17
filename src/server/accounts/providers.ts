@@ -68,6 +68,13 @@ export const providerTable: readonly ProviderEntry[] = [
     servers: { imap: tls("imap.gmx.net", 993), smtp: startTls("mail.gmx.net", 587) },
   },
   {
+    id: "strato",
+    // Strato hosts mail for customers' own domains; their MX records point at smtpin.rzone.de or mailin.rzone.de.
+    domains: [],
+    mxSuffixes: ["rzone.de"],
+    servers: { imap: tls("imap.strato.de", 993), smtp: tls("smtp.strato.de", 465) },
+  },
+  {
     id: "gmail",
     domains: ["gmail.com", "googlemail.com"],
     mxSuffixes: ["google.com", "googlemail.com"],
@@ -83,7 +90,8 @@ export const providerTable: readonly ProviderEntry[] = [
     id: "proton",
     domains: ["proton.me", "protonmail.com", "protonmail.ch", "pm.me"],
     mxSuffixes: ["protonmail.ch"],
-    servers: null,
+    // Proton Mail Bridge's defaults on the machine that runs it; its self-signed certificate is trusted by pinning.
+    servers: { imap: startTls("127.0.0.1", 1143), smtp: startTls("127.0.0.1", 1025) },
   },
 ];
 

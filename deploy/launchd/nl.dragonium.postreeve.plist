@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS LaunchAgent. Copy to ~/Library/LaunchAgents/, replace every /Users/YOU path and the placeholder values,
+  then `chmod 600` it because it holds the master key. Not exercised in CI; see docs/self-host.md.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>nl.dragonium.postreeve</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/YOU/postreeve</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.bun/bin/bun</string>
+    <string>src/server/index.ts</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>NODE_ENV</key><string>production</string>
+    <key>POSTREEVE_HOST</key><string>127.0.0.1</string>
+    <key>PORT</key><string>3000</string>
+    <key>POSTREEVE_TRUST_PROXY</key><string>1</string>
+    <key>POSTREEVE_PUBLIC_URL</key><string>https://MACHINE.TAILNET.ts.net</string>
+    <key>POSTREEVE_MASTER_KEY</key><string>REPLACE_WITH_KEY</string>
+    <key>POSTREEVE_DB_PATH</key><string>/Users/YOU/Library/Application Support/Postreeve/postreeve.sqlite</string>
+    <key>POSTREEVE_BACKUP_DIR</key><string>/Users/YOU/Library/Application Support/Postreeve/backups</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key>
+  <dict><key>SuccessfulExit</key><false/></dict>
+  <key>ExitTimeOut</key><integer>30</integer>
+  <key>StandardOutPath</key><string>/Users/YOU/Library/Logs/postreeve.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Library/Logs/postreeve.log</string>
+</dict>
+</plist>
