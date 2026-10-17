@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   macOS LaunchAgent. Copy to ~/Library/LaunchAgents/, replace every /Users/YOU path and the placeholder values,
-  then `chmod 600` it because it holds the master key. Not exercised in CI; see docs/self-host-tailscale.md.
+  then `chmod 600` it because it holds the master key. Not exercised in CI; see docs/self-host.md.
 -->
 <plist version="1.0">
 <dict>

@@ -1,4 +1,4 @@
-# Native Linux service. See docs/self-host-tailscale.md for installation.
+# Native Linux service. See docs/self-host.md for installation.
 # Postreeve listens on 127.0.0.1 only; `tailscale serve` provides HTTPS on the tailnet.
 [Unit]
 Description=Postreeve email client

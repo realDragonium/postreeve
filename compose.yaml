@@ -1,5 +1,5 @@
 # Self-hosting: Postreeve publishes only on the host's loopback; `tailscale serve` on the host provides HTTPS on the
-# tailnet. See docs/self-host-tailscale.md. Values come from `.env` next to this file.
+# tailnet. See docs/self-host.md. Values come from `.env` next to this file.
 services:
   postreeve:
     build: .

@@ -56,18 +56,18 @@ The repository SHALL provide a systemd unit that runs the server as a dedicated 
 - **THEN** Postreeve answers `http://127.0.0.1:3000/api/health` and writes its first snapshot to `/var/lib/postreeve/backups`
 
 ### Requirement: Tailnet serving model
-The documented hosted setup SHALL run Postreeve with Docker Compose, published only on the host's loopback, and SHALL reach it through the host's `tailscale serve` at `https://<machine>.<tailnet>.ts.net`, with `POSTREEVE_PUBLIC_URL` set to that origin and `POSTREEVE_TRUST_PROXY=1`. It SHALL state that owner login is required before serving it.
+The documented hosted setup SHALL run Postreeve with Docker Compose published only on the host's loopback. It SHALL make the web UI and `/api` reachable only from the tailnet through the host's `tailscale serve` at `https://<machine>.<tailnet>.ts.net`, with `POSTREEVE_PUBLIC_URL` set to that origin and `POSTREEVE_TRUST_PROXY=1`. It SHALL state that owner login is required before serving it.
 
 #### Scenario: Other tailnet device
 - **WHEN** the owner opens the ts.net URL on a phone in the tailnet
-- **THEN** the page loads over HTTPS and the server is not reachable on the machine's LAN address
+- **THEN** the page loads over HTTPS and the server is not reachable on the machine's public address
 
-### Requirement: Funnel is documented on a separate port
-The documented setup SHALL describe Tailscale Funnel only on a separate port that maps the Funnel public paths and nothing else, keeping the web UI and `/api` tailnet-only, and SHALL list its risks.
+### Requirement: Public traffic goes only through Caddy
+The documented setup SHALL describe installing Tailscale on the host, SHALL route all public web traffic through Caddy, and SHALL never forward port 3000 to the internet.
 
-#### Scenario: Funnel enabled
-- **WHEN** the owner follows the Funnel steps
-- **THEN** port 8443 is public for the Funnel public paths only and port 443 stays tailnet-only
+#### Scenario: Caddy configuration
+- **WHEN** the owner copies the guide's Caddyfile
+- **THEN** no site block proxies to port 3000
 
 ### Requirement: Funnel requests reach only the public MCP paths
 The server SHALL answer a bare 404 with no body, before any other handler, to a request carrying a `Tailscale-Funnel-Request` header unless its path is `/mcp`, `/.well-known/oauth-protected-resource`, `/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/token` or `/oauth/revoke`, or a sub-path of one of them, and contains no `%` or `\`. Requests without the header SHALL pass unchanged.
@@ -104,8 +104,15 @@ The Funnel guard SHALL apply whether or not `POSTREEVE_TRUST_PROXY` is set, and 
 - **THEN** the response is 404
 
 ### Requirement: Same-host mail server guidance
-The self-hosting guide SHALL explain running next to a mail server that publishes 443 and the mail ports: whether `tailscale serve` on 443 coexists with it, a fallback HTTPS port when it does not, keeping separate Docker networks, connecting to the mail server by its public hostname, and backing up off the machine.
+The self-hosting guide SHALL explain running next to a mail server on a public-IP host: Caddy as the single public TLS front on 80 and 443, putting poste.io behind Caddy, the public routes for Stalwart, how `tailscale serve` on 443 coexists with Caddy and a fallback port if it does not, separate Docker networks, connecting to the mail server by its public hostname, and required off-machine backups.
 
 #### Scenario: poste.io on the same VPS
-- **WHEN** the owner follows the guide on a VPS where poste.io publishes `0.0.0.0:443`
-- **THEN** tailnet devices reach Postreeve at the ts.net URL, the public IP still reaches poste.io, and the guide gives the 8443 fallback if that check fails
+- **WHEN** the owner follows the guide on a VPS where Caddy holds the public 443 and poste.io sits behind it
+- **THEN** tailnet devices reach Postreeve at the ts.net URL, the public name reaches poste.io webmail, and the mail ports reach poste.io directly
+
+### Requirement: Public front and firewall guidance
+The guide SHALL document Caddy's `X-Forwarded-For` behavior (client values discarded unless `trusted_proxies` is set), a default-deny firewall that allows only SSH, 80, 443 and the mail ports from the internet, and that Docker-published ports bypass ufw so every non-mail container port publishes on `127.0.0.1`. It SHALL describe the public MCP listener (`POSTREEVE_PUBLIC_MCP_PORT`, `POSTREEVE_MCP_PUBLIC_URL`) behind `mcp.<domain>` and mark it as not yet available until it is wired.
+
+#### Scenario: Port scan from outside
+- **WHEN** the owner scans the VPS's public IP after following the guide
+- **THEN** only 22 (until moved to the tailnet), 25, 80, 443, 465, 587 and 993 are open
