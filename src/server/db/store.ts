@@ -88,7 +88,7 @@ export class Store {
       : `file:${resolve(path)}`;
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
     this.#sqlite = new Database(path, { create: true, strict: true });
-    this.#sqlite.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
+    this.#sqlite.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
     this.#migrate();
     this.#db = drizzle(this.#sqlite);
     this.synchronization = new SynchronizationStore(this.#sqlite,

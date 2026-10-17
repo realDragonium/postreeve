@@ -52,7 +52,7 @@ POSTREEVE_GOOGLE_CLIENT_ID=your-desktop-client-id
 POSTREEVE_GOOGLE_CLIENT_SECRET=your-desktop-client-secret
 ```
 
-Restart Postreeve, select **Add account**, and choose **Continue with Google**. Google redirects back to the loopback-only Postreeve server. Postreeve stores the refresh token in the encrypted credential vault; your Google password never enters the app. Google OAuth apps in Testing mode issue refresh tokens that expire after seven days, so local testing may require periodic reauthorization.
+Restart Postreeve, select **Add account**, and choose **Continue with Google**. Google redirects back to the loopback-only Postreeve server (a hosted server with `POSTREEVE_PUBLIC_URL` uses a Web application client instead; see [docs/self-host-tailscale.md](docs/self-host-tailscale.md#google-accounts)). Postreeve stores the refresh token in the encrypted credential vault; your Google password never enters the app. Google OAuth apps in Testing mode issue refresh tokens that expire after seven days, so local testing may require periodic reauthorization.
 
 For other providers, select **Add account**, enter the email address and select **Find settings**. Postreeve proposes IMAP and SMTP settings from its built-in list (iCloud including me.com and mac.com, Fastmail, Yahoo, AOL, Zoho, GMX, Gmail), the domain's own Thunderbird autoconfig file, the Thunderbird ISPDB at `autoconfig.thunderbird.net`, or the domain's MX host when it belongs to one of those providers (for example a custom domain hosted at iCloud or Fastmail). Lookups run on the server over HTTPS only, never follow redirects, time out after five seconds, read at most 64 KiB and never include your password or email address. Every proposed field stays editable, and providers that need an app-specific password show how to create one. Gmail addresses point to **Continue with Google** when it is configured. Outlook.com/Hotmail and Proton Mail are recognized but cannot be connected yet: Microsoft requires its own sign-in, and Proton Mail Bridge uses a self-signed certificate. You can also enter the settings supplied by your provider by hand. Postreeve authenticates to both services before saving the encrypted credentials. The SMTP check uses the provider's non-sending verification mechanism. Prefer an app-specific password when the provider supports one.
 
@@ -101,13 +101,18 @@ bun run setup:local
 docker compose up --build
 ```
 
-Docker Compose publishes Postreeve only on `127.0.0.1:3000` and stores SQLite data in the `postreeve-data` volume.
+Docker Compose publishes Postreeve only on `127.0.0.1:3000`, stores SQLite data in the `postreeve-data` volume and writes daily snapshots to `./backups`.
+
+## Self-hosting
+
+To run Postreeve on an always-on machine and use it from your other devices, follow [docs/self-host-tailscale.md](docs/self-host-tailscale.md): Docker Compose or a systemd service on loopback, HTTPS through `tailscale serve`, Google OAuth on the hosted URL, scheduled `VACUUM INTO` snapshots with restore, and graceful shutdown. Hosting requires owner login, which is not merged yet.
 
 ## Commands
 
 - `bun run setup:local`: create local private configuration without overwriting an existing `.env`
 - `bun run verify`: run strict typechecking, deterministic tests, and the production build
 - `bun run start`: serve the production application
+- `bun run backup [create | list | verify <file> | restore <file>]`: snapshot or restore the database (see the self-hosting guide)
 - `bun run dev`: run the API server in watch mode after building the web application
 - `bun run desktop`: build and open the Electron desktop application
 - `bun run desktop:pack`: create an unpacked desktop application

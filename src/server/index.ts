@@ -6,7 +6,7 @@ import { z } from "zod";
 import { createApi } from "./api";
 import { PostreeveService } from "./core/postreeve";
 import { Store } from "./db/store";
-import { GoogleOAuth } from "./google/oauth";
+import { GoogleOAuth, googleRedirectUri } from "./google/oauth";
 import { GmailMailClient } from "./mail/gmail";
 import { ImapMailProvider } from "./mail/imap";
 import { MailProviderRegistry } from "./mail/provider";
@@ -16,8 +16,12 @@ import { CredentialVault } from "./security/credentials";
 import { desktopApiAuthentication } from "./security/desktop-auth";
 import { postreeveSecureHeaders } from "./security/headers";
 import { allowedHostGuard, sameOriginGuard } from "./security/request-origin";
+import { backupPolicyFromEnvironment, scheduleBackups } from "./runtime/backup";
+import { createShutdown } from "./runtime/shutdown";
 
-const store = new Store();
+const databasePath = process.env.POSTREEVE_DB_PATH ?? "./data/postreeve.sqlite";
+const backupPolicy = backupPolicyFromEnvironment(process.env);
+const store = new Store(databasePath);
 const providers = new MailProviderRegistry();
 const senders = new MailSenderRegistry();
 const vault = new CredentialVault();
@@ -32,6 +36,7 @@ const serverConfig = z.object({
   maxAttachmentBytes: z.coerce.number().int().positive(),
   maxUploadBytes: z.coerce.number().int().positive(),
   maxMessageBytes: z.coerce.number().int().positive(),
+  shutdownTimeoutMs: z.coerce.number().int().min(0).max(300_000),
 }).parse({
   retentionDays: process.env.POSTREEVE_CONTENT_RETENTION_DAYS ?? defaultRetentionPolicy.maxAgeDays,
   retentionBytes: process.env.POSTREEVE_CONTENT_RETENTION_BYTES ?? defaultRetentionPolicy.maxContentBytes,
@@ -40,11 +45,12 @@ const serverConfig = z.object({
   hostname: process.env.POSTREEVE_HOST ?? "127.0.0.1",
   port: process.env.PORT ?? "3000",
   maxAttachmentBytes: process.env.POSTREEVE_MAX_ATTACHMENT_BYTES ?? String(25 * 1024 * 1024),
+  shutdownTimeoutMs: process.env.POSTREEVE_SHUTDOWN_TIMEOUT_MS ?? "20000",
 });
 const googleOAuth = googleClientId && googleClientSecret
   ? new GoogleOAuth(
       googleClientId,
-      `http://127.0.0.1:${serverConfig.port}/api/oauth/google/callback`,
+      googleRedirectUri(process.env, serverConfig.port),
       fetch,
       googleClientSecret,
     )
@@ -97,6 +103,7 @@ await service.initialize();
 service.synchronization.start();
 
 const desktopToken = process.env.POSTREEVE_DESKTOP_TOKEN;
+const shutdownController = new AbortController();
 const app = new Hono();
 app.use("*", postreeveSecureHeaders);
 app.use("*", allowedHostGuard(serverConfig.hostname));
@@ -105,6 +112,7 @@ if (!desktopToken?.trim()) app.use("/api/*", sameOriginGuard());
 app.use("/api/*", desktopApiAuthentication(desktopToken));
 app.route("/", createApi(service, googleOAuth, {
   oauthReturnUrl: process.env.POSTREEVE_DESKTOP_URL,
+  shutdownSignal: shutdownController.signal,
 }));
 app.use("/*", serveStatic({ root: "./dist" }));
 app.get("/*", serveStatic({ path: "./dist/index.html" }));
@@ -112,11 +120,22 @@ app.get("/*", serveStatic({ path: "./dist/index.html" }));
 // The mailbox event stream sends a keep-alive every 15 seconds, so idle connections must outlive that.
 const server = Bun.serve({ hostname: serverConfig.hostname, port: serverConfig.port, idleTimeout: 60, fetch: app.fetch });
 console.info(`Postreeve listening on http://${server.hostname}:${server.port}`);
+const stopBackups = backupPolicy ? scheduleBackups(databasePath, backupPolicy, message => console.info(message)) : () => undefined;
 
+const shutdown = createShutdown({
+  server,
+  endStreams: () => shutdownController.abort(),
+  stopSynchronization: () => service.synchronization.stop(),
+  closeStore: () => { stopBackups(); store.close(); },
+  drainTimeoutMs: serverConfig.shutdownTimeoutMs,
+  log: message => console.info(message),
+});
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
-    // Open mailbox event streams never finish, so shutdown closes active connections instead of waiting for them.
-    void service.synchronization.stop().finally(() => { server.stop(true); store.close(); });
+    void shutdown().then(() => process.exit(0), (error: unknown) => {
+      console.error("Postreeve shutdown failed", error);
+      process.exit(1);
+    });
   });
 }
 

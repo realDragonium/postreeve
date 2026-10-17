@@ -1,13 +1,27 @@
+# Self-hosting: Postreeve publishes only on the host's loopback; `tailscale serve` on the host provides HTTPS on the
+# tailnet. See docs/self-host-tailscale.md. Values come from `.env` next to this file.
 services:
   postreeve:
     build: .
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${POSTREEVE_HOST_PORT:-3000}:3000"
     environment:
-      POSTREEVE_MASTER_KEY: ${POSTREEVE_MASTER_KEY:-}
+      POSTREEVE_MASTER_KEY: ${POSTREEVE_MASTER_KEY:?Set POSTREEVE_MASTER_KEY in .env (bun run setup:local)}
+      POSTREEVE_PUBLIC_URL: ${POSTREEVE_PUBLIC_URL:-}
+      POSTREEVE_TRUST_PROXY: ${POSTREEVE_TRUST_PROXY:-}
+      POSTREEVE_SETUP_TOKEN: ${POSTREEVE_SETUP_TOKEN:-}
+      POSTREEVE_GOOGLE_CLIENT_ID: ${POSTREEVE_GOOGLE_CLIENT_ID:-}
+      POSTREEVE_GOOGLE_CLIENT_SECRET: ${POSTREEVE_GOOGLE_CLIENT_SECRET:-}
+      POSTREEVE_GOOGLE_REDIRECT: ${POSTREEVE_GOOGLE_REDIRECT:-}
+      POSTREEVE_BACKUP_DIR: /app/backups
+      POSTREEVE_BACKUP_INTERVAL_HOURS: ${POSTREEVE_BACKUP_INTERVAL_HOURS:-24}
+      POSTREEVE_BACKUP_KEEP: ${POSTREEVE_BACKUP_KEEP:-7}
     volumes:
       - postreeve-data:/app/data
+      - ${POSTREEVE_BACKUP_HOST_DIR:-./backups}:/app/backups
     restart: unless-stopped
+    # Shutdown drains requests and synchronization for up to 20 seconds (POSTREEVE_SHUTDOWN_TIMEOUT_MS).
+    stop_grace_period: 30s
 
 volumes:
   postreeve-data:
