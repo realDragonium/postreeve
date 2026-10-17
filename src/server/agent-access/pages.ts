@@ -49,7 +49,7 @@ export interface ConsentPageInput {
 
 export function consentPage(input: ConsentPageInput): string {
   const tiers = (Object.keys(agentTiers) as AgentTier[]).map((tier) => `<label><input type="radio" name="tier" value="${tier}"${tier === input.tier ? " checked" : ""}>
-    ${escapeHtml(agentTiers[tier].label)}${tier === "propose" ? ' <span class="dim">— recommended: it prepares, you accept</span>' : ""}</label>`).join("");
+    ${escapeHtml(agentTiers[tier].label)}${tier === "propose" ? ' <span class="dim">— recommended: it proposes changes and drafts mail, you accept and send</span>' : ""}</label>`).join("");
   const accounts = input.accounts.map((account) => `<label><input type="checkbox" name="account" value="${escapeHtml(account.id)}" checked>
     ${escapeHtml(account.email)}</label>`).join("");
   return page("Connect an agent", `<h1>Connect ${escapeHtml(input.clientName)}?</h1>

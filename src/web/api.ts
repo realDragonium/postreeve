@@ -343,6 +343,8 @@ export const api = {
     }),
   approveProposal: (id: string): Promise<Proposal> =>
     request(`/proposals/${encodeURIComponent(id)}/approve`, proposalSchema, { method: "POST" }),
+  declineProposal: (id: string): Promise<Proposal> =>
+    request(`/proposals/${encodeURIComponent(id)}/decline`, proposalSchema, { method: "POST" }),
   applyProposal: (id: string): Promise<Proposal | OperationBatch> =>
     request(
       `/proposals/${encodeURIComponent(id)}/apply`,

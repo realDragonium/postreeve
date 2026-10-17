@@ -22,20 +22,25 @@ import { recordAssistantBatch } from "./provenance";
 type MailboxViewListener = (view: WebMcpMailboxView) => void;
 type FolderListListener = (accountId: string, folders: readonly Folder[]) => void;
 
-type ProposalChangeListener = (accountId: string) => void;
+type ProposalChangeListener = (accountId: string, kind: "proposals" | "drafts") => void;
 
 const mailboxViewListeners = new Set<MailboxViewListener>();
 const proposalChangeListeners = new Set<ProposalChangeListener>();
 
-/** Agent-prepared proposals must show on their messages without a reload. */
+/** Agent-prepared proposals and drafts must show without a reload. */
 export function subscribeToWebMcpProposalChanges(listener: ProposalChangeListener): () => void {
   proposalChangeListeners.add(listener);
   return () => proposalChangeListeners.delete(listener);
 }
 
 function proposalChanged<T extends { accountId: string }>(proposal: T): T {
-  for (const listener of proposalChangeListeners) listener(proposal.accountId);
+  for (const listener of proposalChangeListeners) listener(proposal.accountId, "proposals");
   return proposal;
+}
+
+function draftChanged<T extends { accountId: string }>(draft: T): T {
+  for (const listener of proposalChangeListeners) listener(draft.accountId, "drafts");
+  return draft;
 }
 const folderListListeners = new Set<FolderListListener>();
 
@@ -102,5 +107,17 @@ export const webMcpServices: WebMcpServices = {
   createProposal: async (input: CreateProposalInput, signal) => proposalChanged(await api.createProposal(input, signal)),
   updateProposal: async (proposalId, input: UpdateProposalInput, signal) =>
     proposalChanged(await api.updateProposal(proposalId, input, signal)),
+  listIdentities: (accountId, signal) => api.identities(accountId, signal),
+  listSignatures: (accountId, signal) => api.signatures(accountId, signal),
+  listDrafts: (accountId, signal) => api.drafts(accountId, signal),
+  getDraft: (accountId, draftId, signal) => api.draft(accountId, draftId, signal),
+  createDraft: async (input, signal) => draftChanged(await api.createDraft(input, signal)),
+  updateDraft: async (accountId, draftId, input, signal) => draftChanged(await api.updateDraft(accountId, draftId, input, signal)),
+  readAttachment: async (accountId, canonicalMessageId, reference, signal) => {
+    const blob = await api.downloadAttachment(accountId, {
+      reference, canonicalMessageId, filename: "attachment", mediaType: "application/octet-stream", size: 0, sizeIsEstimate: true,
+    }, signal);
+    return { mediaType: blob.type || "application/octet-stream", content: new Uint8Array(await blob.arrayBuffer()) };
+  },
   showMailboxView,
 };

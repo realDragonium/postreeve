@@ -16,6 +16,11 @@ export const assistantTools: readonly AssistantTool[] = [
   { name: "list_messages", effect: "read" },
   { name: "read_messages", effect: "read" },
   { name: "read_conversation", effect: "read" },
+  { name: "read_attachment", effect: "read" },
+  { name: "list_identities", effect: "read" },
+  { name: "list_signatures", effect: "read" },
+  { name: "list_drafts", effect: "read" },
+  { name: "read_draft", effect: "read" },
   { name: "search_messages", effect: "read" },
   { name: "list_activity", effect: "read" },
   { name: "list_proposals", effect: "read" },
@@ -26,6 +31,8 @@ export const assistantTools: readonly AssistantTool[] = [
   { name: "undo_batch", effect: "write · undoable" },
   { name: "create_proposal", effect: "write · proposal" },
   { name: "update_proposal", effect: "write · proposal" },
+  { name: "create_draft", effect: "write · draft" },
+  { name: "update_draft", effect: "write · draft" },
   { name: "send_message", effect: "irreversible" },
 ];
 

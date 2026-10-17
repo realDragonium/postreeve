@@ -74,6 +74,17 @@ export function createServerAgentServices(service: PostreeveService, allowedAcco
       requireAccount((await service.getProposal(proposalId)).accountId);
       return service.updateProposal(proposalId, input);
     },
+    listIdentities: async (accountId) => { requireAccount(accountId); return service.listIdentities(accountId); },
+    listSignatures: async (accountId) => { requireAccount(accountId); return service.listSignatures(accountId); },
+    listDrafts: async (accountId) => { requireAccount(accountId); return service.listDrafts(accountId); },
+    getDraft: async (accountId, draftId) => { requireAccount(accountId); return service.getDraft(accountId, draftId); },
+    createDraft: async (input) => { requireAccount(input.accountId); return service.createDraft(input); },
+    updateDraft: async (accountId, draftId, input) => { requireAccount(accountId); return service.updateDraft(accountId, draftId, input); },
+    readAttachment: async (accountId, canonicalMessageId, reference) => {
+      requireAccount(accountId);
+      const { mediaType, content } = await service.downloadAttachment(accountId, canonicalMessageId, reference);
+      return { mediaType, content };
+    },
     showMailboxView: () => undefined,
   };
 }

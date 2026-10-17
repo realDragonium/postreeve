@@ -119,7 +119,7 @@ describe("remote MCP authorization", () => {
       expect(response.headers.get("Access-Control-Allow-Origin")).toBe("*");
       expect(await response.json()).toMatchObject({
         resource: `${origin}/mcp`, authorization_servers: [origin],
-        scopes_supported: ["mail:read", "mail:propose", "mail:act"], bearer_methods_supported: ["header"],
+        scopes_supported: ["mail:read", "mail:propose", "mail:draft", "mail:act"], bearer_methods_supported: ["header"],
       });
     }
     const metadata = await (await context.request("/.well-known/oauth-authorization-server")).json();
@@ -218,7 +218,7 @@ describe("remote MCP authorization", () => {
     const refreshed = await token(context, { grant_type: "refresh_token", refresh_token: first.refresh_token!, client_id: first.clientId });
     expect(refreshed.response.status).toBe(200);
     expect(refreshed.body.refresh_token).not.toBe(first.refresh_token);
-    expect(refreshed.body.scope).toBe("mail:read mail:propose");
+    expect(refreshed.body.scope).toBe("mail:read mail:propose mail:draft");
     const narrowed = await token(context, {
       grant_type: "refresh_token", refresh_token: refreshed.body.refresh_token!, client_id: first.clientId, scope: "mail:read",
     });
@@ -292,7 +292,7 @@ describe("remote MCP endpoint", () => {
     const { access_token } = await connect(context, "act");
     const names = await toolNames(context, access_token!);
     expect(names).not.toContain("send_message");
-    expect(names.filter((name) => /approve|apply_proposal|unsubscribe/.test(name))).toEqual([]);
+    expect(names.filter((name) => /approve|decline|apply_proposal|unsubscribe|send/.test(name))).toEqual([]);
     expect(names).toContain("create_proposal");
 
     const created = await callTool(context, access_token!, "create_proposal", {
@@ -311,6 +311,42 @@ describe("remote MCP endpoint", () => {
     expect(context.sent).toEqual([]);
     const [stored] = await context.service.listProposals(context.account.id);
     expect(stored).toMatchObject({ status: "draft", approvedAt: null, batchId: null });
+    context.store.close();
+  });
+
+  test("a prepare-tier agent drafts a reply for review; a read-only agent cannot draft", async () => {
+    const context = await setup();
+    const { access_token } = await connect(context, "propose");
+    const names = await toolNames(context, access_token);
+    expect(names).toEqual(expect.arrayContaining(["create_draft", "update_draft", "list_identities", "read_attachment"]));
+    expect(names).not.toContain("apply_message_actions");
+    const source = context.messages[0]!;
+    const created = await callTool(context, access_token, "create_draft", {
+      accountId: context.account.id, mode: "reply", to: [source.from[0]?.address ?? "sender@example.test"],
+      source: { canonicalMessageId: source.canonicalId, conversationId: source.conversationId },
+      subject: `Re: ${source.subject}`, body: "Thanks, I will look at it.",
+    });
+    expect(created.isError).toBe(false);
+    const draft = created.json();
+    expect(draft).toMatchObject({ mode: "reply", delivery: { status: "editable" }, identity: { address: context.account.email } });
+    const updated = await callTool(context, access_token, "update_draft", {
+      accountId: context.account.id, draftId: draft.id, version: draft.version, body: "Thanks!",
+    });
+    expect(updated.json()).toMatchObject({ body: "Thanks!", subject: `Re: ${source.subject}`, mode: "reply" });
+    const stale = await callTool(context, access_token, "update_draft", {
+      accountId: context.account.id, draftId: draft.id, version: draft.version, body: "Overwrite",
+    });
+    expect(stale.isError).toBe(true);
+    expect(context.sent).toEqual([]);
+    const events = agentEventSchema.array().parse(await (await context.request("/api/agent-access/events")).json());
+    expect(events.find(({ tool }) => tool === "create_draft")?.summary).toBe(`“Re: ${source.subject}” · reply`);
+
+    const reader = await connect(context, "read");
+    const refused = await callTool(context, reader.access_token, "create_draft", {
+      accountId: context.account.id, to: ["x@example.test"], subject: "x", body: "y",
+    });
+    expect(refused.isError).toBe(true);
+    expect(await context.service.listDrafts(context.account.id)).toHaveLength(1);
     context.store.close();
   });
 

@@ -57,6 +57,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Sort by newest, oldest, sender, or subject | Complete | Complete | `list_messages.sort` and `search_messages.sort` update the visible UI sort order. |
 | Show sender, recipients, Cc, subject, date, and preview | Complete | Complete | Returned by message list and read tools. |
 | Show catch-all delivery addresses | Complete | Complete | Returned as `deliveredTo`. |
+| Read received attachment content | Complete (download) | Complete | `read_attachment`: text, JSON and XML as text, anything else base64, up to 5 MiB. |
 | Render sanitized HTML mail | Complete | Equivalent | WebMCP receives message content rather than rendering it. |
 | Block remote images in displayed HTML | Complete | Equivalent | This is a UI privacy control; WebMCP does not load message images. |
 | Show plain-text mail | Complete | Complete | Returned by `read_messages`. |
@@ -93,10 +94,10 @@ Every WebMCP mutation revalidates the stable message reference, records an audit
 | Show accepted and rejected recipients | Complete | Complete | Returned in the send receipt. |
 | Keep a copy of IMAP/SMTP sends in Sent | Complete | Complete | `send_message` uses the same send path. The per-account **Save a copy to Sent** setting is UI-only and starts off for Gmail and Outlook hosts, which file sent mail themselves. |
 | Require approval before an agent sends real mail | Not applicable | Complete contract requirement | The `send_message` description requires explicit approval of recipients, subject, and message before invocation. |
-| Reply | Complete | Not available | Sent with `In-Reply-To` and `References` from the source message; Gmail keeps it in the thread. `send_message` only sends new messages. |
-| Reply all | Complete | Not available | Recipients come from the source message; threaded like Reply. |
-| Forward | Complete | Not available | Quotes the source message, including its HTML in rich-text mode. |
-| Send from an alternate identity or catch-all alias | Complete | Not available | Drafts send from a stored identity over SMTP and Gmail. Gmail requires the address under Send mail as. Replies default to the identity the message was delivered to. `send_message` sends from the primary address only. |
+| Reply | Complete | Draft only | Sent with `In-Reply-To` and `References` from the source message; Gmail keeps it in the thread. Agents prepare a reply with `create_draft` mode `reply`; the person sends it. |
+| Reply all | Complete | Draft only | Recipients come from the source message; threaded like Reply. `create_draft` mode `reply_all`. |
+| Forward | Complete | Draft only | Quotes the source message, including its HTML in rich-text mode. `create_draft` mode `forward`; the agent writes the quote. |
+| Send from an alternate identity or catch-all alias | Complete | Draft only | Drafts send from a stored identity over SMTP and Gmail. Gmail requires the address under Send mail as. Replies default to the identity the message was delivered to. `send_message` sends from the primary address only; `create_draft.from` picks an identity by address. |
 | Add attachments | Complete | Not available | Files upload into the saved draft on the server and are sent as attachments, within the upload and message size limits. Inline (CID) images are not supported. |
 | Compose rich text (bold, italic, links, lists, quotes) | Complete | Not available | Sent as `multipart/alternative`: HTML sanitized by the server against an allowlist plus a generated plain-text part. A plain-text mode remains. `send_message` stays plain text so agent-approved messages are exactly the text the person reviewed. |
 | Quote the original HTML in replies and forwards | Complete | Not available | Quoted with the reader's sanitizer; style sheets and remote images are dropped, so composing never fetches remote content. |
@@ -107,16 +108,17 @@ Sending is a real external side effect. WebMCP exposes only the narrowest send, 
 
 | Feature | Web UI | WebMCP | WebMCP tool or reason |
 | --- | --- | --- | --- |
-| Autosave a draft | Complete | Not available | Saved to the server with optimistic versions while you type. |
-| Manually save a draft | Complete | Not available | Stored on the server. |
-| List and reopen drafts | Complete | Not available | Server drafts per account; old browser-local drafts migrate once. |
+| Autosave a draft | Complete | Not applicable | Saved to the server with optimistic versions while you type. |
+| Create or edit a draft | Complete | Complete | `create_draft`, `update_draft` (version-checked: a newer edit by the person wins). No tool sends a draft. |
+| List and reopen drafts | Complete | Complete | `list_drafts`, `read_draft`. Old browser-local drafts migrate once. |
 | Delete a draft | Complete | Not available | Also removes its provider copy. |
 | Mirror drafts to the provider | Complete | Not available | Each draft is copied to Gmail drafts or the IMAP Drafts mailbox; the Postreeve draft stays authoritative. Drafts created in other clients are not imported. |
+| List identities and signatures | Complete | Complete | `list_identities`, `list_signatures` |
 | Add or remove an identity | Complete | Not available | Stored per account on the server; browser-local identities migrate once. |
 | Select an alternate From identity | Complete | Not available | Sending is disabled for an address that is not an identity of the account. |
 | Per-identity signatures | Complete | Not available | One signature per sending address, edited in the identity sheet and stored on the server. Compose inserts it and swaps it when From changes, unless the signature was edited. |
 
-Agent tools for drafts (prepare a reply for the person to review and send) are not built yet; see the remote MCP notes.
+Agents prepare drafts; only the person sends them, from the compose form.
 
 ## Activity and undo
 
@@ -137,6 +139,7 @@ Agent tools for drafts (prepare a reply for the person to review and send) are n
 | Edit a waiting proposal or move it to review | Not applicable | Complete | `update_proposal`; only `review` is accepted as a status. |
 | List proposals | Complete (markers and sidebar counts) | Complete | `list_proposals` |
 | Accept (approve and apply) a proposal | Complete | Not available | Only the human UI approves. No WebMCP or remote MCP tool can approve or apply. |
+| Decline a proposal | Complete | Not available | **Decline** in the reader strip; the proposal becomes `declined` and stops waiting. No tool declines, so an agent cannot hide its own proposal. |
 
 ## Rules and automation
 
@@ -181,6 +184,13 @@ The following tools are discoverable only while the Postreeve page is open:
 17. `list_proposals`
 18. `create_proposal`
 19. `update_proposal`
+20. `list_identities`
+21. `list_signatures`
+22. `list_drafts`
+23. `read_draft`
+24. `read_attachment`
+25. `create_draft`
+26. `update_draft`
 
 Calling `list_messages` or `search_messages` updates the open page to the same account, folder, query, filter, sort order, and message results returned to the AI. With no source, they list every account's inbox. Calling a folder-management tool updates the open page's folder list and keeps the selected mailbox valid. A created or updated proposal shows on its messages right away.
 
@@ -192,11 +202,11 @@ Agents outside the browser connect to `<origin>/mcp` (Streamable HTTP, stateless
 
 | Tier (scopes) | Tools |
 | --- | --- |
-| Read only (`mail:read`) | `list_accounts`, `list_folders`, `list_messages`, `search_messages`, `read_messages`, `read_conversation`, `list_activity`, `list_proposals`, `inspect_synchronization`, `request_reauthorization` |
-| Read and propose (`+ mail:propose`) | adds `create_proposal`, `update_proposal` |
-| Read, propose and act (`+ mail:act`) | adds `create_folder`, `rename_folder`, `delete_folder`, `apply_message_actions`, `undo_batch`, `retry_synchronization` |
+| Read only (`mail:read`) | `list_accounts`, `list_folders`, `list_messages`, `search_messages`, `read_messages`, `read_conversation`, `read_attachment`, `list_identities`, `list_signatures`, `list_drafts`, `read_draft`, `list_activity`, `list_proposals`, `inspect_synchronization`, `request_reauthorization` |
+| Read and prepare (`+ mail:propose`, `mail:draft`) | adds `create_proposal`, `update_proposal`, `create_draft`, `update_draft` |
+| Read, prepare and act (`+ mail:act`) | adds `create_folder`, `rename_folder`, `delete_folder`, `apply_message_actions`, `undo_batch`, `retry_synchronization` |
 
-Remote agents never get `send_message`, unsubscribe, or anything that approves or applies a proposal. A grant can be limited to chosen accounts; other accounts are invisible and refused.
+Remote agents never get `send_message`, unsubscribe, a way to send a draft, or anything that approves, applies or declines a proposal. A grant can be limited to chosen accounts; other accounts are invisible and refused.
 
 | Feature | Status | Notes |
 | --- | --- | --- |

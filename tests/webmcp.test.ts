@@ -11,7 +11,12 @@ import type {
   DirectActionInput,
   Folder,
   MessageRef,
+  CreateDraftInput,
   CreateProposalInput,
+  Draft,
+  Identity,
+  Signature,
+  UpdateDraftInput,
   OperationBatch,
   Proposal,
   RenameFolderInput,
@@ -148,6 +153,15 @@ const proposal: Proposal = {
   batchId: null,
 };
 
+const draft: Draft = {
+  id: "11111111-1111-4111-8111-111111111111",
+  accountId: account.id,
+  mode: "new", to: [], cc: [], bcc: [], subject: "Hello", format: "plain", body: "Hi",
+  identity: { name: account.name, address: account.email }, attachments: [],
+  delivery: { status: "editable" }, mirror: { status: "pending" },
+  createdAt: "2026-08-29T12:00:00.000Z", updatedAt: "2026-08-29T12:00:00.000Z", version: 3,
+};
+
 const health: AccountHealth = { account, state: "catching-up", coverage: "partial", lastSuccessAt: null,
   failure: null, guidance: "Catching up", retryAvailable: true, nextAttemptAt: 0, retainedContentBytes: 0 };
 
@@ -265,6 +279,41 @@ class FakeServices implements WebMcpServices {
     return { ...proposal, title: input.title, items: input.items };
   }
 
+  readonly draftCreates: CreateDraftInput[] = [];
+  readonly draftUpdates: Array<[string, UpdateDraftInput]> = [];
+
+  async listIdentities(): Promise<readonly Identity[]> {
+    return [{ id: "i1", accountId: account.id, name: "Sales", address: "sales@example.test", createdAt: "2026-08-29T12:00:00.000Z" }];
+  }
+
+  async listSignatures(): Promise<readonly Signature[]> {
+    return [{ address: account.email, html: "<p>— Person</p>" }];
+  }
+
+  async listDrafts(): Promise<readonly Draft[]> {
+    return [draft];
+  }
+
+  async getDraft(): Promise<Draft> {
+    return draft;
+  }
+
+  async createDraft(input: CreateDraftInput): Promise<Draft> {
+    this.draftCreates.push(input);
+    const { accountId: _accountId, clientId: _clientId, ...content } = input;
+    return { ...draft, ...content };
+  }
+
+  async updateDraft(_accountId: string, draftId: string, input: UpdateDraftInput): Promise<Draft> {
+    this.draftUpdates.push([draftId, input]);
+    const { version: _version, ...content } = input;
+    return { ...draft, ...content, version: draft.version + 1 };
+  }
+
+  async readAttachment(): Promise<{ mediaType: string; content: Uint8Array }> {
+    return { mediaType: "text/plain; charset=utf-8", content: new TextEncoder().encode("hello attachment") };
+  }
+
   async updateProposal(proposalId: string, input: UpdateProposalInput, signal: AbortSignal): Promise<Proposal> {
     this.lastSignal = signal;
     this.proposalUpdates.push([proposalId, input]);
@@ -323,6 +372,13 @@ describe("Postreeve WebMCP", () => {
       "list_proposals",
       "create_proposal",
       "update_proposal",
+      "list_identities",
+      "list_signatures",
+      "list_drafts",
+      "read_draft",
+      "read_attachment",
+      "create_draft",
+      "update_draft",
     ];
 
     expect(registration?.toolNames).toEqual(expectedNames);
@@ -486,6 +542,27 @@ describe("Postreeve WebMCP", () => {
       items: [{ message: messageRef, subject: message.subject, action: { type: "leave" } }],
     }, executeOptions())).rejects.toThrow();
     expect(services.directActionCalls).toEqual([]);
+  });
+
+  test("drafts replies from a chosen identity, merges updates, reads attachments and never sends", async () => {
+    const services = new FakeServices();
+    const tools = new Map(createPostreeveWebMcpTools(services).map((tool) => [tool.name, tool]));
+    expect([...tools.keys()].filter((name) => name.includes("send") && name !== "send_message")).toEqual([]);
+    await expect(tools.get("create_draft")!.execute({ accountId: account.id, mode: "reply", to: [], subject: "Re: x", body: "y" }, executeOptions()))
+      .rejects.toThrow();
+    const source = { canonicalMessageId: message.canonicalId, conversationId: message.conversationId };
+    await tools.get("create_draft")!.execute({
+      accountId: account.id, mode: "reply", source, from: "SALES@example.test", to: ["a@example.test"], subject: "Re: x", body: "Thanks",
+    }, executeOptions());
+    expect(services.draftCreates[0]).toMatchObject({
+      mode: "reply", source, identity: { name: "Sales", address: "sales@example.test" },
+      to: [{ name: "", address: "a@example.test" }], cc: [], bcc: [], format: "plain", attachments: [],
+    });
+    await tools.get("update_draft")!.execute({ accountId: account.id, draftId: draft.id, version: 3, body: "Edited" }, executeOptions());
+    expect(services.draftUpdates[0]).toEqual([draft.id, expect.objectContaining({ body: "Edited", subject: "Hello", version: 3 })]);
+    expect(services.sendCalls).toEqual([]);
+    expect(await tools.get("read_attachment")!.execute({ accountId: account.id, canonicalMessageId: "m", reference: "r" }, executeOptions()))
+      .toEqual({ mediaType: "text/plain; charset=utf-8", size: 16, encoding: "text", content: "hello attachment" });
   });
 
   test("lists every account inbox when no source is given", async () => {

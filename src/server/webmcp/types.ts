@@ -3,7 +3,12 @@ import type { AccountHealth, SynchronizationStatus, Reauthorization } from "../.
 import type {
   Account,
   CanonicalMessageDetail,
+  CreateDraftInput,
   CreateProposalInput,
+  Draft,
+  Identity,
+  Signature,
+  UpdateDraftInput,
   CanonicalMessageSummary,
   CreateFolderInput,
   DeleteFolderInput,
@@ -38,6 +43,13 @@ export interface WebMcpServices {
   listActivity(accountId: string, signal: AbortSignal): Promise<readonly OperationBatch[]>;
   undoBatch(batchId: string, signal: AbortSignal): Promise<OperationBatch>;
   listProposals(accountId: string, signal: AbortSignal): Promise<readonly Proposal[]>;
+  listIdentities(accountId: string, signal: AbortSignal): Promise<readonly Identity[]>;
+  listSignatures(accountId: string, signal: AbortSignal): Promise<readonly Signature[]>;
+  listDrafts(accountId: string, signal: AbortSignal): Promise<readonly Draft[]>;
+  getDraft(accountId: string, draftId: string, signal: AbortSignal): Promise<Draft>;
+  createDraft(input: CreateDraftInput, signal: AbortSignal): Promise<Draft>;
+  updateDraft(accountId: string, draftId: string, input: UpdateDraftInput, signal: AbortSignal): Promise<Draft>;
+  readAttachment(accountId: string, canonicalMessageId: string, reference: string, signal: AbortSignal): Promise<AttachmentContent>;
   createProposal(input: CreateProposalInput, signal: AbortSignal): Promise<Proposal>;
   updateProposal(proposalId: string, input: UpdateProposalInput, signal: AbortSignal): Promise<Proposal>;
   showMailboxView(view: WebMcpMailboxView): void;
@@ -79,7 +91,12 @@ export interface WebMcpTool {
 }
 
 /** Which grant scope a tool needs on remote MCP; the page offers every tool the person exposes. */
-export type AgentToolScope = "read" | "propose" | "act";
+export type AgentToolScope = "read" | "propose" | "draft" | "act";
+
+export interface AttachmentContent {
+  readonly mediaType: string;
+  readonly content: Uint8Array;
+}
 export type AgentToolSurface = "webmcp" | "remote";
 
 /** One definition shared by page WebMCP and remote MCP. */

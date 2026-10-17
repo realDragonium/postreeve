@@ -1,21 +1,21 @@
 import { z } from "zod";
 
-export const agentScopes = ["mail:read", "mail:propose", "mail:act"] as const;
+export const agentScopes = ["mail:read", "mail:propose", "mail:draft", "mail:act"] as const;
 export const agentScopeSchema = z.enum(agentScopes);
 export type AgentScope = z.infer<typeof agentScopeSchema>;
 
 /** Scopes are offered as cumulative tiers: a person decides how much an agent may do, not a matrix. */
 export const agentTiers = {
   read: { label: "Read only", scopes: ["mail:read"] },
-  propose: { label: "Read and propose", scopes: ["mail:read", "mail:propose"] },
-  act: { label: "Read, propose and act", scopes: ["mail:read", "mail:propose", "mail:act"] },
+  propose: { label: "Read and prepare", scopes: ["mail:read", "mail:propose", "mail:draft"] },
+  act: { label: "Read, prepare and act", scopes: ["mail:read", "mail:propose", "mail:draft", "mail:act"] },
 } as const satisfies Record<string, { label: string; scopes: readonly AgentScope[] }>;
 export type AgentTier = keyof typeof agentTiers;
 export const agentTierSchema = z.enum(["read", "propose", "act"]);
 
 export function tierOf(scopes: readonly string[]): AgentTier {
   if (scopes.includes("mail:act")) return "act";
-  if (scopes.includes("mail:propose")) return "propose";
+  if (scopes.includes("mail:propose") || scopes.includes("mail:draft")) return "propose";
   return "read";
 }
 

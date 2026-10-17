@@ -30,6 +30,7 @@ export interface ReaderProps {
   onStep: (direction: 1 | -1) => void;
   onAction: (action: TriageAction) => void;
   onAcceptProposal: (proposalId: string) => void;
+  onDeclineProposal?: (proposalId: string) => void;
   onUndo: () => void;
   onCompose: (mode: ComposeFromMode, source: CanonicalMessageDetail) => void;
   onDownloadAttachment: (accountId: string, attachment: ReceivedAttachment) => Promise<void>;
@@ -96,6 +97,7 @@ export function Reader(props: ReaderProps) {
           <span className="provstrip-end">
             {!proposed && props.provenance.batchId && props.canUndo ? <button className="btn-underline" onClick={props.onUndo}>Undo</button> : null}
             {proposed && props.provenance.proposalId ? <button className="chip" disabled={props.busy} onClick={() => props.onAcceptProposal(props.provenance!.proposalId!)}>Accept</button> : null}
+            {proposed && props.provenance.proposalId && props.onDeclineProposal ? <button className="btn-underline" disabled={props.busy} onClick={() => props.onDeclineProposal!(props.provenance!.proposalId!)}>Decline</button> : null}
           </span>
         </div> : null}
 

@@ -13,7 +13,7 @@ The server SHALL use `POSTREEVE_PUBLIC_URL`'s origin, when set, as OAuth issuer 
 - **THEN** the issuer is `https://mail.example.com` and the resource is `https://mail.example.com/mcp`
 
 ### Requirement: Protected resource metadata
-The server SHALL answer `GET /.well-known/oauth-protected-resource` and `GET /.well-known/oauth-protected-resource/mcp` with RFC 9728 metadata: `resource`, `authorization_servers` holding the issuer, `scopes_supported` (`mail:read`, `mail:propose`, `mail:act`), `bearer_methods_supported: ["header"]` and `resource_name`.
+The server SHALL answer `GET /.well-known/oauth-protected-resource` and `GET /.well-known/oauth-protected-resource/mcp` with RFC 9728 metadata: `resource`, `authorization_servers` holding the issuer, `scopes_supported` (`mail:read`, `mail:propose`, `mail:draft`, `mail:act`), `bearer_methods_supported: ["header"]` and `resource_name`.
 
 #### Scenario: Discover the authorization server
 - **WHEN** a client requests the path-suffixed metadata
@@ -49,11 +49,15 @@ The server SHALL answer `GET /.well-known/oauth-authorization-server` with RFC 8
 - **THEN** an error page is shown and no redirect happens
 
 ### Requirement: Consent requires the signed-in owner
-The authorize page SHALL be shown only to a signed-in owner session; without one it SHALL ask the person to sign in and reload, and grant nothing. The consent page SHALL show the client name, redirect host, a tier (Read only; Read and propose; Read, propose and act, defaulting to the requested scope or Read and propose) and the accounts: all accounts including ones added later, or a chosen subset. It SHALL say that agents can never send mail or approve proposals.
+The authorize page SHALL be shown only to a signed-in owner session; without one it SHALL ask the person to sign in and reload, and grant nothing. The consent page SHALL show the client name, redirect host, a tier (Read only; Read and prepare, which adds proposals and drafts; Read, prepare and act; defaulting to the requested scope or Read and prepare) and the accounts. It SHALL say that agents can never send mail or approve proposals.
 
 #### Scenario: Not signed in
 - **WHEN** a browser without an owner session opens a valid authorize URL
 - **THEN** the page asks to sign in and no code is issued
+
+#### Scenario: Prepare tier
+- **WHEN** the owner allows Read and prepare
+- **THEN** tokens carry `mail:read mail:propose mail:draft`
 
 ### Requirement: Consent decision
 The consent form SHALL post to `/oauth/authorize` with a single-use pending request ID valid for 10 minutes, SHALL require an owner session and a same-origin `Origin` when present, and SHALL either redirect with `error=access_denied` or create a grant and redirect with a single-use code valid for 5 minutes and the original `state`.

@@ -350,6 +350,8 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
     )
     .post("/proposals/:proposalId/approve", zValidator("param", proposalParamsSchema), async (context) =>
       context.json(await service.approveProposalFromHumanInterface(context.req.valid("param").proposalId)))
+    .post("/proposals/:proposalId/decline", zValidator("param", proposalParamsSchema), async (context) =>
+      context.json(await service.declineProposalFromHumanInterface(context.req.valid("param").proposalId)))
     .post("/proposals/:proposalId/apply", zValidator("param", proposalParamsSchema), async (context) =>
       context.json(await service.applyApprovedProposal(context.req.valid("param").proposalId)))
     .get("/batches", zValidator("query", accountQuerySchema), async (context) =>

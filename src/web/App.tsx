@@ -312,6 +312,15 @@ function App() {
     onError: (error) => flash(error.message),
   });
 
+  const declineMutation = useMutation({
+    mutationFn: (proposalId: string) => api.declineProposal(proposalId),
+    onSuccess: async () => {
+      flash("Declined proposal");
+      await refresh();
+    },
+    onError: (error) => flash(error.message),
+  });
+
   const undoMutation = useMutation({
     mutationFn: (batchIds: readonly string[]) => Promise.all(batchIds.map((id) => api.undoBatch(id))),
     onSuccess: async (_batches, batchIds) => {
@@ -474,8 +483,8 @@ function App() {
       setSelected(new Set());
       flash("WebMCP updated the folder list.");
     });
-    const unsubscribeProposals = subscribeToWebMcpProposalChanges((accountId) => {
-      void queryClient.invalidateQueries({ queryKey: ["proposals", accountId] });
+    const unsubscribeProposals = subscribeToWebMcpProposalChanges((accountId, kind) => {
+      void queryClient.invalidateQueries({ queryKey: [kind, accountId] });
     });
     return () => {
       unsubscribeViews();
@@ -729,6 +738,7 @@ function App() {
               onStep={step}
               onAction={(action) => applyTo([openMessage], action)}
               onAcceptProposal={(proposalId) => acceptMutation.mutate(proposalId)}
+              onDeclineProposal={(proposalId) => declineMutation.mutate(proposalId)}
               onUndo={undoLast}
               onCompose={(mode, source) => setOverlay({
                 kind: "compose",

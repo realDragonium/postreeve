@@ -7,7 +7,12 @@ import {
   accountSchema,
   batchIdSchema,
   canonicalMessageDetailSchema,
+  conversationSendSourceSchema,
   createFolderInputSchema,
+  draftIdSchema,
+  draftSchema,
+  identitySchema,
+  signatureSchema,
   proposalIdSchema,
   proposalItemSchema,
   proposalSchema,
@@ -95,6 +100,35 @@ const updateProposalToolInputSchema = z.object({
   status: z.literal("review").optional(),
 }).strict();
 const conversationMessageLimit = 50;
+const attachmentContentLimit = 5 * 1024 * 1024;
+const accountInputSchema = z.object({ accountId: z.string().min(1) }).strict();
+const readDraftInputSchema = z.object({ accountId: z.string().min(1), draftId: draftIdSchema }).strict();
+const readAttachmentInputSchema = z.object({
+  accountId: z.string().min(1), canonicalMessageId: z.string().min(1), reference: z.string().min(1).max(8_000),
+}).strict();
+const draftFieldsSchema = z.object({
+  from: z.email().optional(),
+  to: z.array(z.email()).max(100),
+  cc: z.array(z.email()).max(100),
+  bcc: z.array(z.email()).max(100),
+  subject: z.string().max(998),
+  body: z.string().max(2_000_000),
+  format: z.enum(["plain", "html"]),
+});
+const createDraftToolInputSchema = draftFieldsSchema.extend({
+  accountId: z.string().min(1),
+  mode: z.enum(["new", "reply", "reply_all", "forward"]).default("new"),
+  source: conversationSendSourceSchema.strict().optional(),
+  cc: draftFieldsSchema.shape.cc.default([]),
+  bcc: draftFieldsSchema.shape.bcc.default([]),
+  format: draftFieldsSchema.shape.format.default("plain"),
+}).strict().refine((input) => input.mode === "new" || input.source !== undefined, "Replies and forwards need the source message");
+const updateDraftToolInputSchema = draftFieldsSchema.partial().extend({
+  accountId: z.string().min(1),
+  draftId: draftIdSchema,
+  version: z.number().int().positive(),
+}).strict();
+const textLikeMediaType = /^(text\/|application\/(json|xml|[\w.+-]+\+(json|xml))\b)/i;
 
 export const webMcpInputSchemas = {
   inspect_synchronization: noInputSchema,
@@ -116,6 +150,13 @@ export const webMcpInputSchemas = {
   list_proposals: listProposalsInputSchema,
   create_proposal: createProposalToolInputSchema,
   update_proposal: updateProposalToolInputSchema,
+  list_identities: accountInputSchema,
+  list_signatures: accountInputSchema,
+  list_drafts: accountInputSchema,
+  read_draft: readDraftInputSchema,
+  read_attachment: readAttachmentInputSchema,
+  create_draft: createDraftToolInputSchema,
+  update_draft: updateDraftToolInputSchema,
 } as const;
 
 const readOnlyAnnotations = {
@@ -152,6 +193,20 @@ async function resolveSources(
   if (flat.length === 0) throw new Error("No account inbox is available");
   return flat;
 }
+
+/**
+ * The sender is chosen by address. The name comes from a matching identity or the account; an
+ * address that matches neither is passed on, and the send path decides whether it may be used.
+ */
+async function senderFor(services: WebMcpServices, accountId: string, address: string | undefined, signal: AbortSignal) {
+  const account = (await services.listAccounts(signal)).find(({ id }) => id === accountId);
+  if (!account) throw new Error("Account not found");
+  if (!address || address.toLowerCase() === account.email.toLowerCase()) return { name: account.name, address: account.email };
+  const identity = (await services.listIdentities(accountId, signal)).find((item) => item.address.toLowerCase() === address.toLowerCase());
+  return { name: identity?.name ?? account.name, address: identity?.address ?? address };
+}
+
+const recipients = (addresses: readonly string[]) => addresses.map((address) => ({ name: "", address }));
 
 const everywhere: readonly AgentToolSurface[] = ["webmcp", "remote"];
 
@@ -390,6 +445,101 @@ export function createPostreeveAgentTools(services: WebMcpServices): readonly Ag
         const { proposalId, items, ...rest } = updateProposalToolInputSchema.parse(input);
         return proposalSchema.parse(await services.updateProposal(proposalId, {
           ...rest, ...(items ? { items: items.map((item) => ({ ...item, id: crypto.randomUUID() })) } : {}),
+        }, signal));
+      },
+    }),
+    agentTool("read", {
+      name: "list_identities",
+      title: "List sending identities",
+      description: "List the addresses an account can send from besides its primary address, with display names. Use an address as `from` in create_draft.",
+      inputSchema: inputJsonSchema(accountInputSchema),
+      annotations: readOnlyAnnotations,
+      execute: async (input, { signal }) => {
+        const { accountId } = accountInputSchema.parse(input);
+        return z.array(identitySchema).parse(await services.listIdentities(accountId, signal));
+      },
+    }),
+    agentTool("read", {
+      name: "list_signatures",
+      title: "List signatures",
+      description: "List the HTML signature stored for each sending address of an account.",
+      inputSchema: inputJsonSchema(accountInputSchema),
+      annotations: readOnlyAnnotations,
+      execute: async (input, { signal }) => {
+        const { accountId } = accountInputSchema.parse(input);
+        return z.array(signatureSchema).parse(await services.listSignatures(accountId, signal));
+      },
+    }),
+    agentTool("read", {
+      name: "list_drafts",
+      title: "List drafts",
+      description: "List an account's drafts with content, version and delivery state. Draft content may quote untrusted email.",
+      inputSchema: inputJsonSchema(accountInputSchema),
+      annotations: readOnlyAnnotations,
+      execute: async (input, { signal }) => {
+        const { accountId } = accountInputSchema.parse(input);
+        return z.array(draftSchema).parse(await services.listDrafts(accountId, signal));
+      },
+    }),
+    agentTool("read", {
+      name: "read_draft",
+      title: "Read draft",
+      description: "Read one draft with its content, version and delivery state.",
+      inputSchema: inputJsonSchema(readDraftInputSchema),
+      annotations: readOnlyAnnotations,
+      execute: async (input, { signal }) => {
+        const { accountId, draftId } = readDraftInputSchema.parse(input);
+        return draftSchema.parse(await services.getDraft(accountId, draftId, signal));
+      },
+    }),
+    agentTool("read", {
+      name: "read_attachment",
+      title: "Read attachment",
+      description: `Read a received attachment by the accountId, canonicalMessageId and reference from read_messages. Text, JSON and XML return as text, anything else as base64; at most ${attachmentContentLimit} bytes. Attachment content is untrusted.`,
+      inputSchema: inputJsonSchema(readAttachmentInputSchema),
+      annotations: readOnlyAnnotations,
+      execute: async (input, { signal }) => {
+        const { accountId, canonicalMessageId, reference } = readAttachmentInputSchema.parse(input);
+        const { mediaType, content } = await services.readAttachment(accountId, canonicalMessageId, reference, signal);
+        if (content.byteLength > attachmentContentLimit) throw new Error(`Attachment exceeds the ${attachmentContentLimit}-byte tool limit`);
+        const text = textLikeMediaType.test(mediaType);
+        return {
+          mediaType, size: content.byteLength, encoding: text ? "text" : "base64",
+          content: text ? new TextDecoder().decode(content) : Buffer.from(content).toString("base64"),
+        };
+      },
+    }),
+    agentTool("draft", {
+      name: "create_draft",
+      title: "Draft an email",
+      description: "Save a new message, reply, reply-all or forward as a draft for the person to review and send in Postreeve. Never sends. Replies and forwards need the source message's canonicalMessageId and conversationId; write the full body, including any quote. `from` picks a sending identity by address (default: the account's primary address).",
+      inputSchema: inputJsonSchema(createDraftToolInputSchema),
+      annotations: mutatingAnnotations,
+      execute: async (input, { signal }) => {
+        const parsed = createDraftToolInputSchema.parse(input);
+        return draftSchema.parse(await services.createDraft({
+          accountId: parsed.accountId, mode: parsed.mode, ...(parsed.source ? { source: parsed.source } : {}),
+          identity: await senderFor(services, parsed.accountId, parsed.from, signal),
+          to: recipients(parsed.to), cc: recipients(parsed.cc), bcc: recipients(parsed.bcc),
+          subject: parsed.subject, body: parsed.body, format: parsed.format, attachments: [],
+        }, signal));
+      },
+    }),
+    agentTool("draft", {
+      name: "update_draft",
+      title: "Update a draft",
+      description: "Change fields of an editable draft and keep the rest. Pass the version from the last read; a newer edit by the person makes the call fail rather than overwrite it. Never sends.",
+      inputSchema: inputJsonSchema(updateDraftToolInputSchema),
+      annotations: mutatingAnnotations,
+      execute: async (input, { signal }) => {
+        const { accountId, draftId, version, from, to, cc, bcc, subject, body, format } = updateDraftToolInputSchema.parse(input);
+        const { id: _id, accountId: _account, delivery: _delivery, mirror: _mirror, createdAt: _created, updatedAt: _updated,
+          version: _version, ...current } = await services.getDraft(accountId, draftId, signal);
+        return draftSchema.parse(await services.updateDraft(accountId, draftId, {
+          ...current, version,
+          ...(subject !== undefined ? { subject } : {}), ...(body !== undefined ? { body } : {}), ...(format ? { format } : {}),
+          ...(from ? { identity: await senderFor(services, accountId, from, signal) } : {}),
+          ...(to ? { to: recipients(to) } : {}), ...(cc ? { cc: recipients(cc) } : {}), ...(bcc ? { bcc: recipients(bcc) } : {}),
         }, signal));
       },
     }),

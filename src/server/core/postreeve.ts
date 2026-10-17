@@ -1488,6 +1488,17 @@ export class PostreeveService {
     return approved;
   }
 
+  /** Only the human-facing UI reaches this; no agent tool declines, so an agent cannot hide its own proposal. */
+  async declineProposalFromHumanInterface(id: string): Promise<Proposal> {
+    const proposal = await this.getProposal(id);
+    if (proposal.status !== "draft" && proposal.status !== "review" && proposal.status !== "approved") {
+      throw new Error("Only a waiting proposal can be declined");
+    }
+    const declined: Proposal = { ...proposal, status: "declined", updatedAt: new Date().toISOString() };
+    await this.#store.updateProposal(declined);
+    return declined;
+  }
+
   async applyApprovedProposal(id: string): Promise<OperationBatch> {
     const proposal = await this.getProposal(id);
     if (proposal.status !== "approved" || !proposal.approvedAt) {
