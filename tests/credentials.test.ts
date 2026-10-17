@@ -30,6 +30,19 @@ describe("CredentialVault", () => {
     expect(() => new CredentialVault(randomBytes(32).toString("base64")).decrypt(encrypted)).toThrow();
   });
 
+  test("seals mail server admin credentials under the same key", () => {
+    const key = randomBytes(32).toString("base64");
+    const vault = new CredentialVault(key);
+    const secret = JSON.stringify({ kind: "apiKey", apiKey: "API_example-admin-key" });
+    const sealed = vault.encryptSecret(secret);
+
+    expect(sealed).not.toContain("API_example-admin-key");
+    expect(vault.encryptSecret(secret)).not.toBe(sealed);
+    expect(vault.decryptSecret(sealed)).toBe(secret);
+    expect(() => new CredentialVault(randomBytes(32).toString("base64")).decryptSecret(sealed)).toThrow();
+    expect(() => new CredentialVault("").encryptSecret(secret)).toThrow("POSTREEVE_MASTER_KEY");
+  });
+
   test("requires an external master key for IMAP credentials", () => {
     const vault = new CredentialVault("");
     expect(() => vault.encrypt({

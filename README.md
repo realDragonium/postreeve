@@ -106,6 +106,18 @@ Search matches words and `"quoted phrases"` as literal case-insensitive text in 
 
 `bun scripts/bench-mail-query.ts [count] [runs]` seeds synthetic summaries into a temporary SQLite file and prints p50/p95 page latency for list, unified, search and grouped queries.
 
+## Run your own mail server (Stalwart)
+
+**Settings › Mail server** connects a [Stalwart Mail Server](https://stalw.art) v0.16 or later by its admin URL and an API key (or admin login), which Postreeve keeps in the encrypted credential vault and never returns to the browser. From there you manage domains, mailboxes (display name, quota, password reset, aliases), catch-all addresses, mailing lists and DKIM keys; check each domain's required DNS records (MX, SPF, DKIM, DMARC, MTA-STS, TLS-RPT, autoconfig, SRV) against live DNS and copy their values; watch the delivery queue (retry, cancel); read received DMARC and TLS reports; and set the spam thresholds and trusted or blocked sender domains. Deleting a domain or mailbox needs its name typed again.
+
+Creating a mailbox can also add it to Postreeve as an IMAP/SMTP account in one step: Postreeve creates a Stalwart app password named `Postreeve` and stores only that, never the mailbox password. Adding an alias or catch-all to such a mailbox registers the matching send-as identity.
+
+Connect Cloudflare (an API token with Zone › DNS › Edit) or GoDaddy (API key and secret) under **Mail server › DNS providers**, and each domain's DNS tab shows the record changes needed to match the mail server. Nothing is written until you confirm; records Postreeve did not create change only when you tick them, and a zone that changed since you looked must be reviewed again. When GoDaddy refuses API access, which it does for many accounts since 2024, the values stay available to copy.
+
+DNS checks use DNS-over-HTTPS (`https://cloudflare-dns.com/dns-query`, override with `POSTREEVE_DOH_URL`) and send only record names and types; set `POSTREEVE_DNS_RESOLVER=system` to use the operating system's resolver instead. Agents can read domains, DNS health and the queue and can prepare a mail server proposal (including publishing a domain's DNS records), which only you approve under **Proposals**.
+
+Deployment next to Postreeve, with mail ports public, autoconfig and MTA-STS through Caddy and the admin on your tailnet only: `docs/stalwart.md` and `docs/self-host.md`. Moving off poste.io: `docs/migrate-poste-io.md`. To test against a real but throwaway Stalwart: `bun scripts/stalwart-test-instance.ts`, then run `tests/stalwart-live.test.ts` with the variables it prints.
+
 ## Use WebMCP with Codex
 
 Keep Postreeve open in the built-in browser in the ChatGPT desktop app. Select **Site tools** in the address bar, then **Available site tools**, to inspect the tools exposed by the page.

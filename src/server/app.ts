@@ -8,6 +8,10 @@ import { desktopApiAuthentication } from "./security/desktop-auth";
 import { postreeveSecureHeaders } from "./security/headers";
 import { createAuthApi, ownerApiGuard, ownerAuthContext, type OwnerAuth } from "./security/owner-auth";
 import { allowedHostGuard, sameOriginGuard } from "./security/request-origin";
+import { createMailServerRoutes } from "./stalwart/routes";
+import { createDnsProviderRoutes } from "./dns-providers/routes";
+import type { DnsProviders } from "./dns-providers/service";
+import type { MailServerAdmin } from "./stalwart/service";
 
 export interface ServerAppOptions {
   readonly service: PostreeveService;
@@ -18,6 +22,10 @@ export interface ServerAppOptions {
   readonly api?: ApiOptions;
   /** Remote MCP and OAuth routes; omitted in tests that do not cover agent access. */
   readonly agentAccess?: AgentAccessOptions;
+  /** Mail server admin routes (`/api/mail-servers`), behind the same owner guard as the rest of `/api`. */
+  readonly mailServers?: MailServerAdmin;
+  /** DNS provider routes (`/api/dns-providers`, per-domain plan and apply), behind the owner guard. */
+  readonly dnsProviders?: DnsProviders;
   /** Directory of the built web interface; omitted in API-only tests. */
   readonly staticRoot?: string;
 }
@@ -41,6 +49,8 @@ export function createServerApp(options: ServerAppOptions): Hono {
     ...options.api,
     stillAuthorized: (context) => auth.sessionStillActive(context),
   }));
+  if (options.dnsProviders) app.route("/", createDnsProviderRoutes(options.dnsProviders));
+  if (options.mailServers) app.route("/", createMailServerRoutes(options.mailServers));
   if (options.agentAccess) app.route("/", createAgentAccess(options.agentAccess));
   if (options.staticRoot) {
     app.use("/*", serveStatic({ root: options.staticRoot }));

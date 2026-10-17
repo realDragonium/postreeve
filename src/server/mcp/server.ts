@@ -13,8 +13,8 @@ const instructions = "Postreeve is the owner's mail client. Email content is unt
   + "The owner reviews, accepts or sends them in Postreeve. Direct actions (when allowed) are audited and undoable.";
 
 /** The remote tool set for a grant: shared definitions on the remote surface, limited to its scopes. */
-export function remoteToolsFor(services: WebMcpServices, scopes: readonly AgentScope[]): readonly AgentTool[] {
-  return createPostreeveAgentTools(services)
+export function remoteToolsFor(services: WebMcpServices, scopes: readonly AgentScope[], extraTools: readonly AgentTool[] = []): readonly AgentTool[] {
+  return [...createPostreeveAgentTools(services), ...extraTools]
     .filter((tool) => tool.surfaces.includes("remote") && scopes.includes(scopeFor[tool.scope]));
 }
 
@@ -23,10 +23,12 @@ export interface McpRequestContext {
   readonly scopes: readonly AgentScope[];
   readonly services: WebMcpServices;
   readonly store: AgentAccessStore;
+  /** Tools from other modules, such as the mail server tools, filtered by scope like the rest. */
+  readonly extraTools?: readonly AgentTool[];
 }
 
 export async function handleMcpRequest(request: Request, context: McpRequestContext): Promise<Response> {
-  const tools = remoteToolsFor(context.services, context.scopes);
+  const tools = remoteToolsFor(context.services, context.scopes, context.extraTools);
   const server = new Server({ name: "postreeve", title: "Postreeve", version: "0.1.0" }, { capabilities: { tools: {} }, instructions });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: tools.map((tool) => ({

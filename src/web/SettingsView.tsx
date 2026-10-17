@@ -1,6 +1,7 @@
 import { SecurityView } from "./SecurityView";
 import { ConnectedAgentsView } from "./ConnectedAgentsView";
 import { SyncStorageView } from "./SyncStorageView";
+import { MailServerView } from "./admin/MailServerView";
 import type { Account, Folder } from "../shared/contracts";
 import { assistantTools } from "./assistant-tools";
 import { railFor, type ThemePreference } from "./theme";
@@ -10,6 +11,7 @@ import { ShortcutTable } from "./ShortcutHelp";
 
 export const settingsSections = [
   "Accounts",
+  "Mail server",
   "Assistant control",
   "Connected agents",
   "Appearance",
@@ -267,6 +269,8 @@ export function SettingsView(props: SettingsViewProps) {
       </div></div>
     </>;
   }
+
+  if (props.section === "Mail server") return <MailServerView />;
 
   if (props.section === "Rules & filters") {
     return <NotBuilt

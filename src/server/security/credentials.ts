@@ -64,13 +64,15 @@ export class CredentialVault {
   }
 
   encrypt(credentials: AccountCredentials): string {
+    return this.encryptSecret(JSON.stringify(accountCredentialsSchema.parse(credentials)));
+  }
+
+  /** Seals any non-account secret, such as a mail server admin credential, under the same key. */
+  encryptSecret(plaintext: string): string {
     const key = this.#requiredKey();
     const iv = randomBytes(12);
     const cipher = createCipheriv("aes-256-gcm", key, iv);
-    const ciphertext = Buffer.concat([
-      cipher.update(JSON.stringify(accountCredentialsSchema.parse(credentials)), "utf8"),
-      cipher.final(),
-    ]);
+    const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
     const tag = cipher.getAuthTag();
     return JSON.stringify({
       iv: iv.toString("base64"),
@@ -79,7 +81,7 @@ export class CredentialVault {
     });
   }
 
-  decrypt(value: string): AccountCredentials {
+  decryptSecret(value: string): string {
     const key = this.#requiredKey();
     const envelope = envelopeSchema.parse(JSON.parse(value));
     const iv = Buffer.from(envelope.iv, "base64");
@@ -88,8 +90,11 @@ export class CredentialVault {
     if (tag.length !== 16) throw new Error("Stored account credentials failed authentication");
     const decipher = createDecipheriv("aes-256-gcm", key, iv);
     decipher.setAuthTag(tag);
-    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    const parsed: unknown = JSON.parse(plaintext.toString("utf8"));
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
+  }
+
+  decrypt(value: string): AccountCredentials {
+    const parsed: unknown = JSON.parse(this.decryptSecret(value));
     const current = accountCredentialsSchema.safeParse(parsed);
     if (current.success) return current.data;
     const legacyAccount = z.object({

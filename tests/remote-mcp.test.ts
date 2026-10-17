@@ -10,13 +10,17 @@ import { getOwnerSession } from "../src/server/security/owner-auth";
 import { Store } from "../src/server/db/store";
 import { connectedAgentSchema, createdPersonalTokenSchema, agentEventSchema } from "../src/shared/agent-access";
 import { createTestHarness, testAccountInput } from "./support/test-mail";
+import { randomBytes } from "node:crypto";
+import { CredentialVault } from "../src/server/security/credentials";
+import { MailServerAdmin } from "../src/server/stalwart/service";
+import { FakeStalwart } from "./support/fake-stalwart";
 
 const origin = "https://mail.example.test";
 const redirectUri = "https://claude.ai/api/mcp/auth_callback";
 const verifier = "v".repeat(20) + "erifier-with-enough-entropy-1234567890";
 const challenge = createHash("sha256").update(verifier).digest("base64url");
 
-async function setup(options: { signedIn?: boolean } = {}) {
+async function setup(options: { signedIn?: boolean; mailServers?: MailServerAdmin } = {}) {
   const harness = await createTestHarness();
   const sqlite = new Database(":memory:");
   sqlite.exec("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL, applied_at TEXT NOT NULL)");
@@ -25,7 +29,7 @@ async function setup(options: { signedIn?: boolean } = {}) {
   const agents = new AgentAccessStore(sqlite, () => clock.now);
   const session = { signedIn: options.signedIn ?? true };
   const app = createAgentAccess({
-    service: harness.service, store: agents, publicUrl: `${origin}/`,
+    service: harness.service, store: agents, publicUrl: `${origin}/`, mailServers: options.mailServers,
     getOwnerSession: () => session.signedIn ? { id: "owner" } : null,
     requireOwner: async (c, next) => session.signedIn ? next() : c.json({ error: "Sign in" }, 401),
   });
@@ -413,6 +417,36 @@ describe("remote MCP endpoint", () => {
     const status = (await callTool(context, access_token!, "inspect_synchronization", {})).json();
     expect(status.accounts.map(({ account }: { account: { id: string } }) => account.id)).toEqual([context.account.id]);
     context.store.close();
+  });
+
+  test("offers mail server tools by scope, and none to an agent limited to some accounts", async () => {
+    const fake = new FakeStalwart();
+    const mailStore = new Store(":memory:");
+    const harness = await createTestHarness();
+    const mailServers = new MailServerAdmin({
+      store: mailStore.mailServers, vault: new CredentialVault(randomBytes(32).toString("base64")), fetch: fake.fetch,
+      accounts: harness.service, dns: { label: "none", lookup: async () => [] },
+    });
+    const server = await mailServers.connect({ name: "Stalwart", baseUrl: "https://mail-admin.example.ts.net", credential: { kind: "apiKey", apiKey: fake.apiKey } });
+    fake.addDomain("example.org");
+    const context = await setup({ mailServers });
+    const read = await connect(context, "read");
+    const readTools = await toolNames(context, read.access_token);
+    expect(readTools).toEqual(expect.arrayContaining(["list_mail_servers", "list_mail_server_domains", "check_mail_server_dns", "inspect_mail_server_queue"]));
+    expect(readTools).not.toContain("propose_mail_server_change");
+    const domains = (await callTool(context, read.access_token, "list_mail_server_domains", { serverId: server.id })).json();
+    expect(domains.map(({ name }: { name: string }) => name)).toEqual(["example.org"]);
+    const propose = await connect(context, "propose");
+    const proposal = (await callTool(context, propose.access_token, "propose_mail_server_change", {
+      serverId: server.id, title: "Add", operations: [{ type: "addDomain", domain: "example.net" }],
+    })).json();
+    expect(proposal).toMatchObject({ status: "pending", createdBy: "Claude" });
+    expect(fake.list("Domain")).toHaveLength(1);
+    const limited = await connect(context, "act", [context.account.id]);
+    expect((await toolNames(context, limited.access_token)).filter((name) => name.includes("mail_server"))).toEqual([]);
+    context.store.close();
+    harness.store.close();
+    mailStore.close();
   });
 
   test("the official MCP SDK client connects with a bearer token", async () => {

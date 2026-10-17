@@ -1,0 +1,45 @@
+# Stalwart Mail Server next to Postreeve, as its own Compose project. See docs/stalwart.md.
+#
+#   docker network create --internal mail-admin   # once; shared with Postreeve, no internet route
+#   cd deploy/stalwart && docker compose up -d
+#
+# Public: the mail ports. Stalwart's web listener (admin UI, management API, autoconfig, MTA-STS) publishes on
+# loopback only: Caddy forwards the public autoconfig/autodiscover/MTA-STS paths to it, `tailscale serve` gives
+# your devices the admin, and Postreeve calls the management API as http://stalwart:8080 on `mail-admin`.
+# Docker-published ports bypass ufw, which is why nothing else is published on a public interface.
+#
+# While poste.io still holds the mail ports, stage with compose.staging.yaml (docs/migrate-poste-io.md).
+name: stalwart
+
+services:
+  stalwart:
+    # Pinned: Postreeve's admin area targets Stalwart's v0.16 JMAP management API.
+    image: stalwartlabs/stalwart:v0.16.26
+    restart: unless-stopped
+    networks: [mail, mail-admin]
+    ports:
+      - "25:25"       # SMTP, inbound mail from other servers
+      - "465:465"     # SMTP submission, implicit TLS (what Postreeve uses)
+      - "587:587"     # SMTP submission, STARTTLS (add the listener, docs/stalwart.md)
+      - "993:993"     # IMAP, implicit TLS
+      - "4190:4190"   # ManageSieve
+      # Web listener on loopback; host port 8081 because poste.io's web port is 127.0.0.1:8080 until the cutover.
+      - "127.0.0.1:8081:8080"
+    volumes:
+      - stalwart-etc:/etc/stalwart
+      - stalwart-data:/var/lib/stalwart
+    environment:
+      # Only for the first start: lets you finish setup on 127.0.0.1:8081. Remove it afterwards.
+      STALWART_RECOVERY_ADMIN: ${STALWART_RECOVERY_ADMIN:-}
+    stop_grace_period: 30s
+
+networks:
+  # Outbound mail and ACME need the internet.
+  mail: {}
+  # Private link to Postreeve's container; created once with `docker network create --internal mail-admin`.
+  mail-admin:
+    external: true
+
+volumes:
+  stalwart-etc:
+  stalwart-data:

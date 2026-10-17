@@ -7,6 +7,7 @@ import { agentTiers, createPersonalTokenInputSchema, tierOf, type ConnectedAgent
 import type { PostreeveService } from "../core/postreeve";
 import { handleMcpRequest } from "../mcp/server";
 import { createServerAgentServices } from "../mcp/services";
+import { mailServerAgentTools, type MailServerToolServices } from "../stalwart/agent-tools";
 import { getOwnerSession as defaultGetOwnerSession, requireOwner as defaultRequireOwner } from "../security/owner-auth";
 import { clientAddress, limitBody, limitByAddress, rateLimited, RateLimiter } from "./limits";
 import { authenticateBearer, issuerOrigin, oauthRoutes, resourceMetadataUrl, resourceUrl } from "./oauth";
@@ -22,6 +23,8 @@ export interface AgentAccessOptions {
   readonly getOwnerSession?: (c: Context) => unknown;
   readonly requireOwner?: MiddlewareHandler;
   readonly limiter?: RateLimiter;
+  /** The mail server admin; its tools go only to agents granted every account. */
+  readonly mailServers?: MailServerToolServices | undefined;
 }
 
 const MINUTE = 60_000;
@@ -96,6 +99,8 @@ function mountAgentEndpoints(app: Hono, options: AgentAccessOptions, authorize: 
       scopes: agent.token.scopes.filter((scope) => grantScopes.includes(scope)),
       services: createServerAgentServices(service, agent.grant.accountIds),
       store,
+      // A mail server spans every mailbox on it, so an agent limited to some accounts gets none of its tools.
+      extraTools: options.mailServers && agent.grant.accountIds === null ? mailServerAgentTools(options.mailServers, agent.grant.name) : [],
     });
   });
   app.on(["GET", "DELETE"], "/mcp", (c) => {
