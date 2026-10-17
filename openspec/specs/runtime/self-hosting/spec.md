@@ -97,7 +97,7 @@ When `POSTREEVE_PUBLIC_MCP_PORT` is set, the server SHALL open a second listener
 - **THEN** the issuer is `POSTREEVE_MCP_PUBLIC_URL` and the authorization endpoint is on `POSTREEVE_PUBLIC_URL`
 
 ### Requirement: Public agent listener refuses everything else
-The public listener SHALL answer an empty 404 to any path outside its allowlist, to paths containing `%` or `\\`, and to any `Host` other than the `POSTREEVE_MCP_PUBLIC_URL` host.
+The public listener SHALL answer an empty 404 to any path outside its allowlist, to paths containing `%` or `\`, and to any `Host` other than the `POSTREEVE_MCP_PUBLIC_URL` host.
 
 #### Scenario: Other host name
 - **WHEN** a request for `/mcp` reaches the public listener with `Host: 127.0.0.1:3001`
