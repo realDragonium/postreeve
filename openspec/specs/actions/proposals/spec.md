@@ -1,12 +1,12 @@
 # Proposals Specification
 
 ## Purpose
-Covers proposals: a titled set of mailbox actions that is prepared and edited first and changes mail only after a human approves it in the UI. It defines the proposal record, its API, its status lifecycle, the human approval boundary and how applying produces a batch. The actions themselves and their per-item results are specified in actions/message-actions; batches and undo in actions/activity-undo; the agent tools, which include no proposal tools, in agents/webmcp-tools.
+Covers proposals: a titled set of mailbox actions that is prepared and edited first and changes mail only after a human approves it in the UI. It defines the proposal record, its API, its status lifecycle, the human approval boundary and how applying produces a batch. The actions themselves and their per-item results are specified in actions/message-actions; batches and undo in actions/activity-undo; the agent tools that prepare (but never approve) proposals in agents/webmcp-tools and agents/remote-mcp.
 
 ## Requirements
 
 ### Requirement: Proposal record
-A proposal SHALL carry `id`, `accountId`, `title` (1 to 120 characters), `status`, `items`, `createdAt`, `updatedAt`, `approvedAt` (null until approved) and `batchId` (null until applied). Each item SHALL carry `id`, `message` (a stable message reference), `subject`, `action` and `reason` (at most 500 characters). An item action SHALL be one of `leave`, `move` with `destination`, `trash`, `mark_read`, `mark_unread`, `flag` or `unflag`, where `leave` changes nothing.
+A proposal SHALL carry `id`, `accountId`, `title` (1 to 120 characters), `status` (including `declined`), `items`, `createdAt`, `updatedAt`, `approvedAt` (null until approved) and `batchId` (null until applied). Each item SHALL carry `id`, `message` (a stable message reference), `subject`, `action` and `reason` (at most 500 characters). An item action SHALL be one of `leave`, `move` with `destination`, `trash`, `mark_read`, `mark_unread`, `flag` or `unflag`, where `leave` changes nothing.
 
 #### Scenario: Leave item
 - **WHEN** a proposal item's action is `{ type: "leave" }`
@@ -46,15 +46,19 @@ The system SHALL update a proposal at `PUT /api/proposals/<proposalId>` with any
 - **THEN** the response is 400 `Only draft or review proposals can be edited`
 
 ### Requirement: Only the human-facing interface approves
-The system SHALL approve a proposal only through `approveProposalFromHumanInterface`, reached by `POST /api/proposals/<proposalId>/approve`, which the web UI calls when a person accepts a proposal. Approval SHALL move a `draft` or `review` proposal to `approved` and set `approvedAt`; any other status SHALL be refused with 400 `Only a draft or review proposal can be approved`. No WebMCP tool and no other API operation SHALL approve a proposal.
+The system SHALL approve a proposal only through `approveProposalFromHumanInterface`, reached by `POST /api/proposals/<proposalId>/approve`, which the web UI calls when a person accepts a proposal. Approval SHALL move a `draft` or `review` proposal to `approved` and set `approvedAt`; any other status SHALL be refused with 400 `Only a draft or review proposal can be approved`. No agent tool (WebMCP or remote MCP) and no other API operation SHALL approve or apply a proposal.
 
 #### Scenario: Human accepts
 - **WHEN** the UI posts approve for a proposal in `review`
 - **THEN** the proposal is `approved` with `approvedAt` set
 
 #### Scenario: Agent tools cannot approve
-- **WHEN** an agent lists the WebMCP tools
-- **THEN** no tool creates, updates, approves or applies a proposal
+- **WHEN** an agent lists the WebMCP or remote MCP tools
+- **THEN** no tool approves or applies a proposal, and `update_proposal` refuses any status other than `review`
+
+#### Scenario: Remote agent prepares, person accepts
+- **WHEN** a remote agent creates a proposal and the person selects Accept in the UI
+- **THEN** the proposal is approved and applied only by that UI action
 
 ### Requirement: Applying requires approval
 The system SHALL apply a proposal at `POST /api/proposals/<proposalId>/apply` only when its status is `approved` and `approvedAt` is set; otherwise it SHALL refuse with 400 `Human approval is required before applying a proposal` and change no mail. An unknown proposal SHALL be refused with 400 `Proposal not found`.
@@ -75,11 +79,15 @@ Applying an approved proposal SHALL set its status to `applying`, apply its item
 - **THEN** the batch is `partially_applied`, the proposal is `partially_applied` with `batchId` set, and the stale message is untouched
 
 ### Requirement: Status lifecycle
-A proposal's status SHALL move only `draft` → `review` (by update), `draft` or `review` → `approved` (by approval), `approved` → `applying` → `applied`, `partially_applied` or `failed` (by apply), and `applied` or `partially_applied` → `undone` or `partially_undone` (by undoing its batch). There SHALL be no operation that rejects or deletes a proposal; proposals are removed only with their account.
+A proposal's status SHALL move only `draft` → `review` (by update), `draft` or `review` → `approved` (by approval), `draft`, `review` or `approved` → `declined` (by decline), `approved` → `applying` → `applied`, `partially_applied` or `failed` (by apply), and `applied` or `partially_applied` → `undone` or `partially_undone` (by undoing its batch). There SHALL be no operation that deletes a proposal; proposals are removed only with their account.
 
 #### Scenario: Undo an applied proposal
 - **WHEN** the batch of an `applied` proposal is undone
 - **THEN** the proposal's status becomes `undone`
+
+#### Scenario: Declined is final
+- **WHEN** a client updates, approves or applies a declined proposal
+- **THEN** the request is refused and the proposal stays `declined`
 
 ### Requirement: Direct actions are recorded as approved proposals
 Each direct action request (actions/message-actions), from the UI or from the `apply_message_actions` WebMCP tool, SHALL be recorded as a new proposal that the system approves and applies immediately, so its batch has a `proposalId` and the proposal has `approvedAt` set. This SHALL NOT approve or apply any other proposal.
@@ -89,11 +97,15 @@ Each direct action request (actions/message-actions), from the UI or from the `a
 - **THEN** the returned batch's `proposalId` names a proposal with `approvedAt` set and status `applied`
 
 ### Requirement: Waiting proposals are shown on their messages
-The UI SHALL NOT create, edit or reject proposals. For every item of a `draft`, `review` or `approved` proposal it SHALL mark the matching message in the list with `◇` and `proposes <action>`, show the reader strip `The assistant proposes <action> — waiting on you`, and count the waiting items per account in the sidebar. A waiting proposal SHALL take precedence over earlier activity on the same message.
+The UI SHALL NOT create or edit proposals. For every item of a `draft`, `review` or `approved` proposal it SHALL mark the matching message in the list with `◇` and `proposes <action>`, show the reader strip `The assistant proposes <action> — waiting on you` with Accept and Decline, and count the waiting items per account in the sidebar. A waiting proposal SHALL take precedence over earlier activity on the same message.
 
 #### Scenario: Settled proposal
 - **WHEN** a proposal has been applied
 - **THEN** its messages no longer show the proposal marker or an Accept control
+
+#### Scenario: Decline from the reader
+- **WHEN** a person selects Decline on a waiting proposal
+- **THEN** the marker disappears and the status reads `Declined proposal`
 
 ### Requirement: Accepting a proposal in the UI
 The UI SHALL offer `Accept` in the reader strip and `Accept proposal` in the list toolbar for the focused message of a waiting proposal. Accepting SHALL call approve and then apply, add an undo entry and show `Accepted proposal`; a failure SHALL show its error.
@@ -101,3 +113,14 @@ The UI SHALL offer `Accept` in the reader strip and `Accept proposal` in the lis
 #### Scenario: Accept a waiting proposal
 - **WHEN** a person opens a message with a waiting `mark_read` proposal and selects Accept
 - **THEN** the UI approves and applies the proposal, the status reads `Accepted proposal` and the action can be undone with Cmd+Z
+
+### Requirement: Only the person declines
+The system SHALL decline a proposal only through `POST /api/proposals/<proposalId>/decline`, which the web UI calls when a person declines. Declining SHALL move a `draft`, `review` or `approved` proposal to `declined` and change no mail; any other status SHALL be refused with 400 `Only a waiting proposal can be declined`. No agent tool SHALL decline a proposal.
+
+#### Scenario: Person declines
+- **WHEN** the UI posts decline for a proposal in `review`
+- **THEN** the proposal is `declined`, its messages are unchanged and it no longer waits
+
+#### Scenario: Decline after apply
+- **WHEN** a client declines an applied proposal
+- **THEN** the response is 400 `Only a waiting proposal can be declined`

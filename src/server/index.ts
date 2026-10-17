@@ -110,6 +110,9 @@ const app = createServerApp({
   googleOAuth,
   desktopToken,
   api: { oauthReturnUrl: process.env.POSTREEVE_DESKTOP_URL },
+  agentAccess: {
+    service, store: store.agentAccess, publicUrl: process.env.POSTREEVE_PUBLIC_URL, mcpPublicUrl: process.env.POSTREEVE_MCP_PUBLIC_URL,
+  },
   staticRoot: "./dist",
 });
 

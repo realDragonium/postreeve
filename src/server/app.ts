@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
+import { createAgentAccess, type AgentAccessOptions } from "./agent-access";
 import { createApi, type ApiOptions } from "./api";
 import type { PostreeveService } from "./core/postreeve";
 import type { GoogleOAuth } from "./google/oauth";
@@ -15,6 +16,8 @@ export interface ServerAppOptions {
   readonly googleOAuth?: GoogleOAuth | undefined;
   readonly desktopToken?: string | undefined;
   readonly api?: ApiOptions;
+  /** Remote MCP and OAuth routes; omitted in tests that do not cover agent access. */
+  readonly agentAccess?: AgentAccessOptions;
   /** Directory of the built web interface; omitted in API-only tests. */
   readonly staticRoot?: string;
 }
@@ -38,6 +41,7 @@ export function createServerApp(options: ServerAppOptions): Hono {
     ...options.api,
     stillAuthorized: (context) => auth.sessionStillActive(context),
   }));
+  if (options.agentAccess) app.route("/", createAgentAccess(options.agentAccess));
   if (options.staticRoot) {
     app.use("/*", serveStatic({ root: options.staticRoot }));
     app.get("/*", serveStatic({ path: `${options.staticRoot}/index.html` }));

@@ -329,3 +329,62 @@ export const ownerSessions = sqliteTable("owner_sessions", {
   lastSeenAt: text("last_seen_at").notNull(),
   expiresAt: text("expires_at").notNull(),
 }, (table) => [index("owner_sessions_expires_idx").on(table.expiresAt)]);
+// Agent access (remote MCP). Every secret column holds a SHA-256 hash, never the secret.
+export const agentClients = sqliteTable("agent_clients", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  redirectUris: text("redirect_uris", { mode: "json" }).$type<string[]>().notNull(),
+  authMethod: text("auth_method", { enum: ["none", "client_secret_post", "client_secret_basic"] }).notNull(),
+  secretHash: text("secret_hash"),
+  createdAt: text("created_at").notNull(),
+});
+
+export const agentGrants = sqliteTable("agent_grants", {
+  id: text("id").primaryKey(),
+  kind: text("kind", { enum: ["oauth", "token"] }).notNull(),
+  clientId: text("client_id").references(() => agentClients.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  redirectHost: text("redirect_host"),
+  scopes: text("scopes", { mode: "json" }).$type<string[]>().notNull(),
+  accountIds: text("account_ids", { mode: "json" }).$type<string[] | null>(),
+  createdAt: text("created_at").notNull(),
+  lastUsedAt: text("last_used_at"),
+  revokedAt: text("revoked_at"),
+});
+
+export const agentCodes = sqliteTable("agent_codes", {
+  hash: text("hash").primaryKey(),
+  grantId: text("grant_id").notNull().references(() => agentGrants.id, { onDelete: "cascade" }),
+  clientId: text("client_id").notNull(),
+  redirectUri: text("redirect_uri").notNull(),
+  codeChallenge: text("code_challenge").notNull(),
+  resource: text("resource"),
+  expiresAt: text("expires_at").notNull(),
+  usedAt: text("used_at"),
+});
+
+export const agentTokens = sqliteTable("agent_tokens", {
+  hash: text("hash").primaryKey(),
+  grantId: text("grant_id").notNull().references(() => agentGrants.id, { onDelete: "cascade" }),
+  kind: text("kind", { enum: ["access", "refresh", "personal"] }).notNull(),
+  resource: text("resource"),
+  scopes: text("scopes", { mode: "json" }).$type<string[]>().notNull(),
+  expiresAt: text("expires_at"),
+  createdAt: text("created_at").notNull(),
+  revokedAt: text("revoked_at"),
+}, (table) => [index("agent_tokens_grant_idx").on(table.grantId)]);
+
+/** Audit of remote agent tool calls; kept after revocation so history stays readable. */
+export const agentEvents = sqliteTable("agent_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  grantId: text("grant_id").notNull(),
+  agentName: text("agent_name").notNull(),
+  tool: text("tool").notNull(),
+  accountId: text("account_id"),
+  outcome: text("outcome", { enum: ["ok", "error"] }).notNull(),
+  summary: text("summary").notNull(),
+  error: text("error"),
+  targetKind: text("target_kind", { enum: ["batch", "proposal"] }),
+  targetId: text("target_id"),
+  createdAt: text("created_at").notNull(),
+}, (table) => [index("agent_events_created_idx").on(table.createdAt)]);

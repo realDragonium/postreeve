@@ -2,6 +2,15 @@ import { mailboxPageSchema, type MailboxQueryInput, type MailboxPage } from "../
 import { accountHealthSchema, reauthorizationSchema, synchronizationStatusSchema } from "../shared/synchronization";
 import type { ZodType } from "zod";
 import { notifyUnauthenticated } from "./auth-api";
+import {
+  agentEventSchema,
+  connectedAgentSchema,
+  createdPersonalTokenSchema,
+  type AgentEvent,
+  type ConnectedAgent,
+  type CreatedPersonalToken,
+  type CreatePersonalTokenInput,
+} from "../shared/agent-access";
 import { z } from "zod";
 import {
   accountDiscoverySchema,
@@ -305,8 +314,8 @@ export const api = {
   downloadAttachment: requestAttachment,
   conversation: (id: string, signal?: AbortSignal): Promise<CanonicalConversation> =>
     request(`/conversations/${encodeURIComponent(id)}`, canonicalConversationSchema, withSignal(signal)),
-  conversationMessages: (id: string, accountId: string, signal?: AbortSignal): Promise<CanonicalMessageSummary[]> =>
-    request(`/conversations/${encodeURIComponent(id)}/messages?accountId=${encodeURIComponent(accountId)}`,
+  conversationMessages: (id: string, accountId?: string, signal?: AbortSignal): Promise<CanonicalMessageSummary[]> =>
+    request(`/conversations/${encodeURIComponent(id)}/messages${accountId ? `?accountId=${encodeURIComponent(accountId)}` : ""}`,
       canonicalMessageSummarySchema.array(), withSignal(signal)),
   sendMessage: (input: SendMessageInput, signal?: AbortSignal): Promise<SendReceipt> =>
     request("/messages/send", sendReceiptSchema, {
@@ -322,8 +331,8 @@ export const api = {
       ...jsonBody(input),
       ...withSignal(signal),
     }),
-  proposals: (accountId: string): Promise<Proposal[]> =>
-    request(`/proposals?accountId=${encodeURIComponent(accountId)}`, proposalSchema.array()),
+  proposals: (accountId: string, signal?: AbortSignal): Promise<Proposal[]> =>
+    request(`/proposals?accountId=${encodeURIComponent(accountId)}`, proposalSchema.array(), withSignal(signal)),
   updateProposal: (id: string, input: UpdateProposalInput, signal?: AbortSignal): Promise<Proposal> =>
     request(`/proposals/${encodeURIComponent(id)}`, proposalSchema, {
       method: "PUT",
@@ -338,6 +347,8 @@ export const api = {
     }),
   approveProposal: (id: string): Promise<Proposal> =>
     request(`/proposals/${encodeURIComponent(id)}/approve`, proposalSchema, { method: "POST" }),
+  declineProposal: (id: string): Promise<Proposal> =>
+    request(`/proposals/${encodeURIComponent(id)}/decline`, proposalSchema, { method: "POST" }),
   applyProposal: (id: string): Promise<Proposal | OperationBatch> =>
     request(
       `/proposals/${encodeURIComponent(id)}/apply`,
@@ -349,6 +360,16 @@ export const api = {
       method: "POST",
       ...withSignal(signal),
     }),
+  connectedAgents: (signal?: AbortSignal): Promise<ConnectedAgent[]> =>
+    request("/agent-access/agents", connectedAgentSchema.array(), withSignal(signal)),
+  agentEndpoint: (signal?: AbortSignal): Promise<{ mcpUrl: string }> =>
+    request("/agent-access/endpoint", z.object({ mcpUrl: z.url() }), withSignal(signal)),
+  revokeAgent: (id: string): Promise<{ ok: true }> =>
+    request(`/agent-access/agents/${encodeURIComponent(id)}`, z.object({ ok: z.literal(true) }), { method: "DELETE" }),
+  createPersonalToken: (input: CreatePersonalTokenInput): Promise<CreatedPersonalToken> =>
+    request("/agent-access/tokens", createdPersonalTokenSchema, { method: "POST", ...jsonBody(input) }),
+  agentEvents: (signal?: AbortSignal): Promise<AgentEvent[]> =>
+    request("/agent-access/events?limit=500", agentEventSchema.array(), withSignal(signal)),
   batches: (accountId: string, signal?: AbortSignal): Promise<OperationBatch[]> =>
     request(`/batches?accountId=${encodeURIComponent(accountId)}`, operationBatchSchema.array(), withSignal(signal)),
   undoBatch: (id: string, signal?: AbortSignal): Promise<OperationBatch> =>

@@ -1,12 +1,12 @@
 # WebMCP Tools Specification
 
 ## Purpose
-Covers the page-scoped WebMCP tools through which an agent in a WebMCP-capable browser works with the open Postreeve page: which tools exist, their inputs, limits and outputs, how they keep the visible UI in step, and how a person controls which tools are offered. The behavior behind each tool is specified with its capability: mailbox/folders, mailbox/message-listing, mailbox/message-reading, compose/sending, actions/message-actions and actions/activity-undo. Proposals (actions/proposals) have no tools.
+Covers the page-scoped WebMCP tools through which an agent in a WebMCP-capable browser works with the open Postreeve page: which tools exist, their inputs, limits and outputs, how they keep the visible UI in step, and how a person controls which tools are offered. The behavior behind each tool is specified with its capability: mailbox/folders, mailbox/message-listing, mailbox/message-reading, compose/sending, actions/message-actions, actions/activity-undo and actions/proposals. Agents outside the browser use the same definitions through agents/remote-mcp.
 
 ## Requirements
 
 ### Requirement: Tools exist only while the page is open
-The web page SHALL register its tools with `document.modelContext`, or `navigator.modelContext` when the document offers none, and SHALL withdraw them through the registration's abort signal when the page unloads or the exposed set changes. When neither context exists, the page SHALL register nothing. The server SHALL offer no MCP endpoint of its own, so the tools are discoverable only while a Postreeve page is open.
+The web page SHALL register its tools with `document.modelContext`, or `navigator.modelContext` when the document offers none, and SHALL withdraw them through the registration's abort signal when the page unloads or the exposed set changes. When neither context exists, the page SHALL register nothing. Page tools are discoverable only while a Postreeve page is open; agents outside the browser use the authorized remote MCP endpoint instead (agents/remote-mcp).
 
 #### Scenario: Browser without WebMCP
 - **WHEN** the page loads in a browser with no `modelContext`
@@ -16,22 +16,15 @@ The web page SHALL register its tools with `document.modelContext`, or `navigato
 - **WHEN** the person closes the Postreeve page
 - **THEN** its tools are no longer available to the agent
 
-### Requirement: Fixed tool set without proposal tools
-The system SHALL define exactly fifteen page tools: the twelve mailbox tools below plus `inspect_synchronization`, `retry_synchronization` and `request_reauthorization`. Inspection tools SHALL have `readOnlyHint: true`; mutation and recovery request tools SHALL have `readOnlyHint: false`. All SHALL have `untrustedContentHint: true`. No tool SHALL create, update, approve or apply a proposal.
-
-#### Scenario: Agent inspects available tools
-- **WHEN** an agent lists the tools of an open Postreeve page with nothing hidden
-- **THEN** it sees `list_accounts`, `list_folders`, `create_folder`, `rename_folder`, `delete_folder`, `list_messages`, `read_messages`, `search_messages`, `send_message`, `apply_message_actions`, `list_activity`, `undo_batch`, `inspect_synchronization`, `retry_synchronization` and `request_reauthorization`, and no proposal tool
-
 ### Requirement: WebMCP mirrors user workflows
-Every tool SHALL perform an operation a person can perform in the web UI, through Postreeve's server API, and SHALL NOT introduce an agent-only workflow or capability. Where the UI can do more than a tool, the tool SHALL offer the narrower operation rather than a different one.
+Every tool SHALL perform an operation a person can perform in the web UI, through Postreeve's server API, and SHALL NOT introduce an agent-only workflow or capability. Where the UI can do more than a tool, the tool SHALL offer the narrower operation rather than a different one. The one exception is preparing proposals, which exist so that the person accepts them in the UI.
 
 #### Scenario: No agent-only operation
 - **WHEN** an agent looks for a way to change mail that the UI does not offer, such as permanent deletion
 - **THEN** no tool provides it
 
 ### Requirement: The person controls which tools are offered
-The UI SHALL list every tool with its effect (`read`, `write`, `write · destructive` for `delete_folder`, `write · undoable` for `apply_message_actions` and `undo_batch`, `irreversible` for `send_message`) under Settings › Assistant control, and let the person expose or hide each one. A change SHALL re-register the tools immediately with only the exposed ones, and the hidden set SHALL persist in the browser's local storage.
+The UI SHALL list every tool with its effect (`read`, `write`, `write · destructive` for `delete_folder`, `write · undoable` for actions and undo, `write · proposal`, `write · draft`, `irreversible` for `send_message`) under Settings › Assistant control, and let the person expose or hide each one. A change SHALL re-register the tools immediately with only the exposed ones, and the hidden set SHALL persist in the browser's local storage.
 
 #### Scenario: Hide send_message
 - **WHEN** a person hides `send_message`
@@ -59,7 +52,7 @@ After `create_folder`, `rename_folder` or `delete_folder` succeeds, the open pag
 - **THEN** the page switches to that account's inbox and shows `WebMCP updated the folder list.`
 
 ### Requirement: Listing and searching messages
-List/search tools SHALL accept account/mailbox or explicit unified sources, limit 1–100 (default 50), filter, sort and an optional cursor; search also requires literal query text up to 200 characters. They SHALL return validated page envelopes containing canonical messages, nextCursor and synchronization/content/fallback coverage. Descriptions SHALL identify email as untrusted and body search as bounded.
+List/search tools SHALL accept account/mailbox or explicit unified sources, limit 1–100 (default 50), filter, sort and an optional cursor; search also requires literal query text up to 200 characters. With neither sources nor account and mailbox they SHALL use every available account's inbox. They SHALL return validated page envelopes containing canonical messages, nextCursor and synchronization/content/fallback coverage. Descriptions SHALL identify email as untrusted and body search as bounded.
 
 #### Scenario: Unread oldest first
 - **WHEN** an agent searches invoice with Unread and Oldest
@@ -72,6 +65,10 @@ List/search tools SHALL accept account/mailbox or explicit unified sources, limi
 #### Scenario: Limit above 100
 - **WHEN** limit 101 is supplied
 - **THEN** the tool rejects the call before server access
+
+#### Scenario: All inboxes
+- **WHEN** an agent calls `list_messages` with only a filter
+- **THEN** it receives a unified page across every account's inbox
 
 ### Requirement: Listing and searching update the open view
 The page SHALL show the same messages, selected sources, query, filter, sort and continuation/coverage returned to the agent. A fresh query SHALL close the reader and clear selection. Cursor continuation SHALL preserve already displayed pages for the same query.
@@ -144,3 +141,67 @@ The `apply_message_actions` description SHALL state that reporting spam is a `mo
 #### Scenario: Agent asked to unsubscribe
 - **WHEN** the tool list is inspected
 - **THEN** no tool performs an unsubscribe
+
+### Requirement: Fixed tool set with proposal preparation
+The system SHALL define exactly twenty-six page tools: the nineteen earlier tools plus `list_identities`, `list_signatures`, `list_drafts`, `read_draft`, `read_attachment`, `create_draft` and `update_draft`. Inspection tools SHALL have `readOnlyHint: true`, all others `readOnlyHint: false`, and all `untrustedContentHint: true`. No tool SHALL approve, apply or decline a proposal.
+
+#### Scenario: Agent inspects available tools
+- **WHEN** an agent lists the tools of an open Postreeve page with nothing hidden
+- **THEN** it sees the nineteen earlier tools and the seven identity, draft and attachment tools, and none that approves, applies or declines a proposal
+
+### Requirement: Conversation tool
+`read_conversation` SHALL take `{ conversationId }` and return the conversation's messages oldest first with full canonical details, including the owner's own replies in Sent and other folders, up to 50 messages. It SHALL NOT change read state or the visible view.
+
+#### Scenario: Read a thread with my reply
+- **WHEN** an agent reads the conversation of an inbox message the owner answered
+- **THEN** the result holds the inbox message and the owner's reply from Sent with their bodies
+
+### Requirement: Proposal preparation tools
+`list_proposals` SHALL take `{ accountId }`; `create_proposal` SHALL take `{ accountId, title, items }` with 1 to 100 items of `{ message, subject, action, reason }` and generate item IDs; `update_proposal` SHALL take `{ proposalId, title?, items?, status? }` where `status` accepts only `review`. They SHALL behave as `GET`, `POST` and `PUT /api/proposals` (actions/proposals) and change no mail. Descriptions SHALL state that only the person can accept a proposal in Postreeve.
+
+#### Scenario: Agent prepares a triage pass
+- **WHEN** an agent creates a proposal to archive two newsletters
+- **THEN** the proposal is `draft`, both messages are unchanged and the UI shows `proposes archive` on them
+
+#### Scenario: Agent tries to approve
+- **WHEN** an agent calls `update_proposal` with `status: "approved"`
+- **THEN** the call fails before any request is sent
+
+### Requirement: Tool definitions are shared with remote MCP
+The page tools SHALL come from the same definitions as the remote MCP tools (agents/remote-mcp). The page SHALL work on a hosted origin under the owner's session cookie, using same-origin requests only.
+
+#### Scenario: Hosted page
+- **WHEN** the owner opens Postreeve at its hosted HTTPS origin in a WebMCP browser
+- **THEN** the page registers its tools and their requests carry the owner's session
+
+### Requirement: Identity, signature and draft reading tools
+`list_identities` and `list_signatures` SHALL take `{ accountId }` and return the account's stored identities and signatures. `list_drafts` SHALL take `{ accountId }` and `read_draft` `{ accountId, draftId }`, returning drafts as `GET /api/accounts/<id>/drafts` does. All four SHALL be read-only.
+
+#### Scenario: Pick a sending identity
+- **WHEN** an agent lists identities for an account with an alias identity
+- **THEN** the alias address and name are returned
+
+### Requirement: Attachment content tool
+`read_attachment` SHALL take `{ accountId, canonicalMessageId, reference }` from a message detail and return `{ mediaType, size, encoding, content }`: text for `text/*`, JSON and XML media types, otherwise base64. It SHALL refuse attachments over 5 MiB and SHALL use the same account and reference checks as the download endpoint.
+
+#### Scenario: Read a text attachment
+- **WHEN** an agent reads a `text/plain` attachment
+- **THEN** `encoding` is `text` and `content` is its text
+
+### Requirement: Draft preparation tools
+`create_draft` SHALL take `{ accountId, mode, source?, from?, to, cc, bcc, subject, body, format? }` with `mode` `new`, `reply`, `reply_all` or `forward`; `source` (`canonicalMessageId`, `conversationId`) SHALL be required except for `new`. `from` SHALL select an identity by address and default to the account's primary address. `update_draft` SHALL take `{ accountId, draftId, version }` plus any of those fields and keep the others. Both SHALL return the draft and SHALL NOT send it.
+
+#### Scenario: Draft a reply for review
+- **WHEN** an agent creates a reply draft to a message from the alias identity
+- **THEN** the draft is stored editable with mode `reply`, the source and the alias address, and nothing is sent
+
+#### Scenario: Stale version
+- **WHEN** an agent updates a draft with an old version
+- **THEN** the call fails with the draft conflict and the draft is unchanged
+
+### Requirement: No tool sends a draft
+No page or remote tool SHALL send, claim or recover a draft. Sending a draft SHALL remain the person's action in the compose form.
+
+#### Scenario: Agent wants to send its draft
+- **WHEN** an agent lists tools
+- **THEN** no tool sends a draft

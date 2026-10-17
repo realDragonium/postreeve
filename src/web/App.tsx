@@ -4,7 +4,7 @@ import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } f
 import type { Account, Draft, Folder, Identity, MessageSummary, ReceivedAttachment, TriageAction } from "../shared/contracts";
 import { api } from "./api";
 import { registerPostreeveWebMcp } from "../server/webmcp/register";
-import { subscribeToWebMcpFolderLists, subscribeToWebMcpMailboxViews, webMcpServices } from "./webmcp";
+import { subscribeToWebMcpFolderLists, subscribeToWebMcpMailboxViews, subscribeToWebMcpProposalChanges, webMcpServices } from "./webmcp";
 import { exposedToolNames, loadHiddenTools, storeHiddenTools } from "./assistant-tools";
 import { ActivityView } from "./ActivityView";
 import { MessageList } from "./MessageList";
@@ -32,6 +32,7 @@ import {
   type Scope,
 } from "./mail-view";
 import {
+  agentBatchNames,
   buildProvenance,
   provenanceKey,
   recordUserBatch,
@@ -185,7 +186,10 @@ function App() {
     queries: accounts.map((account) => ({ queryKey: ["proposals", account.id], queryFn: () => api.proposals(account.id) })),
   });
   const proposals = proposalResults.flatMap((result) => result.data ?? []);
-  const provenance = useMemo(() => buildProvenance(batches, proposals), [batches, proposals]);
+  // Remote agents act without this page, so their calls come from the server's audit; a failure leaves attribution browser-local.
+  const agentEventsQuery = useQuery({ queryKey: ["agent-events"], queryFn: ({ signal }) => api.agentEvents(signal), refetchInterval: 15_000 });
+  const agentEvents = useMemo(() => agentEventsQuery.data ?? [], [agentEventsQuery.data]);
+  const provenance = useMemo(() => buildProvenance(batches, proposals, agentBatchNames(agentEvents)), [batches, proposals, agentEvents]);
   const awaitingByAccount = new Map<string, number>(accounts.map((account, index) => [
     account.id,
     (proposalResults[index]?.data ?? [])
@@ -307,6 +311,15 @@ function App() {
     onSuccess: async (batch) => {
       setUndoStack((current) => [{ label: "Accepted proposal", batchIds: [batch.id] }, ...current].slice(0, 8));
       flash("Accepted proposal");
+      await refresh();
+    },
+    onError: (error) => flash(error.message),
+  });
+
+  const declineMutation = useMutation({
+    mutationFn: (proposalId: string) => api.declineProposal(proposalId),
+    onSuccess: async () => {
+      flash("Declined proposal");
       await refresh();
     },
     onError: (error) => flash(error.message),
@@ -474,9 +487,13 @@ function App() {
       setSelected(new Set());
       flash("WebMCP updated the folder list.");
     });
+    const unsubscribeProposals = subscribeToWebMcpProposalChanges((accountId, kind) => {
+      void queryClient.invalidateQueries({ queryKey: [kind, accountId] });
+    });
     return () => {
       unsubscribeViews();
       unsubscribeFolders();
+      unsubscribeProposals();
     };
   }, [queryClient]);
 
@@ -729,6 +746,7 @@ function App() {
               onStep={step}
               onAction={(action) => applyTo([openMessage], action)}
               onAcceptProposal={(proposalId) => acceptMutation.mutate(proposalId)}
+              onDeclineProposal={(proposalId) => declineMutation.mutate(proposalId)}
               onUndo={undoLast}
               onCompose={(mode, source) => setOverlay({
                 kind: "compose",
@@ -742,6 +760,8 @@ function App() {
 
         {hasAccounts && view === "activity" ? <ActivityView
           batches={batches}
+          agentEvents={agentEvents}
+          accounts={accounts}
           loading={batchResults.some((result) => result.isLoading)}
           error={batchResults.find((result) => result.error)?.error?.message ?? null}
           actorFilter={actorFilter}

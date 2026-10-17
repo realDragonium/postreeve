@@ -2,7 +2,7 @@
 
 Postreeve is a self-hosted email client for humans and agents. It connects to Gmail through Google OAuth and to standard providers through IMAP and SMTP while keeping credentials and control on your machine.
 
-Humans can read, search, compose, send, mark, move, and safely trash mail across multiple accounts. External agents can inspect mail and apply explicit mailbox actions through page-scoped WebMCP tools. Applied work remains visible in Activity and supported actions can be undone.
+Humans can read, search, compose, send, mark, move, and safely trash mail across multiple accounts. External agents can inspect mail, prepare proposals and apply explicit mailbox actions through page-scoped WebMCP tools or, once you authorize them, through the remote MCP endpoint at `/mcp`. Applied work remains visible in Activity and supported actions can be undone.
 
 Gmail synchronization consumes account history and repairs expired cursors through bounded full-message pages followed by history catch-up. Repair preserves existing canonical messages, conversations and local workflow references; incomplete repairs retain unseen locations until the account snapshot finishes.
 
@@ -113,6 +113,18 @@ Start with a scoped request:
 WebMCP mirrors the completed mailbox workflow available in the UI: it can inspect accounts, folders, and messages; send a new message from an account's primary address; apply explicit move, Trash, and read-state actions; inspect Activity; and undo supported operations. Sending real mail requires explicit user approval. Permanent deletion remains unavailable everywhere.
 
 Use GPT-5.6 Sol or GPT-5.6 Terra for site tools. GPT-5.6 Luna currently has WebMCP disabled.
+
+## Connect remote agents over MCP
+
+Postreeve serves MCP at `<your origin>/mcp` with OAuth 2.1 (PKCE and dynamic client registration). Set `POSTREEVE_PUBLIC_URL` to the hosted origin, such as `https://mail.example.com`, so the advertised OAuth URLs match; on loopback the request origin is used. Each connection opens a consent page in your signed-in browser where you choose **Read only**, **Read and prepare** (recommended: the agent proposes mailbox changes and drafts replies, you accept and send) or **Read, prepare and act**, and which accounts it may reach. Remote agents can never send mail, send a draft, or accept or decline a proposal. Manage and revoke connections under **Settings → Connected agents**; every call they make shows in Activity under their name.
+
+- **claude.ai**: Settings → Connectors → Add custom connector, URL `https://mail.example.com/mcp`. Leave the OAuth client fields empty; Claude registers itself.
+- **Claude Code**: `claude mcp add --transport http postreeve https://mail.example.com/mcp`, then run `/mcp` in Claude Code to sign in. For a headless machine, create a personal access token in Settings and add `--header "Authorization: Bearer <token>"` instead.
+- **ChatGPT**: Settings → Connectors → Advanced → enable Developer mode, then Create connector with the URL `https://mail.example.com/mcp` and OAuth authentication.
+
+If agents reach Postreeve on a different origin than your browser (for example `https://mcp.example.com` published by a reverse proxy while the UI stays on your tailnet), set `POSTREEVE_MCP_PUBLIC_URL` to that origin: it becomes the OAuth issuer and the `/mcp` resource, while the consent page stays on `POSTREEVE_PUBLIC_URL`, and connectors use `<POSTREEVE_MCP_PUBLIC_URL>/mcp`.
+
+When only the agent endpoints face the internet, serve them from a separate listener built with `createPublicAgentAccess`, which carries exactly these paths and answers 404 to everything else, or expose exactly `/mcp`, `/.well-known/oauth-protected-resource`, `/.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/token` and `/oauth/revoke`. Keep `/oauth/authorize` private: your own browser opens it, so it only needs to be reachable from your devices. These endpoints are rate limited (per client address, taken from `X-Forwarded-For` only when the connection comes from a loopback proxy, and per token on `/mcp`), cap request bodies at 1 MiB (`/mcp`) and 16 KiB (OAuth), and answer unexpected failures with a bare `server_error`.
 
 ## Docker
 

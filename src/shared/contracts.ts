@@ -217,6 +217,7 @@ export const proposalStatusSchema = z.enum([
   "failed",
   "undone",
   "partially_undone",
+  "declined",
 ]);
 
 export const proposalSchema = z.object({

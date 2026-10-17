@@ -25,6 +25,7 @@
     "@hono/zod-validator": "latest",
     "@simplewebauthn/browser": "^13.3.0",
     "@simplewebauthn/server": "^13.3.3",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@tailwindcss/vite": "latest",
     "@tanstack/react-query": "latest",
     "dompurify": "latest",

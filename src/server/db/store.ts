@@ -1,6 +1,7 @@
 import { SynchronizationStore } from "../sync/store";
 import { migrateCorrespondents, suggestRecipients } from "../contacts/correspondents";
 import { OwnerStore } from "../security/owner-store";
+import { AgentAccessStore, migrateAgentAccess } from "../agent-access/store";
 import type { OutgoingAttachment } from "../mail/outgoing-content";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -83,6 +84,7 @@ export class Store {
   readonly coordinationIdentity: string;
   readonly synchronization: SynchronizationStore;
   readonly owner: OwnerStore;
+  readonly agentAccess: AgentAccessStore;
 
   constructor(path = process.env.POSTREEVE_DB_PATH ?? "./data/postreeve.sqlite") {
     this.coordinationIdentity = path === ":memory:"
@@ -99,6 +101,8 @@ export class Store {
       (tenantId, id) => this.#getMessage(tenantId, id));
     migrateCorrespondents(this.#sqlite);
     this.owner = new OwnerStore(this.#sqlite);
+    migrateAgentAccess(this.#sqlite);
+    this.agentAccess = new AgentAccessStore(this.#sqlite);
   }
 
   close(): void {

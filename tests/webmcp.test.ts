@@ -11,8 +11,16 @@ import type {
   DirectActionInput,
   Folder,
   MessageRef,
+  CreateDraftInput,
+  CreateProposalInput,
+  Draft,
+  Identity,
+  Signature,
+  UpdateDraftInput,
   OperationBatch,
+  Proposal,
   RenameFolderInput,
+  UpdateProposalInput,
   SendMessageInput,
   SendReceipt,
 } from "../src/shared/contracts.ts";
@@ -133,6 +141,27 @@ const batch: OperationBatch = {
   updatedAt: "2026-08-29T12:01:00.000Z",
 };
 
+const proposal: Proposal = {
+  id: "8b0a3f8e-3f0e-4f43-9a43-5a2b8b6f1c11",
+  accountId: account.id,
+  title: "Tidy newsletters",
+  status: "draft",
+  items: [{ id: "item-1", message: messageRef, subject: "Weekly", action: { type: "trash" }, reason: "Newsletter" }],
+  createdAt: "2026-08-29T12:01:00.000Z",
+  updatedAt: "2026-08-29T12:01:00.000Z",
+  approvedAt: null,
+  batchId: null,
+};
+
+const draft: Draft = {
+  id: "11111111-1111-4111-8111-111111111111",
+  accountId: account.id,
+  mode: "new", to: [], cc: [], bcc: [], subject: "Hello", format: "plain", body: "Hi",
+  identity: { name: account.name, address: account.email }, attachments: [],
+  delivery: { status: "editable" }, mirror: { status: "pending" },
+  createdAt: "2026-08-29T12:00:00.000Z", updatedAt: "2026-08-29T12:00:00.000Z", version: 3,
+};
+
 const health: AccountHealth = { account, state: "catching-up", coverage: "partial", lastSuccessAt: null,
   failure: null, guidance: "Catching up", retryAvailable: true, nextAttemptAt: 0, retainedContentBytes: 0 };
 
@@ -186,8 +215,9 @@ class FakeServices implements WebMcpServices {
     return [folder];
   }
 
-  async listMessages(_input: WebMcpListMessagesInput, signal: AbortSignal): Promise<MailboxPage> {
+  async listMessages(input: WebMcpListMessagesInput, signal: AbortSignal): Promise<MailboxPage> {
     this.lastSignal = signal;
+    this.listCalls.push(input);
     return page([message]);
   }
 
@@ -225,6 +255,69 @@ class FakeServices implements WebMcpServices {
   async undoBatch(_batchId: string, signal: AbortSignal): Promise<OperationBatch> {
     this.lastSignal = signal;
     return { ...batch, status: "undone" };
+  }
+
+  readonly conversationCalls: string[] = [];
+  readonly proposalCreates: CreateProposalInput[] = [];
+  readonly proposalUpdates: Array<[string, UpdateProposalInput]> = [];
+  readonly listCalls: WebMcpListMessagesInput[] = [];
+
+  async readConversation(conversationId: string, signal: AbortSignal): Promise<readonly CanonicalMessageDetail[]> {
+    this.lastSignal = signal;
+    this.conversationCalls.push(conversationId);
+    return [messageDetail];
+  }
+
+  async listProposals(_accountId: string, signal: AbortSignal): Promise<readonly Proposal[]> {
+    this.lastSignal = signal;
+    return [proposal];
+  }
+
+  async createProposal(input: CreateProposalInput, signal: AbortSignal): Promise<Proposal> {
+    this.lastSignal = signal;
+    this.proposalCreates.push(input);
+    return { ...proposal, title: input.title, items: input.items };
+  }
+
+  readonly draftCreates: CreateDraftInput[] = [];
+  readonly draftUpdates: Array<[string, UpdateDraftInput]> = [];
+
+  async listIdentities(): Promise<readonly Identity[]> {
+    return [{ id: "i1", accountId: account.id, name: "Sales", address: "sales@example.test", createdAt: "2026-08-29T12:00:00.000Z" }];
+  }
+
+  async listSignatures(): Promise<readonly Signature[]> {
+    return [{ address: account.email, html: "<p>— Person</p>" }];
+  }
+
+  async listDrafts(): Promise<readonly Draft[]> {
+    return [draft];
+  }
+
+  async getDraft(): Promise<Draft> {
+    return draft;
+  }
+
+  async createDraft(input: CreateDraftInput): Promise<Draft> {
+    this.draftCreates.push(input);
+    const { accountId: _accountId, clientId: _clientId, ...content } = input;
+    return { ...draft, ...content };
+  }
+
+  async updateDraft(_accountId: string, draftId: string, input: UpdateDraftInput): Promise<Draft> {
+    this.draftUpdates.push([draftId, input]);
+    const { version: _version, ...content } = input;
+    return { ...draft, ...content, version: draft.version + 1 };
+  }
+
+  async readAttachment(): Promise<{ mediaType: string; content: Uint8Array }> {
+    return { mediaType: "text/plain; charset=utf-8", content: new TextEncoder().encode("hello attachment") };
+  }
+
+  async updateProposal(proposalId: string, input: UpdateProposalInput, signal: AbortSignal): Promise<Proposal> {
+    this.lastSignal = signal;
+    this.proposalUpdates.push([proposalId, input]);
+    return { ...proposal, status: input.status ?? proposal.status };
   }
 
   showMailboxView(view: WebMcpMailboxView): void {
@@ -275,13 +368,24 @@ describe("Postreeve WebMCP", () => {
       "apply_message_actions",
       "list_activity",
       "undo_batch",
+      "read_conversation",
+      "list_proposals",
+      "create_proposal",
+      "update_proposal",
+      "list_identities",
+      "list_signatures",
+      "list_drafts",
+      "read_draft",
+      "read_attachment",
+      "create_draft",
+      "update_draft",
     ];
 
     expect(registration?.toolNames).toEqual(expectedNames);
     expect([...modelContext.tools.keys()]).toEqual(expectedNames);
     expect(modelContext.tool("list_messages").inputSchema).toMatchObject({
       type: "object",
-      anyOf: [{ required: ["sources"] }, { required: ["accountId", "mailbox"] }],
+      dependentRequired: { accountId: ["mailbox"], mailbox: ["accountId"] },
     });
     expect(modelContext.tool("list_messages").annotations).toEqual({
       readOnlyHint: true,
@@ -410,13 +514,27 @@ describe("Postreeve WebMCP", () => {
     ).toEqual({ ...batch, status: "undone" });
   });
 
-  test("does not expose agent-only proposals or internal no-op actions", async () => {
+  test("prepares proposals but never approves or applies them", async () => {
     const services = new FakeServices();
     const tools = createPostreeveWebMcpTools(services);
     const names = tools.map(({ name }) => name);
-    expect(names).not.toContain("create_triage_proposal");
-    expect(names).not.toContain("update_triage_proposal");
-    expect(names).not.toContain("apply_approved_proposal");
+    expect(names.filter((name) => /approve|apply_proposal|apply_approved/.test(name))).toEqual([]);
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+    const created = await byName.get("create_proposal")!.execute({
+      accountId: account.id, title: "Tidy newsletters",
+      items: [{ message: messageRef, subject: "Weekly", action: { type: "trash" }, reason: "Newsletter" }],
+    }, executeOptions());
+    expect(created).toMatchObject({ status: "draft", approvedAt: null });
+    expect(services.proposalCreates[0]!.items[0]!.id).toMatch(/^[0-9a-f-]{36}$/);
+    await expect(byName.get("update_proposal")!.execute({ proposalId: proposal.id, status: "approved" }, executeOptions()))
+      .rejects.toThrow();
+    expect(services.proposalUpdates).toEqual([]);
+    expect(await byName.get("update_proposal")!.execute({ proposalId: proposal.id, status: "review" }, executeOptions()))
+      .toMatchObject({ status: "review" });
+    expect(await byName.get("list_proposals")!.execute({ accountId: account.id }, executeOptions())).toEqual([proposal]);
+    expect(await byName.get("read_conversation")!.execute({ conversationId: "conversation-1" }, executeOptions()))
+      .toEqual([messageDetail]);
+    expect(services.conversationCalls).toEqual(["conversation-1"]);
     const actions = tools.find(({ name }) => name === "apply_message_actions");
     if (!actions) throw new Error("Missing apply_message_actions tool");
     await expect(actions.execute({
@@ -424,6 +542,35 @@ describe("Postreeve WebMCP", () => {
       items: [{ message: messageRef, subject: message.subject, action: { type: "leave" } }],
     }, executeOptions())).rejects.toThrow();
     expect(services.directActionCalls).toEqual([]);
+  });
+
+  test("drafts replies from a chosen identity, merges updates, reads attachments and never sends", async () => {
+    const services = new FakeServices();
+    const tools = new Map(createPostreeveWebMcpTools(services).map((tool) => [tool.name, tool]));
+    expect([...tools.keys()].filter((name) => name.includes("send") && name !== "send_message")).toEqual([]);
+    await expect(tools.get("create_draft")!.execute({ accountId: account.id, mode: "reply", to: [], subject: "Re: x", body: "y" }, executeOptions()))
+      .rejects.toThrow();
+    const source = { canonicalMessageId: message.canonicalId, conversationId: message.conversationId };
+    await tools.get("create_draft")!.execute({
+      accountId: account.id, mode: "reply", source, from: "SALES@example.test", to: ["a@example.test"], subject: "Re: x", body: "Thanks",
+    }, executeOptions());
+    expect(services.draftCreates[0]).toMatchObject({
+      mode: "reply", source, identity: { name: "Sales", address: "sales@example.test" },
+      to: [{ name: "", address: "a@example.test" }], cc: [], bcc: [], format: "plain", attachments: [],
+    });
+    await tools.get("update_draft")!.execute({ accountId: account.id, draftId: draft.id, version: 3, body: "Edited" }, executeOptions());
+    expect(services.draftUpdates[0]).toEqual([draft.id, expect.objectContaining({ body: "Edited", subject: "Hello", version: 3 })]);
+    expect(services.sendCalls).toEqual([]);
+    expect(await tools.get("read_attachment")!.execute({ accountId: account.id, canonicalMessageId: "m", reference: "r" }, executeOptions()))
+      .toEqual({ mediaType: "text/plain; charset=utf-8", size: 16, encoding: "text", content: "hello attachment" });
+  });
+
+  test("lists every account inbox when no source is given", async () => {
+    const services = new FakeServices();
+    const tool = createPostreeveWebMcpTools(services).find(({ name }) => name === "list_messages")!;
+    await tool.execute({ filter: "unread" }, executeOptions());
+    expect(services.listCalls[0]).toMatchObject({ sources: [{ accountId: account.id, mailbox: "INBOX" }], filter: "unread" });
+    await expect(tool.execute({ accountId: account.id }, executeOptions())).rejects.toThrow();
   });
 
   test("rejects message results without a canonical ID", async () => {
