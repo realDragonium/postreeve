@@ -21,6 +21,8 @@ import {
   messageKey,
   messageMatchesKey,
   mergeMessages,
+  conversationGroups,
+  expandGroups,
   scopeSources,
   applyPerAccount,
   folderIntentLabel,
@@ -59,6 +61,7 @@ import {
 const folderPollIntervalMs = 15_000;
 /** Synchronization can commit several pages in a burst; refetch once per burst. */
 const mailboxEventCoalesceMs = 1_000;
+const groupedKey = "postreeve.message-list-grouped.v1";
 
 function notificationAccess(): NotificationAccess {
   return typeof Notification === "undefined" ? "unsupported" : Notification.permission;
@@ -108,6 +111,11 @@ function App() {
   const [sort, setSort] = useState<MessageSort>("newest");
   const [agentSources, setAgentSources] = useState<MailboxSource[] | null>(null);
   const [limit, setLimit] = useState(50);
+  const [grouped, setGrouped] = useState(() => { try { return localStorage.getItem(groupedKey) === "1"; } catch { return false; } });
+  useEffect(() => { try { localStorage.setItem(groupedKey, grouped ? "1" : "0"); } catch { /* storage unavailable */ } }, [grouped]);
+  const [everywhere, setEverywhere] = useState(false);
+  // Everywhere widens one search; a new view or a cleared search starts from the current folder again.
+  useEffect(() => { if (!query) setEverywhere(false); }, [query]);
   const [focus, setFocus] = useState(0);
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
   const [openKey, setOpenKey] = useState<string | null>(null);
@@ -212,17 +220,21 @@ function App() {
   }, [accounts, folderResults.map((result) => result.data?.length).join()]);
 
   const sources = agentSources ?? (scope ? scopeSources(scope, foldersByAccount) : []);
-  const messageQueryKey = ["messages", sources, query, filter, sort, limit];
+  const searchScope = everywhere && query ? "everywhere" : "sources";
+  const group = grouped ? "conversation" : "none";
+  // Extra key parts only when set, so agent-driven views keep the key WebMCP writes into the cache.
+  const messageQueryKey = ["messages", sources, query, filter, sort, limit, ...(searchScope === "everywhere" || grouped ? [searchScope, group] : [])];
   const messageResults = useInfiniteQuery({
     queryKey: messageQueryKey,
     gcTime: 0,
     initialPageParam: null as string | null,
-    queryFn: ({ pageParam, signal }) => api.queryMessages({ sources: [...sources], query, filter, sort, limit,
-      ...(pageParam ? { cursor: pageParam } : {}) }, signal),
+    queryFn: ({ pageParam, signal }) => api.queryMessages({ sources: searchScope === "everywhere" ? [] : [...sources], scope: searchScope,
+      query, filter, sort, limit, group, ...(pageParam ? { cursor: pageParam } : {}) }, signal),
     getNextPageParam: page => page.nextCursor,
-    enabled: sources.length > 0,
+    enabled: sources.length > 0 || searchScope === "everywhere",
   });
   const messages = mergeMessages((messageResults.data?.pages ?? []).map(page => page.messages));
+  const groups = conversationGroups(messageResults.data?.pages ?? []);
   const messagesLoading = messageResults.isLoading;
   const messagesError = messageResults.error?.message ?? null;
   const busy = messageResults.isFetching;
@@ -343,7 +355,7 @@ function App() {
 
   function targetsFor(fallback: MessageSummary | undefined): MessageSummary[] {
     const chosen = messages.filter((message) => messageIsSelected(message, selected));
-    return chosen.length ? chosen : fallback ? [fallback] : [];
+    return expandGroups(chosen.length ? chosen : fallback ? [fallback] : [], groups);
   }
 
   function applyTo(targets: readonly MessageSummary[], action: TriageAction): void {
@@ -464,6 +476,7 @@ function App() {
         incoming.cursor && current ? { pages: [...current.pages, page], pageParams: [...current.pageParams, incoming.cursor] }
           : { pages: [page], pageParams: [incoming.cursor ?? null] });
       setAgentSources(incomingSources);
+      setEverywhere(false);
       setScope(incomingSources.length > 1 ? null : { kind: "account", accountId: incoming.accountId, path: incoming.mailbox });
       setView("mail");
       setQueryDraft(incoming.query);
@@ -701,6 +714,11 @@ function App() {
               query={query}
               busy={busy || actionMutation.isPending}
               coverageText={coverageText}
+              groups={groups}
+              grouped={grouped}
+              everywhere={everywhere}
+              onGrouped={(next) => { setGrouped(next); setFocus(0); setSelected(new Set()); }}
+              onEverywhere={(next) => { setEverywhere(next); setFocus(0); setSelected(new Set()); }}
               pageSize={limit}
               canLoadMore={messageResults.hasNextPage}
               onSort={(next) => { setSort(next); setFocus(0); }}

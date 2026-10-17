@@ -2,7 +2,10 @@ import { describe, expect, test } from "bun:test";
 import type { Folder, MessageSummary } from "../src/shared/contracts";
 import {
   applyPerAccount,
+  conversationGroups,
   countLine,
+  expandGroups,
+  participantLine,
   filterMessages,
   mergeMessages,
   planFolderAction,
@@ -300,5 +303,29 @@ describe("applyPerAccount", () => {
       return `${accountId}:${group.length}`;
     });
     expect(outcome).toEqual({ applied: [{ batch: "a:2", count: 2 }], failures: ["Folder SPAM does not exist"] });
+  });
+});
+
+describe("conversation groups", () => {
+  const canonical = (uid: number) => ({ ...message({ uid }), canonicalId: `c${uid}`, canonicalAliases: [], conversationId: "conv" });
+  const group = {
+    conversationId: "conv", count: 3, unread: 1,
+    participants: [{ name: "Alice Smith", address: "alice@example.com" }, { name: "", address: "bob@example.com" },
+      { name: "Kim", address: "kim@example.com" }, { name: "Lee", address: "lee@example.com" }],
+    latest: { receivedAt: "2026-08-03T09:00:00.000Z", preview: "latest" },
+    members: [canonical(3), canonical(2), canonical(1)],
+  };
+
+  test("indexes groups by their representative and expands targets to every member once", () => {
+    const groups = conversationGroups([{ messages: [canonical(3), canonical(9)], groups: [group, { ...group, count: 1, members: [canonical(9)] }] }]);
+    expect([...groups.keys()]).toEqual(["c3", "c9"]);
+    expect(expandGroups([canonical(3), canonical(9), canonical(2)], groups).map(messageKey)).toEqual(["c3", "c2", "c1", "c9"]);
+    expect(expandGroups([canonical(5)], new Map()).map(messageKey)).toEqual(["c5"]);
+    expect(conversationGroups([{ messages: [canonical(3)] }]).size).toBe(0);
+  });
+
+  test("participant line uses first names and counts the rest", () => {
+    expect(participantLine(group)).toBe("Alice, bob@example.com, Kim +1");
+    expect(participantLine({ ...group, participants: [] })).toBe("Unknown sender");
   });
 });

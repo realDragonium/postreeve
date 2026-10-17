@@ -6,7 +6,8 @@ export const retentionPolicySchema = z.object({
   maxContentBytes: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER),
 });
 export type RetentionPolicy = z.infer<typeof retentionPolicySchema>;
-export const defaultRetentionPolicy: RetentionPolicy = { maxAgeDays: 30, maxContentBytes: 100 * 1024 * 1024 };
+/** A year of searchable bodies; the byte budget bounds disk, which is about five times the retained text (see the fast-mail-query design). */
+export const defaultRetentionPolicy: RetentionPolicy = { maxAgeDays: 365, maxContentBytes: 64 * 1024 * 1024 };
 export const synchronizationFailureSchema = z.enum(["provider", "reauthorization", "invalid-data"]);
 export const accountHealthSchema = z.object({
   account: accountSchema,

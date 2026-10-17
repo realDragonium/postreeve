@@ -1428,14 +1428,13 @@ export class Store {
   }
 
   #getMessage(tenantId: string, id: string): CanonicalMessage | null {
-    const row = this.#sqlite.query(`
-      SELECT message.*
-      FROM messages message
-      LEFT JOIN message_aliases alias
-        ON alias.tenant_id = message.tenant_id AND alias.message_id = message.id
-      WHERE message.tenant_id = ? AND (message.id = ? OR alias.alias_id = ?)
-      LIMIT 1
-    `).get(tenantId, id, id) as MessageRow | null;
+    // Two indexed lookups: an OR across the alias join would scan every message.
+    const row = (this.#sqlite.query("SELECT * FROM messages WHERE tenant_id = ? AND id = ?").get(tenantId, id)
+      ?? this.#sqlite.query(`
+        SELECT message.* FROM message_aliases alias
+        JOIN messages message ON message.tenant_id = alias.tenant_id AND message.id = alias.message_id
+        WHERE alias.tenant_id = ? AND alias.alias_id = ?
+      `).get(tenantId, id)) as MessageRow | null;
     const aliases = row
       ? this.#sqlite.query("SELECT alias_id FROM message_aliases WHERE tenant_id = ? AND message_id = ? ORDER BY created_at, alias_id")
         .all(tenantId, row.id) as Array<{ alias_id: string }>

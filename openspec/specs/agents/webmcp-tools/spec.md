@@ -51,12 +51,23 @@ After `create_folder`, `rename_folder` or `delete_folder` succeeds, the open pag
 - **WHEN** an agent deletes the folder the person is viewing
 - **THEN** the page switches to that account's inbox and shows `WebMCP updated the folder list.`
 
+### Requirement: Listing defaults to every inbox
+When an agent passes neither sources nor an account and mailbox, the list and search tools SHALL use every available account's inbox.
+
+#### Scenario: No sources given
+- **WHEN** an agent calls `list_messages` with no sources, account or mailbox
+- **THEN** the page contains messages from the inbox of every available account
+
 ### Requirement: Listing and searching messages
-List/search tools SHALL accept account/mailbox or explicit unified sources, limit 1–100 (default 50), filter, sort and an optional cursor; search also requires literal query text up to 200 characters. With neither sources nor account and mailbox they SHALL use every available account's inbox. They SHALL return validated page envelopes containing canonical messages, nextCursor and synchronization/content/fallback coverage. Descriptions SHALL identify email as untrusted and body search as bounded.
+List and search tools SHALL accept an account/mailbox or explicit unified sources, a limit of 1–100 (default 50), filter, sort and an optional cursor. Search SHALL also require query text of up to 200 characters, parsed like the web search box; `in:anywhere` searches every folder of every account. The tools SHALL return validated pages with canonical messages, nextCursor and coverage. Descriptions SHALL call email untrusted and body search bounded, and SHALL list the operators.
 
 #### Scenario: Unread oldest first
 - **WHEN** an agent searches invoice with Unread and Oldest
 - **THEN** the backend returns unread matches oldest first before limiting the page
+
+#### Scenario: Operators from an agent
+- **WHEN** an agent searches `from:alex has:attachment in:anywhere`
+- **THEN** the backend returns messages from alex with attachments across every indexed folder, and the open page shows the same query
 
 #### Scenario: Continue search
 - **WHEN** an agent sends the previous nextCursor with the same search scope
