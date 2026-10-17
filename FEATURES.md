@@ -93,30 +93,30 @@ Every WebMCP mutation revalidates the stable message reference, records an audit
 | Show accepted and rejected recipients | Complete | Complete | Returned in the send receipt. |
 | Keep a copy of IMAP/SMTP sends in Sent | Complete | Complete | `send_message` uses the same send path. The per-account **Save a copy to Sent** setting is UI-only and starts off for Gmail and Outlook hosts, which file sent mail themselves. |
 | Require approval before an agent sends real mail | Not applicable | Complete contract requirement | The `send_message` description requires explicit approval of recipients, subject, and message before invocation. |
-| Reply | Partial | Not available | The editor and quoting UI exist, but sending is blocked until thread headers are supported. |
-| Reply all | Partial | Not available | The editor populates recipients, but sending is blocked. |
-| Forward | Partial | Not available | The editor builds forwarded content, but sending is blocked. |
+| Reply | Complete | Not available | Sent with `In-Reply-To` and `References` from the source message; Gmail keeps it in the thread. `send_message` only sends new messages. |
+| Reply all | Complete | Not available | Recipients come from the source message; threaded like Reply. |
+| Forward | Complete | Not available | Quotes the source message, including its HTML in rich-text mode. |
 | Send from an alternate identity or catch-all alias | Complete | Not available | Drafts send from a stored identity over SMTP and Gmail. Gmail requires the address under Send mail as. Replies default to the identity the message was delivered to. `send_message` sends from the primary address only. |
-| Add attachments | Partial | Not available | The UI records local attachment metadata, but files are not uploaded or sent. |
+| Add attachments | Complete | Not available | Files upload into the saved draft on the server and are sent as attachments, within the upload and message size limits. Inline (CID) images are not supported. |
 | Compose rich text (bold, italic, links, lists, quotes) | Complete | Not available | Sent as `multipart/alternative`: HTML sanitized by the server against an allowlist plus a generated plain-text part. A plain-text mode remains. `send_message` stays plain text so agent-approved messages are exactly the text the person reviewed. |
 | Quote the original HTML in replies and forwards | Complete | Not available | Quoted with the reader's sanitizer; style sheets and remote images are dropped, so composing never fetches remote content. |
 
-Sending is a real external side effect. WebMCP exposes the same basic send operation as the UI, but it does not send drafts, replies, forwards, attachments, or alternate identities that the UI itself cannot send.
+Sending is a real external side effect. WebMCP exposes only the narrowest send, a new plain-text message from the primary address; replies, forwards, attachments, drafts and alternate identities stay in the UI. Remote MCP agents cannot send at all.
 
 ## Drafts and identities
 
 | Feature | Web UI | WebMCP | WebMCP tool or reason |
 | --- | --- | --- | --- |
-| Autosave a draft | Partial | Not available | Stored only in this browser's local storage. |
-| Manually save a draft | Partial | Not available | Stored only in this browser's local storage. |
-| List and reopen local drafts | Partial | Not available | Not synchronized with the provider's Drafts folder. |
-| Delete a local draft | Partial | Not available | Local browser state only. |
-| Synchronize provider drafts | Not available | Not available | No IMAP or Gmail draft implementation exists. |
+| Autosave a draft | Complete | Not available | Saved to the server with optimistic versions while you type. |
+| Manually save a draft | Complete | Not available | Stored on the server. |
+| List and reopen drafts | Complete | Not available | Server drafts per account; old browser-local drafts migrate once. |
+| Delete a draft | Complete | Not available | Also removes its provider copy. |
+| Mirror drafts to the provider | Complete | Not available | Each draft is copied to Gmail drafts or the IMAP Drafts mailbox; the Postreeve draft stays authoritative. Drafts created in other clients are not imported. |
 | Add or remove an identity | Complete | Not available | Stored per account on the server; browser-local identities migrate once. |
 | Select an alternate From identity | Complete | Not available | Sending is disabled for an address that is not an identity of the account. |
 | Per-identity signatures | Complete | Not available | One signature per sending address, edited in the identity sheet and stored on the server. Compose inserts it and swaps it when From changes, unless the signature was edited. |
 
-These features are not provider-backed today. Whether and how they should be exposed through WebMCP remains an open product decision.
+Agent tools for drafts (prepare a reply for the person to review and send) are not built yet; see the remote MCP notes.
 
 ## Activity and undo
 

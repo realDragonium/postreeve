@@ -417,6 +417,45 @@ describe("remote MCP endpoint", () => {
   });
 });
 
+describe("internet-facing bounds", () => {
+  test("rate limits registration per forwarded address and MCP calls per token", async () => {
+    const context = await setup();
+    const registerFrom = (address: string) => context.request("/oauth/register", {
+      method: "POST", headers: { "Content-Type": "application/json", "X-Forwarded-For": `198.51.100.9, ${address}` },
+      body: JSON.stringify({ client_name: "x", redirect_uris: [redirectUri] }),
+    });
+    for (let index = 0; index < 10; index += 1) expect((await registerFrom("203.0.113.1")).status).toBe(201);
+    const limited = await registerFrom("203.0.113.1");
+    expect(limited.status).toBe(429);
+    expect(Number(limited.headers.get("Retry-After"))).toBeGreaterThan(0);
+    expect((await registerFrom("203.0.113.2")).status).toBe(201);
+
+    const { access_token } = await connect(context, "read");
+    for (let index = 0; index < 120; index += 1) expect((await rpc(context, access_token, "tools/list")).response.status).toBe(200);
+    expect((await rpc(context, access_token, "tools/list")).response.status).toBe(429);
+    context.store.close();
+  });
+
+  test("refuses oversized bodies before parsing and hides internal failures", async () => {
+    const context = await setup();
+    const big = await context.request("/mcp", {
+      method: "POST", headers: { "Content-Type": "application/json", "Content-Length": String(2 * 1024 * 1024) },
+      body: "x".repeat(2 * 1024 * 1024),
+    });
+    expect(big.status).toBe(413);
+    const bigToken = await context.request("/oauth/token", {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: "a=" + "x".repeat(20_000),
+    });
+    expect(bigToken.status).toBe(413);
+
+    context.agents.findToken = () => { throw new Error("SQLITE_CORRUPT: secret detail"); };
+    const failed = await rpc(context, "pva_anything", "tools/list");
+    expect(failed.response.status).toBe(500);
+    expect(await failed.response.json()).toEqual({ error: "server_error" });
+    context.store.close();
+  });
+});
+
 describe("agent access storage and owner placeholder", () => {
   test("the main store migrates agent tables", () => {
     const store = new Store(":memory:");

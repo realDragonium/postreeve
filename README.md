@@ -100,6 +100,8 @@ Postreeve serves MCP at `<your origin>/mcp` with OAuth 2.1 (PKCE and dynamic cli
 - **Claude Code**: `claude mcp add --transport http postreeve https://mail.example.com/mcp`, then run `/mcp` in Claude Code to sign in. For a headless machine, create a personal access token in Settings and add `--header "Authorization: Bearer <token>"` instead.
 - **ChatGPT**: Settings → Connectors → Advanced → enable Developer mode, then Create connector with the URL `https://mail.example.com/mcp` and OAuth authentication.
 
+When only the agent endpoints face the internet (for example Tailscale Funnel in front of `tailscale serve`), expose exactly `/mcp`, `/.well-known/oauth-protected-resource`, `/.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/token` and `/oauth/revoke`. Keep `/oauth/authorize` private: your own browser opens it, so it only needs to be reachable from your devices. These endpoints are rate limited (per forwarded address, and per token on `/mcp`), cap request bodies at 1 MiB (`/mcp`) and 16 KiB (OAuth), and answer unexpected failures with a bare `server_error`.
+
 ## Docker
 
 Create the local `.env` first, then start the container:

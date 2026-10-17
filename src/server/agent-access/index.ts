@@ -8,6 +8,7 @@ import type { PostreeveService } from "../core/postreeve";
 import { handleMcpRequest } from "../mcp/server";
 import { createServerAgentServices } from "../mcp/services";
 import { getOwnerSession as defaultGetOwnerSession, requireOwner as defaultRequireOwner } from "../security/owner-auth";
+import { clientAddress, limitBody, limitByAddress, rateLimited, RateLimiter } from "./limits";
 import { authenticateBearer, oauthRoutes, publicOrigin, resourceMetadataUrl } from "./oauth";
 import type { AgentAccessStore, AgentGrant } from "./store";
 
@@ -18,7 +19,12 @@ export interface AgentAccessOptions {
   readonly publicUrl?: string | undefined;
   readonly getOwnerSession?: (c: Context) => unknown;
   readonly requireOwner?: MiddlewareHandler;
+  readonly limiter?: RateLimiter;
 }
+
+const MINUTE = 60_000;
+const MCP_BODY_LIMIT = 1024 * 1024;
+const OAUTH_BODY_LIMIT = 16 * 1024;
 
 export function toConnectedAgent(grant: AgentGrant): ConnectedAgent {
   return {
@@ -47,7 +53,13 @@ export function createAgentAccess(options: AgentAccessOptions) {
   const requireOwner = options.requireOwner ?? defaultRequireOwner;
   const app = new Hono();
 
+  const limiter = options.limiter ?? new RateLimiter();
   for (const path of ["/.well-known/*", "/oauth/register", "/oauth/token", "/oauth/revoke", "/mcp"]) app.use(path, publicCors);
+  // These paths face the internet when Funnel exposes them: bound size and rate before any parsing.
+  app.post("/oauth/register", limitBody(OAUTH_BODY_LIMIT), limitByAddress(limiter, "register", 10, 60 * MINUTE));
+  app.post("/oauth/token", limitBody(OAUTH_BODY_LIMIT), limitByAddress(limiter, "token", 60, MINUTE));
+  app.post("/oauth/revoke", limitBody(OAUTH_BODY_LIMIT), limitByAddress(limiter, "revoke", 60, MINUTE));
+  app.post("/mcp", limitBody(MCP_BODY_LIMIT));
   app.route("/", oauthRoutes({ store, listAccounts: () => service.listAccounts(), getOwnerSession, publicUrl: options.publicUrl }));
 
   app.post("/mcp", async (c) => {
@@ -55,10 +67,14 @@ export function createAgentAccess(options: AgentAccessOptions) {
     const authorization = c.req.header("Authorization");
     const agent = authenticateBearer(store, authorization, origin);
     if (!agent) {
+      const wait = limiter.take(`mcp-unauthenticated:${clientAddress(c)}`, 30, MINUTE);
+      if (wait !== null) return rateLimited(c, wait);
       const error = authorization ? ', error="invalid_token", error_description="The access token is invalid, expired or revoked"' : "";
       c.header("WWW-Authenticate", `Bearer resource_metadata="${resourceMetadataUrl(origin)}"${error}`);
       return c.json({ error: authorization ? "invalid_token" : "unauthorized" }, 401);
     }
+    const wait = limiter.take(`mcp-token:${agent.token.hash}`, 120, MINUTE);
+    if (wait !== null) return rateLimited(c, wait);
     const grantScopes = agent.grant.scopes;
     return handleMcpRequest(c.req.raw, {
       grant: agent.grant,
@@ -97,6 +113,10 @@ export function createAgentAccess(options: AgentAccessOptions) {
     .get("/events", zValidator("query", z.object({ limit: z.coerce.number().int().min(1).max(500).default(200) })), (c) =>
       c.json(store.listEvents(c.req.valid("query").limit)));
   app.route("/api/agent-access", agentApi);
+  app.onError((error, c) => {
+    console.error(`Agent access request failed: ${(error instanceof Error ? error.message : String(error)).replace(/[\r\n]/g, " ").slice(0, 300)}`);
+    return c.json({ error: "server_error" }, 500);
+  });
 
   return app;
 }
