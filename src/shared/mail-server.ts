@@ -235,6 +235,8 @@ export const mailServerOperationSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("updateSpamSettings"), settings: updateSpamSettingsInputSchema.strict() }).strict(),
   z.object({ type: z.literal("retryQueuedMessage"), id: z.string().min(1).max(64) }).strict(),
   z.object({ type: z.literal("cancelQueuedMessage"), id: z.string().min(1).max(64) }).strict(),
+  // Applies only the changes selected by default in the domain's DNS plan at approval time.
+  z.object({ type: z.literal("applyDnsChanges"), domain: domainNameSchema }).strict(),
 ]);
 
 export const createMailServerProposalInputSchema = z.object({
@@ -320,5 +322,6 @@ export function describeOperation(operation: MailServerOperation): string {
     case "updateSpamSettings": return `Change spam settings: ${Object.entries(operation.settings).map(([key, value]) => `${key} ${value}`).join(", ")}`;
     case "retryQueuedMessage": return `Retry queued message ${operation.id} now`;
     case "cancelQueuedMessage": return `Cancel delivery of queued message ${operation.id}`;
+    case "applyDnsChanges": return `Publish the DNS records of ${operation.domain} (only changes selected by default: new records and records Postreeve created)`;
   }
 }

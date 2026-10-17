@@ -103,7 +103,7 @@ export class FakeStalwart {
   }
 
   list(type: string): Obj[] {
-    return [...this.#table(type).values()].map((value) => this.#view(type, value));
+    return [...this.#table(type).entries()].map(([id, value]) => this.#view(type, value, id));
   }
 
   find(type: string, predicate: (value: Obj) => boolean): Obj | undefined {

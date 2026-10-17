@@ -4,6 +4,7 @@ import type { MailDomain, MailServerSummary, Mailbox, MailingList, DkimAlgorithm
 import { Sheet } from "../panels";
 import { mailServerApi as api } from "./api";
 import { ConfirmSheet, ErrorLine, copy } from "./common";
+import { DnsPlanPanel } from "./DnsProviders";
 import {
   categoryLabels, dnsStatusLabels, formatBytes, formatDate, parseAddressList, parseQuotaGib, quotaToGib, sortChecks,
 } from "./format";
@@ -293,6 +294,7 @@ function DnsSection({ serverId, domain }: { serverId: string; domain: MailDomain
   const checklist = useQuery({ queryKey: ["mail-server-dns", serverId, domain.id], queryFn: () => api.dns(serverId, domain.id) });
   const data = checklist.data;
   return <section>
+    <DnsPlanPanel serverId={serverId} domainId={domain.id} />
     <div style={{ display: "flex", gap: 16, alignItems: "baseline", marginBottom: 8 }}>
       <span className="t-body">{data ? `${data.records.filter(({ status }) => status === "ok").length} of ${data.records.length} records match · ${data.resolver} · ${formatDate(data.checkedAt)}` : "Checking DNS…"}</span>
       <span style={{ marginLeft: "auto", display: "flex", gap: 16 }}>

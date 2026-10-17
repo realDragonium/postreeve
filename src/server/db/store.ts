@@ -4,6 +4,7 @@ import { OwnerStore } from "../security/owner-store";
 import { AgentAccessStore, migrateAgentAccess } from "../agent-access/store";
 import { migrateFolderMappings, readFolderMappings, replaceFolderMappings as writeFolderMappings } from "./folder-mappings";
 import { MailServerStore, migrateMailServers } from "../stalwart/store";
+import { DnsProviderStore, migrateDnsProviders } from "../dns-providers/store";
 import type { OutgoingAttachment } from "../mail/outgoing-content";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
@@ -89,6 +90,7 @@ export class Store {
   readonly owner: OwnerStore;
   readonly agentAccess: AgentAccessStore;
   readonly mailServers: MailServerStore;
+  readonly dnsProviders: DnsProviderStore;
 
   constructor(path = process.env.POSTREEVE_DB_PATH ?? "./data/postreeve.sqlite") {
     this.coordinationIdentity = path === ":memory:"
@@ -110,6 +112,8 @@ export class Store {
     migrateFolderMappings(this.#sqlite);
     migrateMailServers(this.#sqlite);
     this.mailServers = new MailServerStore(this.#sqlite);
+    migrateDnsProviders(this.#sqlite);
+    this.dnsProviders = new DnsProviderStore(this.#sqlite);
   }
 
   close(): void {

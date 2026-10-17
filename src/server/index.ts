@@ -18,6 +18,7 @@ import { createPublicApp, publicListenerFromEnvironment } from "./runtime/public
 import { createShutdown } from "./runtime/shutdown";
 import { defaultDnsLookup } from "./stalwart/dns";
 import { MailServerAdmin } from "./stalwart/service";
+import { DnsProviders } from "./dns-providers/service";
 
 const databasePath = process.env.POSTREEVE_DB_PATH ?? "./data/postreeve.sqlite";
 const backupPolicy = backupPolicyFromEnvironment(process.env);
@@ -115,6 +116,13 @@ service.synchronization.start();
 
 const shutdownController = new AbortController();
 const mailServers = new MailServerAdmin({ store: store.mailServers, vault, accounts: service, dns: defaultDnsLookup() });
+const dnsProviders = new DnsProviders({ store: store.dnsProviders, vault, records: mailServers });
+mailServers.setDnsApplier(async (serverId, domainId) => {
+  const { results } = await dnsProviders.applyDefaults(serverId, domainId);
+  const failed = results.filter(({ ok }) => !ok);
+  if (failed.length) throw new Error(`${failed.length} of ${results.length} DNS changes failed: ${failed.map(({ message }) => message).join("; ")}`);
+  return `Published ${results.length} DNS change${results.length === 1 ? "" : "s"}`;
+});
 const agentAccess = {
   service, store: store.agentAccess, mailServers, publicUrl: process.env.POSTREEVE_PUBLIC_URL, mcpPublicUrl: process.env.POSTREEVE_MCP_PUBLIC_URL,
 };
@@ -127,6 +135,7 @@ const app = createServerApp({
   api: { oauthReturnUrl: process.env.POSTREEVE_DESKTOP_URL, shutdownSignal: shutdownController.signal },
   agentAccess,
   mailServers,
+  dnsProviders,
   staticRoot: "./dist",
 });
 

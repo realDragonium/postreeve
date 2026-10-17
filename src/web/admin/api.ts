@@ -27,10 +27,12 @@ import {
   type UpdateSpamSettingsInput,
 } from "../../shared/mail-server";
 
+import { dnsApplyResultSchema, dnsPlanSchema, dnsProviderSchema, dnsProviderSummarySchema, type ConnectDnsProviderInput } from "../../shared/dns-providers";
+
 const ok = z.object({ ok: z.literal(true) });
 
-async function request<T>(path: string, schema: ZodType<T>, method = "GET", body?: unknown): Promise<T> {
-  const response = await fetch(`/api/mail-servers${path}`, {
+async function request<T>(path: string, schema: ZodType<T>, method = "GET", body?: unknown, base = "/api/mail-servers"): Promise<T> {
+  const response = await fetch(`${base}${path}`, {
     method,
     headers: { Accept: "application/json", ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -87,6 +89,13 @@ export const mailServerApi = {
   spamList: (id: string, list: SpamListName) => request(`${server(id)}/spam/${list}`, z.array(spamListEntrySchema)),
   addSpamEntry: (id: string, list: SpamListName, domain: string) => request(`${server(id)}/spam/${list}`, spamListEntrySchema, "POST", { domain }),
   removeSpamEntry: (id: string, list: SpamListName, entryId: string) => request(`${server(id)}/spam/${list}/${entryId}`, ok, "DELETE"),
+
+  dnsPlan: (id: string, domainId: string) => request(`${server(id)}/domains/${domainId}/dns/plan`, dnsPlanSchema),
+  dnsApply: (id: string, domainId: string, fingerprint: string, changeIds: string[]) =>
+    request(`${server(id)}/domains/${domainId}/dns/apply`, dnsApplyResultSchema, "POST", { fingerprint, changeIds }),
+  dnsProviders: () => request("", z.array(dnsProviderSummarySchema), "GET", undefined, "/api/dns-providers"),
+  connectDnsProvider: (input: ConnectDnsProviderInput) => request("", dnsProviderSchema, "POST", input, "/api/dns-providers"),
+  disconnectDnsProvider: (id: string) => request(`/${id}`, ok, "DELETE", undefined, "/api/dns-providers"),
 
   proposals: () => request("/proposals", z.array(mailServerProposalSchema)),
   approve: (proposalId: string, input: ApproveMailServerProposalInput) => request(`/proposals/${proposalId}/approve`, mailServerProposalSchema, "POST", input),

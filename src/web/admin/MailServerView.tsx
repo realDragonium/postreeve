@@ -12,9 +12,10 @@ import { Sheet } from "../panels";
 import { ConfirmSheet, ErrorLine, Toolbar } from "./common";
 import { mailServerApi as api } from "./api";
 import { DomainsPanel } from "./DomainsPanel";
+import { DnsProvidersPanel } from "./DnsProviders";
 import { formatBytes, formatDate, recipientStatusLabels } from "./format";
 
-const tabs = ["Domains", "Queue", "Reports", "Spam", "Proposals"] as const;
+const tabs = ["Domains", "Queue", "Reports", "Spam", "DNS providers", "Proposals"] as const;
 type Tab = (typeof tabs)[number];
 
 export function MailServerView() {
@@ -49,6 +50,7 @@ export function MailServerView() {
         {tab === "Queue" ? <QueuePanel serverId={selected.id} /> : null}
         {tab === "Reports" ? <ReportsPanel serverId={selected.id} /> : null}
         {tab === "Spam" ? <SpamPanel serverId={selected.id} /> : null}
+        {tab === "DNS providers" ? <DnsProvidersPanel /> : null}
         {tab === "Proposals" ? <ProposalsPanel proposals={(proposals.data ?? []).filter(({ serverId }) => serverId === selected.id)} /> : null}
       </> : null}
     </div></div>

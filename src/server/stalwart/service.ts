@@ -29,6 +29,7 @@ import {
   type CreateMailingListInput,
   type DkimKey,
   type DnsChecklist,
+  type DnsRecord,
   type IdentityRegistration,
   type MailDomain,
   type MailReport,
@@ -125,6 +126,7 @@ export class MailServerAdmin {
   readonly #dns: DnsLookup;
   readonly #fetch: JmapFetch;
   readonly #now: () => Date;
+  #dnsApplier: ((serverId: string, domainId: string) => Promise<string>) | null = null;
 
   constructor(options: MailServerAdminOptions) {
     this.#store = options.store;
@@ -221,6 +223,17 @@ export class MailServerAdmin {
     const domain = await client.setCatchAll(domainId, address);
     const identity = address === null ? null : await this.#registerIdentity(address, `*@${domain.name}`, null);
     return { domain, identity };
+  }
+
+  /** The records Stalwart says the domain needs, for DNS provider sync. */
+  async requiredDnsRecords(serverId: string, domainId: string): Promise<{ domain: string; records: DnsRecord[] }> {
+    const { name, zone } = await this.#clientFor(serverId).zoneFile(domainId);
+    return { domain: name, records: parseZoneFile(zone, name) };
+  }
+
+  /** Lets approved proposals publish DNS through the DNS provider service without a module cycle. */
+  setDnsApplier(applier: (serverId: string, domainId: string) => Promise<string>): void {
+    this.#dnsApplier = applier;
   }
 
   async dnsChecklist(serverId: string, domainId: string): Promise<DnsChecklist> {
@@ -494,6 +507,10 @@ export class MailServerAdmin {
       case "cancelQueuedMessage":
         await client.cancelQueuedMessage(operation.id);
         return `Cancelled ${operation.id}`;
+      case "applyDnsChanges": {
+        if (!this.#dnsApplier) throw new MailServerError("No DNS provider is connected to publish records");
+        return this.#dnsApplier(serverId, (await domainByName(operation.domain)).id);
+      }
     }
   }
 

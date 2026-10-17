@@ -95,7 +95,7 @@ export function mailServerTools(admin: MailServerToolServices, agentName = "agen
     },
     {
       name: "propose_mail_server_change", title: "Propose a mail server change",
-      description: "Prepare a list of mail server changes (domains, mailboxes, aliases, catch-all, mailing lists, DKIM keys, quotas, spam settings, queue retries) for the owner to review. Nothing changes until the owner approves it in Postreeve; mailbox passwords are set by the owner at approval.",
+      description: "Prepare a list of mail server changes (domains, mailboxes, aliases, catch-all, mailing lists, DKIM keys, quotas, spam settings, queue retries, publishing a domain's DNS records) for the owner to review. Nothing changes until the owner approves it in Postreeve; mailbox passwords are set by the owner at approval.",
       inputSchema: inputJsonSchema(proposeInputSchema), annotations: mutatingAnnotations,
       execute: async (input) => {
         const { serverId, ...proposal } = proposeInputSchema.parse(input);
