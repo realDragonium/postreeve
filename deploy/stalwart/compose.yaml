@@ -1,0 +1,40 @@
+# Stalwart Mail Server next to Postreeve. Separate from Postreeve's compose.yaml: its own network and volumes.
+# See docs/stalwart.md. Mail ports are public; the web admin and management API listen on loopback only and
+# reach your devices (and Postreeve) through `tailscale serve`.
+#
+#   cd deploy/stalwart && docker compose up -d
+#
+# Do not start this while poste.io still binds 25/465/587/993/4190 on the same host: see the cutover in
+# docs/migrate-poste-io.md.
+name: stalwart
+
+services:
+  stalwart:
+    # Pinned: Postreeve's admin area targets Stalwart's v0.16 JMAP management API.
+    image: stalwartlabs/stalwart:v0.16.26
+    restart: unless-stopped
+    networks: [mail]
+    ports:
+      - "25:25"       # SMTP, inbound mail from other servers
+      - "465:465"     # SMTP submission, implicit TLS (what Postreeve uses)
+      - "587:587"     # SMTP submission, STARTTLS (add the listener, docs/stalwart.md)
+      - "993:993"     # IMAP, implicit TLS
+      - "4190:4190"   # ManageSieve
+      # Web admin, JMAP and management API: loopback only, published to the tailnet by `tailscale serve`.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - stalwart-etc:/etc/stalwart
+      - stalwart-data:/var/lib/stalwart
+      # Certificates issued on the host and copied here by the certbot deploy hook (docs/stalwart.md); read-only.
+      - /srv/stalwart-certs:/certs:ro
+    environment:
+      # Only for the first start: lets you finish setup on 127.0.0.1:8080. Remove it afterwards.
+      STALWART_RECOVERY_ADMIN: ${STALWART_RECOVERY_ADMIN:-}
+    stop_grace_period: 30s
+
+networks:
+  mail: {}
+
+volumes:
+  stalwart-etc:
+  stalwart-data:

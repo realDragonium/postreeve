@@ -117,3 +117,6 @@ test-results/
 
 # TernJS port file
 .tern-port
+
+# Mail migration working files (addresses, passwords)
+migration/

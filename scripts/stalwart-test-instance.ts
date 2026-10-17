@@ -124,7 +124,11 @@ try {
   start(bin, {});
   const adminAuth = `Basic ${Buffer.from(`${admin.username}:${admin.secret}`).toString("base64")}`;
   accountId = await waitForHttp(adminAuth);
-  const [key] = await jmap(adminAuth, [["x:ApiKey/set", { accountId, create: { k: { description: "Postreeve live test" } } }, "0"]]);
+  const [key] = await jmap(adminAuth, [
+    ["x:ApiKey/set", { accountId, create: { k: { description: "Postreeve live test" } } }, "0"],
+    // Pyzor needs public DNS; without it every settings reload fails on an offline machine.
+    ["x:SpamPyzor/set", { accountId, update: { singleton: { enable: false } } }, "1"],
+  ]);
   const apiKey = key!.created.k.secret as string;
   writeFileSync(join(dir, "test.env"), [
     `POSTREEVE_STALWART_TEST_URL=http://127.0.0.1:${ports.http}`,
