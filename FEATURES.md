@@ -51,8 +51,10 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | List message summaries | Complete | Complete | `list_messages` also shows the same mailbox view in the UI. |
 | Read full message bodies | Complete | Complete | `read_messages` |
 | Read the whole conversation, including your own replies in Sent and other folders | Complete | Not covered | No conversation tool exists; `read_messages` reads individual references. The reader collapses read messages and loads each body when expanded. |
-| Group the message list by conversation | Not available | Not available | The list shows individual messages; opening one shows its conversation. |
+| Group the message list by conversation | Complete | Not covered | **Conversations** in the list header shows one row per conversation in the current view with participants, count, latest snippet and unread state; actions on a row apply to each of its messages in the view. WebMCP list and search tools return individual messages, each with its `conversationId`. |
 | Search within a folder | Complete | Complete | `search_messages` writes the query into the UI and shows the matching messages. |
+| Search operators (`from:`, `to:`, `cc:`, `subject:`, `has:attachment`, `is:unread`, `is:flagged`, `before:`, `after:`, `in:`, `account:`, quoted phrases, `-` negation) | Complete | Complete | One shared parser; `search_messages.query` takes the same string as the search box. |
+| Search every folder of every account | Complete | Complete | **Everywhere** in the list header while searching; agents add `in:anywhere` to the `search_messages` query. Index only, without provider fallback. |
 | Filter all, unread, or flagged messages | Complete | Complete | `list_messages.filter` and `search_messages.filter` update the visible UI filter. |
 | Sort by newest, oldest, sender, or subject | Complete | Complete | `list_messages.sort` and `search_messages.sort` update the visible UI sort order. |
 | Show sender, recipients, Cc, subject, date, and preview | Complete | Complete | Returned by message list and read tools. |
@@ -146,7 +148,7 @@ These features are not provider-backed today. Whether and how they should be exp
 | Request human reauthorization instructions | Complete | Complete | `request_reauthorization`; consent and credentials stay in the human authorization flow. |
 | Receive new mail promptly | Complete | Not applicable | IMAP accounts hold one IDLE connection on INBOX and synchronize it as soon as the server reports a change, falling back to the 60-second poll without IDLE. Gmail history is polled every 20 seconds. |
 | Desktop notifications for new mail | Complete | Not applicable | **Settings → Notifications** turns notifications on and mutes accounts. Unread Inbox arrivals notify while the window is in the background; clicking opens the message. Backfill and repair do not notify. Page-local presentation, not an agent workflow. |
-| Bounded preview/body retention | Complete | Complete | Defaults to 30 days since refresh and 100 MiB per account. Retained preview and searchable body text expire together. Headers, locations, canonical identities and workflow history remain retained, so recipient suggestions survive preview expiry and disappear only when the message leaves the index or its account is removed; this is not a total database-size limit. |
+| Bounded preview/body retention | Complete | Complete | Defaults to 365 days since refresh and 64 MiB per account (about 320 MiB of disk per account at the cap). Retained preview and searchable body text expire together. Headers, locations, canonical identities and workflow history remain retained, so recipient suggestions survive preview expiry and disappear only when the message leaves the index or its account is removed; this is not a total database-size limit. |
 
 ## Current WebMCP tool set
 

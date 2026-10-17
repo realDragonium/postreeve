@@ -1,7 +1,6 @@
 import { uniqueCanonicalMessages } from "../../shared/canonical-messages";
 import { defaultSaveSentCopy } from "../../shared/sent-copy";
-import { mailboxQuerySchema, type MailboxQueryInput, type MailboxPage as IndexedMailboxPage } from "../../shared/mailbox-query";
-import { normalizedQuery, readCursor } from "../sync/query";
+import { plainSearchText, type MailboxQueryInput, type MailboxPage as IndexedMailboxPage } from "../../shared/mailbox-query";
 import { accountHealth } from "../sync/health";
 import type { AccountHealth, SynchronizationStatus, Reauthorization } from "../../shared/synchronization";
 import { SynchronizationRunner, type SynchronizationOptions } from "../sync/runner";
@@ -394,15 +393,19 @@ export class PostreeveService {
   }
 
   async queryMessages(rawInput: MailboxQueryInput): Promise<IndexedMailboxPage> {
-    const input = normalizedQuery(mailboxQuerySchema.parse(rawInput));
-    const continuation = readCursor(this.#context.tenantId, input);
-    const fallbackIds = [...(continuation?.fallbackIds ?? [])];
-    const accounts = new Map<string, StoredAccount>();
-    for (const source of input.sources) if (!accounts.has(source.accountId)) accounts.set(source.accountId, await this.#requireAccount(source.accountId));
     const sync = this.#store.synchronization;
+    const plan = sync.plan(this.#context.tenantId, rawInput);
+    const { query: input, parsed } = plan;
+    // The everywhere scope reads the index only: provider fallback across every folder would not stay bounded.
+    const everywhere = input.scope === "everywhere" || parsed.anywhere;
+    const sources = plan.sources ?? sync.allSources(this.#context.tenantId);
+    const text = plainSearchText(parsed);
+    const fallbackIds = [...plan.fallbackIds];
+    const accounts = new Map<string, StoredAccount>();
+    for (const source of sources) if (!accounts.has(source.accountId)) accounts.set(source.accountId, await this.#requireAccount(source.accountId));
     const now = this.synchronization.now();
     for (const accountId of accounts.keys()) sync.enforceRetention(this.#context.tenantId, accountId, now);
-    const coverage = sync.coverage(this.#context.tenantId, input.sources);
+    const coverage = sync.coverage(this.#context.tenantId, sources);
     let fallbackCalls = 0;
     let expired = false;
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -411,26 +414,27 @@ export class PostreeveService {
     });
     try {
       for (const source of coverage.sources) {
-        const needsFallback = !source.synchronized || (input.query !== "" && source.bodiesAvailable < source.indexedMessages);
+        const needsFallback = !source.synchronized || (text !== "" && source.bodiesAvailable < source.indexedMessages);
         if (!needsFallback) { source.fallback = "not-needed"; continue; }
-        if (input.cursor || fallbackIds.length >= 1000 || fallbackCalls >= 10 || expired) continue;
+        if (everywhere || input.cursor || fallbackIds.length >= 1000 || fallbackCalls >= 10 || expired) continue;
         try {
           const account = accounts.get(source.accountId)!;
           const provider = this.#providers.forAccount(source.accountId);
           fallbackCalls++;
-          const pending = input.query
-            ? provider.searchMessages(source.accountId, source.mailbox, input.query, 100)
+          // Providers search the free text only; operators are applied to what they return.
+          const pending = text
+            ? provider.searchMessages(source.accountId, source.mailbox, text, 100)
             : provider.listMessagePage(source.accountId, source.mailbox, 100).then(page => page.messages);
           const messages = await Promise.race([pending, deadline]);
           if (expired) throw new Error("Provider fallback timed out");
           if (messages.some(message => message.ref.mailbox !== source.mailbox || message.ref.accountId !== source.accountId)) throw new Error("Provider result crossed mailbox scope");
           const observed = sync.observe({ tenantId: this.#context.tenantId, accountId: account.id, provider: account.kind }, messages, now);
-          if (input.query) fallbackIds.push(...observed.slice(0, 1000 - fallbackIds.length));
+          if (text) fallbackIds.push(...observed.slice(0, 1000 - fallbackIds.length));
           source.fallback = "limited";
         } catch { source.fallback = "failed"; }
       }
     } finally { clearTimeout(timeout); }
-    const refreshed = sync.coverage(this.#context.tenantId, input.sources);
+    const refreshed = sync.coverage(this.#context.tenantId, sources);
     refreshed.sources.forEach((source, index) => { source.fallback = coverage.sources[index]!.fallback; });
     return { ...sync.query(this.#context.tenantId, input, fallbackIds), coverage: refreshed };
   }

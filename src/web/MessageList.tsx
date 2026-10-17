@@ -1,7 +1,8 @@
 import type { Folder, MessageSummary, TriageAction } from "../shared/contracts";
 import type { MessageFilter, MessageSort } from "./mail-ui-state";
 import { formatListTime } from "./format";
-import { messageIsSelected, messageKey, messageMatchesKey, planFolderAction, senderName, spamToggle, type FolderIntent } from "./mail-view";
+import type { ConversationGroup } from "../shared/mailbox-query";
+import { expandGroups, messageIsSelected, messageKey, messageMatchesKey, participantLine, planFolderAction, senderName, spamToggle, type FolderIntent } from "./mail-view";
 import type { MessageProvenance } from "./provenance";
 import { provenanceKey } from "./provenance";
 import { railFor } from "./theme";
@@ -34,7 +35,14 @@ export interface MessageListProps {
   pageSize?: number;
   coverageText?: string | null;
   busy: boolean;
+  /** Conversation rows by representative message key; present while the list is grouped. */
+  groups?: ReadonlyMap<string, ConversationGroup>;
+  grouped: boolean;
+  /** Whether search reaches every folder of every account instead of the current view. */
+  everywhere: boolean;
   onSort: (sort: MessageSort) => void;
+  onGrouped: (grouped: boolean) => void;
+  onEverywhere: (everywhere: boolean) => void;
   onOpen: (message: MessageSummary) => void;
   onSelect: (message: MessageSummary, modifiers: { toggle: boolean; range: boolean }) => void;
   onBulk: (action: TriageAction) => void;
@@ -54,7 +62,8 @@ export function MessageList(props: MessageListProps) {
 
   const focused = props.messages[props.focus];
   const focusedProposal = focused ? props.provenance.get(provenanceKey(focused.ref)) : undefined;
-  const selection = props.messages.filter((message) => messageIsSelected(message, props.selected));
+  const groups = props.groups ?? new Map<string, ConversationGroup>();
+  const selection = expandGroups(props.messages.filter((message) => messageIsSelected(message, props.selected)), groups);
   const selectionCount = selection.length;
   const archive = planFolderAction(selection, "archive", props.foldersByAccount);
   const destinations = props.folders.filter((folder) => folder.specialUse !== "trash");
@@ -75,6 +84,11 @@ export function MessageList(props: MessageListProps) {
             {sortLabels[sort]}
           </button>
         ))}
+        <button className="opt opt-plain" aria-pressed={props.grouped} title="Show one row per conversation" onClick={() => props.onGrouped(!props.grouped)}>
+          Conversations
+        </button>
+        {props.query ? <button className="opt opt-plain" aria-pressed={props.everywhere} title="Search every folder of every account"
+          onClick={() => props.onEverywhere(!props.everywhere)}>Everywhere</button> : null}
       </span>
       <span className="actions">
         {focusedProposal?.kind === "proposed" && focusedProposal.proposalId ? (
@@ -116,7 +130,9 @@ export function MessageList(props: MessageListProps) {
       {!props.loading && !props.error && props.messages.length === 0 ? (
         <div className="t-dim" style={{ padding: "18px 24px" }}>
           {props.query || props.filter !== "all"
-            ? "Nothing matches. Clear the search or switch the filter back to All."
+            ? props.query && !props.everywhere
+              ? "Nothing matches here. Clear the search, switch the filter back to All, or search Everywhere."
+              : "Nothing matches. Clear the search or switch the filter back to All."
             : "This folder is clear. New messages will appear here."}
         </div>
       ) : null}
@@ -125,10 +141,13 @@ export function MessageList(props: MessageListProps) {
         const key = messageKey(message);
         const entry = props.provenance.get(provenanceKey(message.ref));
         const proposed = entry?.kind === "proposed";
+        const group = groups.get(key);
+        const unread = group ? group.unread > 0 : !message.read;
         return <button
           key={key}
-          className={`row ${message.read ? "" : "unread"} ${messageMatchesKey(message, props.openKey) ? "open" : index === props.focus ? "focus" : messageIsSelected(message, props.selected) ? "cosel" : ""}`}
+          className={`row ${unread ? "unread" : ""} ${messageMatchesKey(message, props.openKey) ? "open" : index === props.focus ? "focus" : messageIsSelected(message, props.selected) ? "cosel" : ""}`}
           aria-current={messageMatchesKey(message, props.openKey) ? "true" : undefined}
+          aria-label={group && group.count > 1 ? `Conversation of ${group.count} messages, ${group.unread} unread` : undefined}
           onClick={(event) => {
             if (event.metaKey || event.ctrlKey) props.onSelect(message, { toggle: true, range: false });
             else if (event.shiftKey) props.onSelect(message, { toggle: false, range: true });
@@ -136,15 +155,18 @@ export function MessageList(props: MessageListProps) {
           }}
         >
           <span className="row-rail" style={{ background: railFor(message.ref.accountId) }} />
-          <span className={`row-dot ${message.read ? "" : "unread"}`} />
-          <span className="row-sender truncate">{senderName(message)}</span>
+          <span className={`row-dot ${unread ? "unread" : ""}`} />
+          <span className="row-sender truncate">
+            {group ? participantLine(group) : senderName(message)}
+            {group && group.count > 1 ? <span className="t-dim t-num"> {group.count}</span> : null}
+          </span>
           <span className="row-subject truncate">{message.subject || "(No subject)"}</span>
           <span className="row-mark" style={{ fontSize: proposed ? 10 : 11, lineHeight: 1, color: proposed ? "var(--ink)" : "var(--dim)" }}>{entry?.mark ?? (message.flagged ? <span aria-label="Flagged">⚑</span> : "")}</span>
           <span className="row-lead-wrap">
             {entry ? <span className={`row-lead ${proposed ? "propose" : ""}`}>{entry.lead}{proposed ? "" : " · "}</span> : null}
-            {proposed ? null : <span className="row-snippet truncate">{message.preview}</span>}
+            {proposed ? null : <span className="row-snippet truncate">{group ? group.latest.preview : message.preview}</span>}
           </span>
-          <span className="row-time t-num">{formatListTime(message.receivedAt)}</span>
+          <span className="row-time t-num">{formatListTime(group ? group.latest.receivedAt : message.receivedAt)}</span>
         </button>;
       })}
 

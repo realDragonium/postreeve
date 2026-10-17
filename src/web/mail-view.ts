@@ -1,4 +1,5 @@
 import type { Folder, MessageSummary, TriageAction } from "../shared/contracts";
+import type { ConversationGroup } from "../shared/mailbox-query";
 import type { MessageFilter, MessageSort } from "./mail-ui-state";
 
 export type SpecialUse = NonNullable<Folder["specialUse"]>;
@@ -260,4 +261,43 @@ export function countLine(
   if (options.query) parts.push(`matching “${options.query}”`);
   if (options.filter !== "all") parts.push(`${options.filter} only`);
   return parts.join(" · ");
+}
+
+/** Conversation groups of a grouped list, keyed by their representative message's key. */
+export function conversationGroups(
+  pages: readonly { readonly messages: readonly MessageSummary[]; readonly groups?: readonly ConversationGroup[] | undefined }[],
+): ReadonlyMap<string, ConversationGroup> {
+  const groups = new Map<string, ConversationGroup>();
+  for (const page of pages) {
+    page.messages.forEach((message, index) => {
+      const group = page.groups?.[index];
+      if (group) groups.set(messageKey(message), group);
+    });
+  }
+  return groups;
+}
+
+/** Replaces each group representative with the group's members, so an action on a group reaches every message of it in view. */
+export function expandGroups(
+  targets: readonly MessageSummary[],
+  groups: ReadonlyMap<string, ConversationGroup>,
+): MessageSummary[] {
+  const seen = new Set<string>();
+  const expanded: MessageSummary[] = [];
+  for (const target of targets) {
+    for (const message of groups.get(messageKey(target))?.members ?? [target]) {
+      const key = messageKey(message);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      expanded.push(message);
+    }
+  }
+  return expanded;
+}
+
+/** "Alex, Sam, Kim +2" from a group's participants, first sender first. */
+export function participantLine(group: ConversationGroup, limit = 3): string {
+  const names = group.participants.map((participant) => participant.name.split(/\s+/)[0] || participant.address);
+  const shown = names.slice(0, limit).join(", ");
+  return names.length > limit ? `${shown} +${names.length - limit}` : shown || "Unknown sender";
 }

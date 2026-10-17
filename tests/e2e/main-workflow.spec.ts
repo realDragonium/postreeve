@@ -1590,3 +1590,51 @@ test("uploads binary files, retries failures, and reopens them in another client
     await expect(second.getByRole("heading", { name: "Message sent" })).toBeVisible();
   } finally { await second.close(); }
 });
+
+test("groups the list by conversation and archives every message of a group", async ({ page }) => {
+  const member = (uid: number, name: string, read: boolean) => canonicalMessageSummarySchema.parse({
+    ...message, canonicalId: `thread-${uid}`, conversationId: "thread", ref: { ...messageRef, uid },
+    messageId: `thread-${uid}@example.com`, subject: "Re: Offsite", from: [{ name, address: `${name.toLowerCase()}@example.com` }],
+    receivedAt: `2026-09-0${uid}T09:00:00.000Z`, preview: `${name} preview`, read,
+  });
+  const members = [member(3, "Robin", true), member(2, "Jo", false), member(1, "Robin", true)];
+  const queries: unknown[] = [];
+  const archived: number[] = [];
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.method() === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
+    if (request.method() === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
+    if (request.method() === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
+    if (request.method() === "POST" && url.pathname === "/api/messages/query") {
+      const input = mailboxQuerySchema.parse(request.postDataJSON());
+      queries.push(input.group);
+      if (input.group !== "conversation") return json(route, mailboxResult([message]));
+      return json(route, { ...mailboxResult([]), messages: [members[0]], groups: [{ conversationId: "thread", count: 3, unread: 1,
+        participants: [members[0]!.from[0], members[1]!.from[0]], latest: { receivedAt: members[0]!.receivedAt, preview: "Robin preview" }, members }] });
+    }
+    if (request.method() === "POST" && url.pathname === "/api/messages/actions") {
+      const input = directActionInputSchema.parse(request.postDataJSON());
+      archived.push(...input.items.map((item) => item.message.uid));
+      return json(route, {
+        id: "batch-group", proposalId: "direct", accountId: input.accountId, status: "applied",
+        operations: input.items.map((entry, index) => ({ itemId: `item-${index}`, message: entry.message, action: entry.action, status: "applied", error: null })),
+        createdAt: "2026-09-05T10:00:00.000Z", updatedAt: "2026-09-05T10:00:00.000Z",
+      });
+    }
+    if (request.method() === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (request.method() === "GET" && url.pathname === "/api/batches") return json(route, []);
+    return json(route, { error: `Unhandled test route: ${request.method()} ${url.pathname}` }, 404);
+  });
+
+  await page.goto("/");
+  await expect(page.getByText(message.subject, { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Conversations" }).click();
+  const row = page.getByRole("button", { name: "Conversation of 3 messages, 1 unread" });
+  await expect(row).toContainText("Robin, Jo");
+  await expect(row).toContainText("3");
+  expect(queries).toContain("conversation");
+  await row.click({ modifiers: ["ControlOrMeta"] });
+  await page.getByRole("button", { name: "Archive", exact: true }).click();
+  await expect.poll(() => archived.sort()).toEqual([1, 2, 3]);
+});

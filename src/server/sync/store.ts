@@ -1,5 +1,7 @@
-import { migrateSearchIndex, queryIndex, normalizedQuery, searchFields, type IndexedRow } from "./query";
-import { SEARCH_BODY_LIMIT, SEARCH_HEADERS_LIMIT, type MailboxQueryInput, type MailboxCoverage } from "../../shared/mailbox-query";
+import { conversationMembers, indexedSources, migrateSearchIndex, migrateSortKeys, queryIndex, normalizedQuery, readCursor, representatives, resolveSources,
+  searchFields, type IndexedRow, type QueryPlan } from "./query";
+import { CONVERSATION_GROUP_MEMBER_LIMIT, SEARCH_BODY_LIMIT, SEARCH_HEADERS_LIMIT, parseMailboxQuery, type ConversationGroup, type MailboxQueryInput,
+  type MailboxCoverage, type MailboxSource } from "../../shared/mailbox-query";
 import { defaultRetentionPolicy, retentionPolicySchema, type RetentionPolicy } from "../../shared/synchronization";
 import type { Database } from "bun:sqlite";
 import { z } from "zod";
@@ -35,7 +37,7 @@ export class SynchronizationStore {
     readonly reconcile: (snapshot: MailboxSnapshot) => CanonicalMessage[],
     readonly move: (tenantId: string, provider: MailProviderKind, previous: MessageRef, current: MessageRef) => boolean,
     readonly canonical: (tenantId: string, id: string) => CanonicalMessage | null,
-  ) { this.#migrate(); migrateSearchIndex(this.sqlite); }
+  ) { this.#migrate(); migrateSearchIndex(this.sqlite); migrateSortKeys(this.sqlite); }
 
   schedule(tenantId: string, accountId: string, now: number, replace = false): void {
     this.sqlite.transaction(() => {
@@ -268,21 +270,55 @@ export class SynchronizationStore {
     }).immediate();
   }
 
-  query(tenantId: string, input: MailboxQueryInput, fallbackIds: readonly string[] = []): { messages: CanonicalMessageSummary[]; nextCursor: string | null } {
-    const result = queryIndex(this.sqlite, tenantId, normalizedQuery(input), fallbackIds);
-    return { messages: result.rows.map(row => this.#summary(tenantId, row)), nextCursor: result.nextCursor };
+  /** Parses operators, resolves sources and carries provider fallback matches (from the cursor once paging). */
+  plan(tenantId: string, input: MailboxQueryInput, fallbackIds: readonly string[] = []): QueryPlan {
+    const query = normalizedQuery(input);
+    const parsed = parseMailboxQuery(query.query);
+    return { tenant: tenantId, query, parsed, sources: resolveSources(this.sqlite, tenantId, query, parsed),
+      fallbackIds: readCursor(tenantId, query)?.fallbackIds ?? [...new Set(fallbackIds)] };
   }
 
-  coverage(tenantId: string, sources: MailboxQueryInput["sources"]): MailboxCoverage {
+  /** Every account/mailbox pair with an indexed location, for the everywhere scope. */
+  allSources(tenantId: string): MailboxSource[] { return indexedSources(this.sqlite, tenantId); }
+
+  /** `candidateLimit` overrides when a page sorts its candidates instead of walking the sort index (tests use it to force a plan). */
+  query(tenantId: string, input: MailboxQueryInput, fallbackIds: readonly string[] = [], candidateLimit?: number): { messages: CanonicalMessageSummary[]; groups?: ConversationGroup[]; nextCursor: string | null } {
+    const plan = this.plan(tenantId, input, fallbackIds);
+    const result = queryIndex(this.sqlite, plan, candidateLimit);
+    const messages = result.rows.map(row => this.#summary(tenantId, row));
+    if (plan.query.group !== "conversation") return { messages, nextCursor: result.nextCursor };
+    return { messages, groups: messages.map(message => this.#group(plan, message)), nextCursor: result.nextCursor };
+  }
+
+  #group(plan: QueryPlan, representative: CanonicalMessageSummary): ConversationGroup {
+    const ids = conversationMembers(this.sqlite, plan, representative.canonicalId);
+    const rows = representatives(this.sqlite, plan, ids);
+    const ordered = ids.flatMap(id => { const row = rows.get(id); return row ? [row] : []; });
+    const members = ordered.slice(0, CONVERSATION_GROUP_MEMBER_LIMIT).map(row => this.#summary(plan.tenant, row));
+    const participants = new Map<string, { name: string; address: string }>();
+    for (const member of members) for (const sender of member.from.slice(0, 1)) {
+      const key = sender.address.toLowerCase() || sender.name;
+      if (!participants.has(key) && participants.size < 10) participants.set(key, sender);
+    }
+    const latest = members[0] ?? representative;
+    return { conversationId: representative.conversationId, count: Math.max(ordered.length, 1),
+      unread: ordered.filter(row => row.read === 0).length, participants: [...participants.values()],
+      latest: { receivedAt: latest.receivedAt, preview: latest.preview }, members: members.length ? members : [representative] };
+  }
+
+  coverage(tenantId: string, sources: readonly MailboxSource[]): MailboxCoverage {
+    const counts = new Map((this.sqlite.query(`SELECT c.account_id,c.mailbox,c.total,c.bodies FROM json_each(?) s
+      CROSS JOIN indexed_source_counts c ON c.tenant_id=? AND c.account_id=json_extract(s.value,'$.accountId') AND c.mailbox=json_extract(s.value,'$.mailbox')`)
+      .all(JSON.stringify(sources), tenantId) as Array<{ account_id: string; mailbox: string; total: number; bodies: number }>)
+      .map(row => [`${row.account_id}\u001f${row.mailbox}`, row]));
+    const scopes = new Map<string, ScopeRow[]>();
     const coverage = sources.map(source => {
-      const scopes = this.scopes({ tenantId, accountId: source.accountId });
-      const synchronized = scopes.some(scope => scope.coverage === "complete"
+      if (!scopes.has(source.accountId)) scopes.set(source.accountId, this.scopes({ tenantId, accountId: source.accountId }));
+      const synchronized = scopes.get(source.accountId)!.some(scope => scope.coverage === "complete"
         && (scope.scope === syncScopeKey({ kind: "account" }) || scope.scope === syncScopeKey({ kind: "mailbox", mailbox: source.mailbox })));
-      const row = this.sqlite.query(`SELECT COUNT(DISTINCT i.message_id) total,
-        COUNT(DISTINCT CASE WHEN json_type(i.content,'$.searchBody')='text' THEN i.message_id END) bodies
-        FROM indexed_messages i JOIN message_locations l ON l.tenant_id=i.tenant_id AND l.account_id=i.account_id AND l.message_id=i.message_id
-        WHERE i.tenant_id=? AND l.account_id=? AND l.mailbox=?`).get(tenantId,source.accountId,source.mailbox) as { total: number; bodies: number };
-      return { ...source, synchronized, indexedMessages: row.total, bodiesAvailable: row.bodies, fallback: "not-requested" as const };
+      const row = counts.get(`${source.accountId}\u001f${source.mailbox}`);
+      return { accountId: source.accountId, mailbox: source.mailbox, synchronized, indexedMessages: row?.total ?? 0, bodiesAvailable: row?.bodies ?? 0,
+        fallback: "not-requested" as const };
     });
     return { sources: coverage, complete: coverage.every(source => source.synchronized && source.bodiesAvailable === source.indexedMessages), bodyTextLimit: SEARCH_BODY_LIMIT };
   }
