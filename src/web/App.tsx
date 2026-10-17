@@ -1,10 +1,10 @@
 import type { MailboxPage, MailboxSource } from "../shared/mailbox-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { Account, Draft, Folder, Identity, MessageSummary, ReceivedAttachment, TriageAction } from "../shared/contracts";
+import type { Account, CanonicalMessageDetail, Draft, Folder, Identity, MessageSummary, ReceivedAttachment, TriageAction } from "../shared/contracts";
 import { api } from "./api";
 import { registerPostreeveWebMcp } from "../server/webmcp/register";
-import { subscribeToWebMcpFolderLists, subscribeToWebMcpMailboxViews, webMcpServices } from "./webmcp";
+import { subscribeToWebMcpFolderLists, subscribeToWebMcpMailboxViews, subscribeToWebMcpProposalChanges, webMcpServices } from "./webmcp";
 import { exposedToolNames, loadHiddenTools, storeHiddenTools } from "./assistant-tools";
 import { ActivityView } from "./ActivityView";
 import { MessageList } from "./MessageList";
@@ -12,7 +12,13 @@ import { Reader } from "./Reader";
 import { conversationThread } from "./conversation-view";
 import { Sidebar } from "./Sidebar";
 import { SettingsView, settingsSections, type SettingsSection } from "./SettingsView";
+import { useOwner } from "./AuthGate";
 import { AccountSetup, ComposeModal, DraftsSheet, FolderSheet, IdentitySheet, type ComposeIntent } from "./panels";
+import { ErrorBoundary } from "./ErrorBoundary";
+import { ShortcutHelp } from "./ShortcutHelp";
+import { goChordMs, isTypingTarget, shortcutCommand } from "./keyboard";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { canDeletePermanently, emptyLabel, messageCount, purgeableFolder, type PurgeableUse } from "./permanent-delete";
 import {
   countLine,
   messageIdentityKeys,
@@ -20,6 +26,8 @@ import {
   messageKey,
   messageMatchesKey,
   mergeMessages,
+  conversationGroups,
+  expandGroups,
   scopeSources,
   applyPerAccount,
   folderIntentLabel,
@@ -27,10 +35,12 @@ import {
   spamToggle,
   specialUseName,
   type FolderIntent,
+  type SpecialUse,
   type PlannedAction,
   type Scope,
 } from "./mail-view";
 import {
+  agentBatchNames,
   buildProvenance,
   provenanceKey,
   recordUserBatch,
@@ -57,6 +67,7 @@ import {
 const folderPollIntervalMs = 15_000;
 /** Synchronization can commit several pages in a burst; refetch once per burst. */
 const mailboxEventCoalesceMs = 1_000;
+const groupedKey = "postreeve.message-list-grouped.v1";
 
 function notificationAccess(): NotificationAccess {
   return typeof Notification === "undefined" ? "unsupported" : Notification.permission;
@@ -72,6 +83,12 @@ type Overlay =
   | { kind: "folders"; accountId: string }
   | { kind: "identities"; accountId: string }
   | { kind: "drafts" }
+  | null;
+
+/** A permanent delete waiting for the person's confirmation. */
+type PendingPurge =
+  | { readonly kind: "messages"; readonly accountId: string; readonly messages: readonly MessageSummary[]; readonly folderName: string }
+  | { readonly kind: "folder"; readonly accountId: string; readonly path: string; readonly use: PurgeableUse; readonly total: number }
   | null;
 
 interface UndoEntry {
@@ -92,6 +109,9 @@ function App() {
   const queryClient = useQueryClient();
   const theme = useTheme();
   const searchRef = useRef<HTMLInputElement>(null);
+  const owner = useOwner();
+  // The desktop app is authenticated by its launch token and has no owner sign-in to manage.
+  const sections = owner.desktop ? settingsSections.filter((value) => value !== "Security") : settingsSections;
 
   const [view, setView] = useState<View>("mail");
   const [section, setSection] = useState<SettingsSection>("Accounts");
@@ -103,6 +123,11 @@ function App() {
   const [sort, setSort] = useState<MessageSort>("newest");
   const [agentSources, setAgentSources] = useState<MailboxSource[] | null>(null);
   const [limit, setLimit] = useState(50);
+  const [grouped, setGrouped] = useState(() => { try { return localStorage.getItem(groupedKey) === "1"; } catch { return false; } });
+  useEffect(() => { try { localStorage.setItem(groupedKey, grouped ? "1" : "0"); } catch { /* storage unavailable */ } }, [grouped]);
+  const [everywhere, setEverywhere] = useState(false);
+  // Everywhere widens one search; a new view or a cleared search starts from the current folder again.
+  useEffect(() => { if (!query) setEverywhere(false); }, [query]);
   const [focus, setFocus] = useState(0);
   const [selected, setSelected] = useState<ReadonlySet<string>>(() => new Set());
   const [openKey, setOpenKey] = useState<string | null>(null);
@@ -111,6 +136,8 @@ function App() {
   const [actorFilter, setActorFilter] = useState<Actor | "all">("all");
   const [hiddenTools, setHiddenTools] = useState<ReadonlySet<string>>(loadHiddenTools);
   const [overlay, setOverlay] = useState<Overlay>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [purge, setPurge] = useState<PendingPurge>(null);
   useEffect(() => storeHiddenTools(hiddenTools), [hiddenTools]);
   const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>(() => loadNotificationPreferences(localStorage));
   const [notificationPermission, setNotificationPermission] = useState<NotificationAccess>(notificationAccess);
@@ -155,19 +182,27 @@ function App() {
     queries: accounts.map((account) => ({ queryKey: ["identities", account.id], queryFn: () => api.identities(account.id) })),
   });
   const identities: readonly Identity[] = identityResults.flatMap((result) => result.data ?? []);
+  /**
+   * Migrations run while the first list fetch may still be in flight. Invalidating a query that has no data yet joins
+   * that fetch instead of restarting it, so the pre-migration result would stick; cancel it first.
+   */
+  async function refetchAfterMigration(queryKey: readonly string[]): Promise<void> {
+    await queryClient.cancelQueries({ queryKey });
+    await queryClient.invalidateQueries({ queryKey });
+  }
   const migrationAccountSnapshot = accounts.map(({ id }) => id).sort().join("\0");
   const migratedAccountSnapshot = useRef<string | null>(null);
   useEffect(() => {
     if (!accountsQuery.isSuccess || migratedAccountSnapshot.current === migrationAccountSnapshot) return;
     migratedAccountSnapshot.current = migrationAccountSnapshot;
     void migrateLocalDraftsOnce(localStorage, accounts, api.createDraft).then(async ({ migrated }) => {
-      if (migrated > 0) await queryClient.invalidateQueries({ queryKey: ["drafts"] });
+      if (migrated > 0) await refetchAfterMigration(["drafts"]);
     }).catch((error: unknown) => {
       migratedAccountSnapshot.current = null;
       flash(error instanceof Error ? error.message : "Local draft migration failed");
     });
     void migrateLocalIdentitiesOnce(localStorage, accounts, api.addIdentity).then(async ({ migrated }) => {
-      if (migrated > 0) await queryClient.invalidateQueries({ queryKey: ["identities"] });
+      if (migrated > 0) await refetchAfterMigration(["identities"]);
     }).catch((error: unknown) => {
       flash(error instanceof Error ? error.message : "Local identity migration failed");
     });
@@ -181,7 +216,10 @@ function App() {
     queries: accounts.map((account) => ({ queryKey: ["proposals", account.id], queryFn: () => api.proposals(account.id) })),
   });
   const proposals = proposalResults.flatMap((result) => result.data ?? []);
-  const provenance = useMemo(() => buildProvenance(batches, proposals), [batches, proposals]);
+  // Remote agents act without this page, so their calls come from the server's audit; a failure leaves attribution browser-local.
+  const agentEventsQuery = useQuery({ queryKey: ["agent-events"], queryFn: ({ signal }) => api.agentEvents(signal), refetchInterval: 15_000 });
+  const agentEvents = useMemo(() => agentEventsQuery.data ?? [], [agentEventsQuery.data]);
+  const provenance = useMemo(() => buildProvenance(batches, proposals, agentBatchNames(agentEvents)), [batches, proposals, agentEvents]);
   const awaitingByAccount = new Map<string, number>(accounts.map((account, index) => [
     account.id,
     (proposalResults[index]?.data ?? [])
@@ -204,17 +242,21 @@ function App() {
   }, [accounts, folderResults.map((result) => result.data?.length).join()]);
 
   const sources = agentSources ?? (scope ? scopeSources(scope, foldersByAccount) : []);
-  const messageQueryKey = ["messages", sources, query, filter, sort, limit];
+  const searchScope = everywhere && query ? "everywhere" : "sources";
+  const group = grouped ? "conversation" : "none";
+  // Extra key parts only when set, so agent-driven views keep the key WebMCP writes into the cache.
+  const messageQueryKey = ["messages", sources, query, filter, sort, limit, ...(searchScope === "everywhere" || grouped ? [searchScope, group] : [])];
   const messageResults = useInfiniteQuery({
     queryKey: messageQueryKey,
     gcTime: 0,
     initialPageParam: null as string | null,
-    queryFn: ({ pageParam, signal }) => api.queryMessages({ sources: [...sources], query, filter, sort, limit,
-      ...(pageParam ? { cursor: pageParam } : {}) }, signal),
+    queryFn: ({ pageParam, signal }) => api.queryMessages({ sources: searchScope === "everywhere" ? [] : [...sources], scope: searchScope,
+      query, filter, sort, limit, group, ...(pageParam ? { cursor: pageParam } : {}) }, signal),
     getNextPageParam: page => page.nextCursor,
-    enabled: sources.length > 0,
+    enabled: sources.length > 0 || searchScope === "everywhere",
   });
   const messages = mergeMessages((messageResults.data?.pages ?? []).map(page => page.messages));
+  const groups = conversationGroups(messageResults.data?.pages ?? []);
   const messagesLoading = messageResults.isLoading;
   const messagesError = messageResults.error?.message ?? null;
   const busy = messageResults.isFetching;
@@ -308,6 +350,15 @@ function App() {
     onError: (error) => flash(error.message),
   });
 
+  const declineMutation = useMutation({
+    mutationFn: (proposalId: string) => api.declineProposal(proposalId),
+    onSuccess: async () => {
+      flash("Declined proposal");
+      await refresh();
+    },
+    onError: (error) => flash(error.message),
+  });
+
   const undoMutation = useMutation({
     mutationFn: (batchIds: readonly string[]) => Promise.all(batchIds.map((id) => api.undoBatch(id))),
     onSuccess: async (_batches, batchIds) => {
@@ -318,6 +369,27 @@ function App() {
     onError: (error) => flash(error.message),
   });
 
+  const purgeMutation = useMutation({
+    mutationFn: (pending: NonNullable<PendingPurge>) => pending.kind === "folder"
+      ? api.emptyFolder(pending.accountId, pending.path)
+      : api.deletePermanently(pending.accountId, pending.messages.map(({ ref }) => ref)),
+    onSuccess: async ({ deleted }, pending) => {
+      setPurge(null);
+      setSelected(new Set());
+      if (pending.kind === "folder" || pending.messages.some((message) => messageMatchesKey(message, openKey))) setOpenKey(null);
+      flash(`Deleted ${messageCount(deleted)} permanently`);
+      await refresh();
+    },
+  });
+
+  function confirmDeleteForever(messagesToDelete: readonly MessageSummary[]): void {
+    const [firstMessage] = messagesToDelete;
+    if (!firstMessage) return;
+    const folder = purgeableFolder(foldersByAccount.get(firstMessage.ref.accountId) ?? [], firstMessage.ref.mailbox);
+    purgeMutation.reset();
+    setPurge({ kind: "messages", accountId: firstMessage.ref.accountId, messages: messagesToDelete, folderName: folder?.name ?? firstMessage.ref.mailbox });
+  }
+
   function undoLast(): void {
     const entry = undoStack[0];
     if (!entry || undoMutation.isPending) return;
@@ -326,7 +398,7 @@ function App() {
 
   function targetsFor(fallback: MessageSummary | undefined): MessageSummary[] {
     const chosen = messages.filter((message) => messageIsSelected(message, selected));
-    return chosen.length ? chosen : fallback ? [fallback] : [];
+    return expandGroups(chosen.length ? chosen : fallback ? [fallback] : [], groups);
   }
 
   function applyTo(targets: readonly MessageSummary[], action: TriageAction): void {
@@ -447,6 +519,7 @@ function App() {
         incoming.cursor && current ? { pages: [...current.pages, page], pageParams: [...current.pageParams, incoming.cursor] }
           : { pages: [page], pageParams: [incoming.cursor ?? null] });
       setAgentSources(incomingSources);
+      setEverywhere(false);
       setScope(incomingSources.length > 1 ? null : { kind: "account", accountId: incoming.accountId, path: incoming.mailbox });
       setView("mail");
       setQueryDraft(incoming.query);
@@ -470,9 +543,13 @@ function App() {
       setSelected(new Set());
       flash("WebMCP updated the folder list.");
     });
+    const unsubscribeProposals = subscribeToWebMcpProposalChanges((accountId, kind) => {
+      void queryClient.invalidateQueries({ queryKey: [kind, accountId] });
+    });
     return () => {
       unsubscribeViews();
       unsubscribeFolders();
+      unsubscribeProposals();
     };
   }, [queryClient]);
 
@@ -503,76 +580,143 @@ function App() {
   }, []);
 
   // ── Keyboard ────────────────────────────────────────────────────────
+  function composeFrom(mode: "reply" | "reply_all" | "forward", message: MessageSummary): void {
+    // The reader caches each expanded message's detail under this key; a list-only shortcut fetches it.
+    void queryClient.fetchQuery({
+      queryKey: ["message", messageKey(message), message.ref],
+      queryFn: async () => (await api.readMessages([message.ref]))[0] ?? null,
+    }).then((detail: CanonicalMessageDetail | null) => {
+      if (!detail) throw new Error("This message is no longer available");
+      setOverlay({ kind: "compose", accountId: detail.ref.accountId, intent: { mode, message: detail } });
+    }).catch((error: unknown) => flash(error instanceof Error ? error.message : "The message could not be loaded"));
+  }
+
+  function goTo(specialUse: SpecialUse): void {
+    if (scope?.kind !== "account") {
+      changeScope({ kind: "unified", specialUse });
+      return;
+    }
+    const folder = (foldersByAccount.get(scope.accountId) ?? []).find((candidate) => candidate.specialUse === specialUse);
+    if (folder) changeScope({ kind: "account", accountId: scope.accountId, path: folder.path });
+    else flash(`This account has no ${specialUseName(specialUse)} folder.`);
+  }
+
+  function trashable(message: MessageSummary): boolean {
+    const folders = foldersByAccount.get(message.ref.accountId) ?? [];
+    return folders.some((folder) => folder.specialUse === "trash" && folder.path !== message.ref.mailbox);
+  }
+
+  const goChord = useRef(0);
   useEffect(() => {
     function onKey(event: KeyboardEvent): void {
-      const target = event.target as HTMLElement | null;
-      const typing = target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.tagName === "SELECT";
-      if (typing) {
-        if (event.key === "Escape") target?.blur();
+      if (isTypingTarget(event.target)) {
+        if (event.key === "Escape") (event.target as HTMLElement).blur();
         return;
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "z") {
-        event.preventDefault();
-        undoLast();
+      if (helpOpen) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          setHelpOpen(false);
+        }
         return;
       }
-      if (event.metaKey || event.ctrlKey || event.altKey) return;
-      if (event.key === "[") {
-        event.preventDefault();
-        setSideOpen((current) => !current);
-        return;
+      if (overlay !== null || purge !== null) return;
+      const chord = goChord.current > Date.now();
+      goChord.current = 0;
+      const command = shortcutCommand(event, chord);
+      if (command === null) return;
+
+      switch (command) {
+        case "undo": event.preventDefault(); undoLast(); return;
+        case "toggle_sidebar": event.preventDefault(); setSideOpen((current) => !current); return;
+        case "help": event.preventDefault(); setHelpOpen(true); return;
+        case "go": event.preventDefault(); goChord.current = Date.now() + goChordMs; return;
+        case "go_inbox": event.preventDefault(); goTo("inbox"); return;
+        case "go_sent": event.preventDefault(); goTo("sent"); return;
+        case "go_drafts": event.preventDefault(); goTo("drafts"); return;
+        case "go_trash": event.preventDefault(); goTo("trash"); return;
+        case "compose":
+          event.preventDefault();
+          if (composeAccountId) setOverlay({ kind: "compose", accountId: composeAccountId, intent: { mode: "new" } });
+          return;
+        default: break;
       }
-      if (overlay !== null || view !== "mail") return;
-      if (event.key === "/") {
+
+      if (view !== "mail") return;
+      if (command === "search") {
         event.preventDefault();
         searchRef.current?.focus();
         return;
       }
-      if (event.key === "Escape" && openKey) {
+      if (command === "close") {
+        if (!openKey) return;
         event.preventDefault();
         setOpenKey(null);
         return;
       }
       const current = openMessage ?? messages[focus];
-      if (event.key === "Enter" && !openKey && current) {
+      if (command === "open") {
+        if (openKey || !current) return;
         event.preventDefault();
         openRow(current);
         return;
       }
-      if (event.key === "j" || event.key === "ArrowDown") { event.preventDefault(); step(1); return; }
-      if (event.key === "k" || event.key === "ArrowUp") { event.preventDefault(); step(-1); return; }
+      if (command === "next") { event.preventDefault(); step(1); return; }
+      if (command === "previous") { event.preventDefault(); step(-1); return; }
       if (!current) return;
-      if (event.key === "x") {
-        event.preventDefault();
-        const key = messageKey(current);
-        setSelected((currentSelection) => {
-          const next = new Set(currentSelection);
-          if (messageIsSelected(current, next)) {
-            for (const identity of messageIdentityKeys(current)) next.delete(identity);
-          } else next.add(key);
-          return next;
-        });
-      }
-      if (event.key === "e") {
-        event.preventDefault();
-        applyFolderAction(targetsFor(current), "archive");
-      }
-      if (event.key === "!") {
-        event.preventDefault();
-        applyFolderAction(targetsFor(current), spamIntent(current));
-      }
-      if (event.key === "u") {
-        event.preventDefault();
-        applyTo(targetsFor(current), { type: current.read ? "mark_unread" : "mark_read" });
-      }
-      if (event.key === "s") {
-        event.preventDefault();
-        applyTo(targetsFor(current), { type: current.flagged ? "unflag" : "flag" });
+      event.preventDefault();
+      switch (command) {
+        case "select": {
+          const key = messageKey(current);
+          setSelected((currentSelection) => {
+            const next = new Set(currentSelection);
+            if (messageIsSelected(current, next)) {
+              for (const identity of messageIdentityKeys(current)) next.delete(identity);
+            } else next.add(key);
+            return next;
+          });
+          return;
+        }
+        case "archive": applyFolderAction(targetsFor(current), "archive"); return;
+        case "spam": applyFolderAction(targetsFor(current), spamIntent(current)); return;
+        case "toggle_read": applyTo(targetsFor(current), { type: current.read ? "mark_unread" : "mark_read" }); return;
+        case "mark_unread": applyTo(targetsFor(current), { type: "mark_unread" }); return;
+        case "toggle_flag": applyTo(targetsFor(current), { type: current.flagged ? "unflag" : "flag" }); return;
+        case "trash": {
+          const targets = targetsFor(current).filter(trashable);
+          if (targets.length > 0) applyTo(targets, { type: "trash" });
+          return;
+        }
+        case "reply": composeFrom("reply", current); return;
+        case "reply_all": composeFrom("reply_all", current); return;
+        case "forward": composeFrom("forward", current); return;
+        default: return;
       }
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   });
+
+  // The phone back gesture should close the reader, not leave the app.
+  const readerHistoryEntry = useRef(false);
+  useEffect(() => {
+    if (openKey && !readerHistoryEntry.current) {
+      window.history.pushState({ ...(window.history.state as object | null), postreeveReader: true }, "");
+      readerHistoryEntry.current = true;
+    } else if (!openKey && readerHistoryEntry.current) {
+      readerHistoryEntry.current = false;
+      if ((window.history.state as { postreeveReader?: boolean } | null)?.postreeveReader) window.history.back();
+    }
+  }, [openKey]);
+  useEffect(() => {
+    function onPop(): void {
+      if (!readerHistoryEntry.current) return;
+      readerHistoryEntry.current = false;
+      setOpenKey(null);
+    }
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   // ── Render ──────────────────────────────────────────────────────────
   const accountDrafts = drafts.filter((draft) => draft.accountId === composeAccountId);
@@ -580,6 +724,26 @@ function App() {
     ? accounts.find(({ id }) => id === overlay.accountId) ?? null
     : null;
   const hasAccounts = accounts.length > 0;
+  const showSecurity = view === "settings" && section === "Security" && !owner.desktop;
+  const scopeAccount = scopeAccountId ? accounts.find(({ id }) => id === scopeAccountId) : undefined;
+  const scopePurgeable = scope?.kind === "account" ? purgeableFolder(scopeFolders, scope.path) : null;
+  const purgeSelection = scopePurgeable ? messages.filter((message) => messageIsSelected(message, selected)) : [];
+  const purgeStrip = scopeAccount && scopePurgeable ? <div className="purge-strip" role="region" aria-label="Permanent delete">
+    {canDeletePermanently(scopeAccount) ? <>
+      <span className="t-dim">Messages deleted here are gone for good.</span>
+      {purgeSelection.length > 0 ? <button className="chip btn-danger" onClick={() => confirmDeleteForever(purgeSelection)}>
+        Delete {messageCount(purgeSelection.length)} forever
+      </button> : null}
+      <button
+        className="chip btn-danger"
+        disabled={scopePurgeable.total === 0 && messages.length === 0}
+        onClick={() => {
+          purgeMutation.reset();
+          setPurge({ kind: "folder", accountId: scopeAccount.id, path: scopePurgeable.path, use: scopePurgeable.specialUse, total: scopePurgeable.total });
+        }}
+      >{emptyLabel(scopePurgeable.specialUse)}</button>
+    </> : <span className="t-dim">Gmail removes messages from {scopePurgeable.specialUse === "trash" ? "Trash" : "Spam"} after 30 days. Postreeve's Gmail access cannot delete mail permanently.</span>}
+  </div> : null;
 
   return <div className="shell">
     <div className="topbar">
@@ -593,7 +757,7 @@ function App() {
         >
           <PanelIcon filled={sideOpen} />
         </button>
-        <span className="brand">PORTREEVE</span>
+        <span className="brand">POSTREEVE</span>
       </span>
       <span className="tabs">
         {tabs.map(([label, value]) => (
@@ -633,7 +797,7 @@ function App() {
           filter={filter}
           view={view}
           section={section}
-          sections={settingsSections}
+          sections={sections}
           onScope={changeScope}
           onFilter={(next) => { setFilter(next); setFocus(0); setSelected(new Set()); }}
           onView={(next) => { setView(next); setOpenKey(null); }}
@@ -648,17 +812,21 @@ function App() {
       </div>
 
       <div className="main">
-        {!hasAccounts && !accountsQuery.isLoading ? <div className="pad" style={{ maxWidth: 620 }}>
+        {!hasAccounts && !accountsQuery.isLoading && !showSecurity ? <div className="pad" style={{ maxWidth: 620 }}>
           <h1 style={{ fontSize: 20, marginBottom: 10 }}>Connect your email</h1>
           <p className="t-body" style={{ marginBottom: 18 }}>
             Add a Gmail account with OAuth, or the IMAP and SMTP settings from any other provider. Postreeve tests both
             connections before saving anything, and credentials stay encrypted on this server.
           </p>
           <button className="btn" onClick={() => setOverlay({ kind: "account", accountId: "new" })}>Connect account</button>
+          {owner.desktop ? null : <p className="t-dim" style={{ marginTop: 18 }}>
+            <button className="btn-quiet" onClick={() => { setView("settings"); setSection("Security"); }}>Passkeys, password and sessions</button>
+          </p>}
         </div> : null}
 
         {hasAccounts && view === "mail" ? <div className={`mail-view ${openKey ? "has-reader" : ""}`}>
           <section className="mail-list-pane" aria-label="Mailbox list">
+            {purgeStrip}
             <MessageList
               messages={messages}
               provenance={provenance}
@@ -676,6 +844,11 @@ function App() {
               query={query}
               busy={busy || actionMutation.isPending}
               coverageText={coverageText}
+              groups={groups}
+              grouped={grouped}
+              everywhere={everywhere}
+              onGrouped={(next) => { setGrouped(next); setFocus(0); setSelected(new Set()); }}
+              onEverywhere={(next) => { setEverywhere(next); setFocus(0); setSelected(new Set()); }}
               pageSize={limit}
               canLoadMore={messageResults.hasNextPage}
               onSort={(next) => { setSort(next); setFocus(0); }}
@@ -707,6 +880,7 @@ function App() {
           </section>
 
           {openKey ? <section className="mail-reader-pane" aria-label="Message reader">
+            <ErrorBoundary label="reader" retry resetKeys={[openKey]}>
             {openMessage ? <Reader
               key={openKey}
               message={openMessage}
@@ -721,6 +895,7 @@ function App() {
               onStep={step}
               onAction={(action) => applyTo([openMessage], action)}
               onAcceptProposal={(proposalId) => acceptMutation.mutate(proposalId)}
+              onDeclineProposal={(proposalId) => declineMutation.mutate(proposalId)}
               onUndo={undoLast}
               onCompose={(mode, source) => setOverlay({
                 kind: "compose",
@@ -728,12 +903,18 @@ function App() {
                 intent: { mode, message: source },
               })}
               onDownloadAttachment={downloadReceivedAttachment}
+              {...(purgeableFolder(foldersByAccount.get(openMessage.ref.accountId) ?? [], openMessage.ref.mailbox)
+                && canDeletePermanently(accounts.find(({ id }) => id === openMessage.ref.accountId))
+                ? { onDeleteForever: () => confirmDeleteForever([openMessage]) } : {})}
             /> : <div className="pad t-dim">Loading message…</div>}
+            </ErrorBoundary>
           </section> : null}
         </div> : null}
 
         {hasAccounts && view === "activity" ? <ActivityView
           batches={batches}
+          agentEvents={agentEvents}
+          accounts={accounts}
           loading={batchResults.some((result) => result.isLoading)}
           error={batchResults.find((result) => result.error)?.error?.message ?? null}
           actorFilter={actorFilter}
@@ -743,7 +924,7 @@ function App() {
           onRetry={() => void refresh()}
         /> : null}
 
-        {hasAccounts && view === "settings" ? <SettingsView
+        {(hasAccounts || showSecurity) && view === "settings" ? <SettingsView
           section={section}
           accounts={accounts}
           foldersByAccount={foldersByAccount}
@@ -770,6 +951,7 @@ function App() {
           onManageAccount={(accountId) => setOverlay({ kind: "account", accountId })}
           onManageIdentities={(accountId) => setOverlay({ kind: "identities", accountId })}
           onAddAccount={() => setOverlay({ kind: "account", accountId: "new" })}
+          onShowShortcuts={() => setHelpOpen(true)}
         /> : null}
       </div>
     </div>
@@ -825,7 +1007,27 @@ function App() {
       }}
     /> : null}
 
-    {overlay?.kind === "compose" && accounts.find(({ id }) => id === overlay.accountId) ? <ComposeModal
+    {helpOpen ? <ShortcutHelp onClose={() => setHelpOpen(false)} /> : null}
+
+    {purge ? <ConfirmDialog
+      title={purge.kind === "folder" ? `${emptyLabel(purge.use)}?` : `Delete ${messageCount(purge.messages.length)} forever?`}
+      confirmLabel={purge.kind === "folder" ? emptyLabel(purge.use) : "Delete forever"}
+      busy={purgeMutation.isPending}
+      error={purgeMutation.error?.message ?? null}
+      onCancel={() => setPurge(null)}
+      onConfirm={() => purgeMutation.mutate(purge)}
+    >
+      <p className="t-body" style={{ margin: 0, fontSize: 13 }}>
+        {purge.kind === "folder"
+          ? `Every message in ${purge.use === "trash" ? "Trash" : "Spam"} for ${accounts.find(({ id }) => id === purge.accountId)?.email ?? "this account"} (${messageCount(purge.total)} by the last count) will be deleted from the mail server.`
+          : purge.messages.length === 1
+            ? `“${purge.messages[0]!.subject || "(No subject)"}” will be deleted from ${purge.folderName} on the mail server.`
+            : `${messageCount(purge.messages.length)} will be deleted from ${purge.folderName} on the mail server.`}
+      </p>
+      <p className="t-body" style={{ margin: 0, fontSize: 13, fontWeight: 600, color: "var(--ink)" }}>This cannot be undone.</p>
+    </ConfirmDialog> : null}
+
+    {overlay?.kind === "compose" && accounts.find(({ id }) => id === overlay.accountId) ? <ErrorBoundary label="compose window" retry resetKeys={[overlay.intent]} onDismiss={() => setOverlay(null)}><ComposeModal
       key={overlay.intent.draft?.id ?? "new-compose"}
       onCopied={(draft) => setOverlay({ kind: "compose", accountId: draft.accountId, intent: { mode: "draft", draft } })}
       account={accounts.find(({ id }) => id === overlay.accountId)!}
@@ -839,7 +1041,7 @@ function App() {
         if (!draftId) return;
         queryClient.setQueryData<Draft[]>(["drafts", overlay.accountId], (current = []) => current.filter(({ id }) => id !== draftId));
       }}
-    /> : null}
+    /></ErrorBoundary> : null}
   </div>;
 }
 

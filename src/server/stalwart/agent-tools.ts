@@ -7,7 +7,7 @@ import {
   queuedMessageSchema,
   type MailServerProposal,
 } from "../../shared/mail-server";
-import type { WebMcpTool } from "../webmcp/types";
+import type { AgentTool, WebMcpTool } from "../webmcp/types";
 import type { MailServerAdmin } from "./service";
 
 // Shared agent tools for the mail server (agents/mail-server-tools). The read tools return no secret and
@@ -103,4 +103,11 @@ export function mailServerTools(admin: MailServerToolServices, agentName = "agen
       },
     },
   ];
+}
+
+/** The same tools for the shared agent layer: remote surface only, read tools under `read`, the proposal under `propose`. */
+export function mailServerAgentTools(admin: MailServerToolServices, agentName = "agent"): readonly AgentTool[] {
+  return mailServerTools(admin, agentName).map((tool) => ({
+    ...tool, scope: tool.annotations?.readOnlyHint ? "read" as const : "propose" as const, surfaces: ["remote"] as const, destructive: false,
+  }));
 }

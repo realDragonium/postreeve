@@ -1,6 +1,6 @@
 import { mailboxQuerySchema } from "../shared/mailbox-query";
 import { zValidator } from "@hono/zod-validator";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import {
@@ -10,11 +10,14 @@ import {
   createDraftInputSchema,
   createFolderInputSchema,
   createIdentityInputSchema,
+  folderMappingsSchema,
   putSignatureInputSchema,
   createProposalInputSchema,
   deleteFolderInputSchema,
   discoverAccountInputSchema,
   directActionInputSchema,
+  emptyFolderInputSchema,
+  permanentDeleteInputSchema,
   draftIdSchema,
   draftFileUploadSchema,
   draftVersionInputSchema,
@@ -31,7 +34,7 @@ import {
 } from "../shared/contracts";
 import type { PostreeveService } from "./core/postreeve";
 import { attachmentDisposition } from "./core/attachment-reference";
-import { AccountConflictError, DraftConflictError, DraftDeletedError, DraftNotFoundError } from "./core/errors";
+import { AccountConflictError, CertificateTrustError, DraftConflictError, DraftDeletedError, DraftNotFoundError } from "./core/errors";
 import type { GoogleOAuth } from "./google/oauth";
 import { createAccountDiscovery, type DiscoverAccount } from "./accounts/discovery";
 import { resolveMx } from "node:dns/promises";
@@ -60,7 +63,12 @@ const EVENT_KEEP_ALIVE_MS = 15_000;
 
 export interface ApiOptions {
   readonly oauthReturnUrl?: string | undefined;
+  /** Rechecked on every keep-alive so an event stream ends when its session is revoked or expires. */
+  readonly stillAuthorized?: (context: Context) => boolean;
+  readonly eventKeepAliveMs?: number;
   readonly discoverAccount?: DiscoverAccount;
+  /** Aborted on shutdown so open event streams end and the HTTP server can drain. */
+  readonly shutdownSignal?: AbortSignal;
 }
 
 export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, options: ApiOptions = {}) {
@@ -89,11 +97,21 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
       const unsubscribe = service.synchronization.events.subscribe(event => {
         void stream.writeSSE({ data: JSON.stringify(event) }).catch(ignore);
       });
-      const keepAlive = setInterval(() => { void stream.write(": keep-alive\n\n").catch(ignore); }, EVENT_KEEP_ALIVE_MS);
+      const keepAlive = setInterval(() => {
+        if (options.stillAuthorized && !options.stillAuthorized(context)) {
+          stream.abort();
+          return;
+        }
+        void stream.write(": keep-alive\n\n").catch(ignore);
+      }, options.eventKeepAliveMs ?? EVENT_KEEP_ALIVE_MS);
       keepAlive.unref();
       try {
         await stream.write(": connected\n\n");
-        await new Promise<void>(resolve => stream.onAbort(resolve));
+        await new Promise<void>(resolve => {
+          stream.onAbort(resolve);
+          if (options.shutdownSignal?.aborted) resolve();
+          options.shutdownSignal?.addEventListener("abort", () => resolve(), { once: true });
+        });
       } finally {
         clearInterval(keepAlive);
         unsubscribe();
@@ -171,6 +189,14 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         ...context.req.valid("json"),
       })),
     )
+    .get("/accounts/:accountId/folder-mappings", zValidator("param", accountParamsSchema), async (context) =>
+      context.json(await service.getFolderMappings(context.req.valid("param").accountId)))
+    .put(
+      "/accounts/:accountId/folder-mappings",
+      zValidator("param", accountParamsSchema),
+      zValidator("json", folderMappingsSchema),
+      async (context) => context.json(await service.putFolderMappings(context.req.valid("param").accountId, context.req.valid("json"))),
+    )
     .get("/accounts/:accountId/identities", zValidator("param", accountParamsSchema), async (context) =>
       context.json(await service.listIdentities(context.req.valid("param").accountId)))
     .post(
@@ -182,6 +208,8 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         return context.json(identity, created ? 201 : 200);
       },
     )
+    .post("/accounts/:accountId/identities/import", zValidator("param", accountParamsSchema), async (context) =>
+      context.json(await service.importSendAsIdentities(context.req.valid("param").accountId)))
     .get("/accounts/:accountId/signatures", zValidator("param", accountParamsSchema), async (context) =>
       context.json(await service.listSignatures(context.req.valid("param").accountId)))
     .put(
@@ -331,6 +359,17 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         context.req.valid("query").accountId)))
     .post("/messages/send", zValidator("json", sendMessageInputSchema), async (context) =>
       context.json(await service.sendMessage(context.req.valid("json")), 201))
+    .post("/messages/delete-permanently", zValidator("json", permanentDeleteInputSchema), async (context) =>
+      context.json(await service.deletePermanently(context.req.valid("json"))))
+    .post(
+      "/accounts/:accountId/folders/empty",
+      zValidator("param", accountParamsSchema),
+      zValidator("json", emptyFolderInputSchema.omit({ accountId: true })),
+      async (context) => context.json(await service.emptyFolder({
+        accountId: context.req.valid("param").accountId,
+        ...context.req.valid("json"),
+      })),
+    )
     .post("/messages/unsubscribe", zValidator("json", unsubscribeInputSchema), async (context) =>
       context.json(await service.unsubscribe(context.req.valid("json"))))
     .post("/messages/actions", zValidator("json", directActionInputSchema), async (context) =>
@@ -350,6 +389,8 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
     )
     .post("/proposals/:proposalId/approve", zValidator("param", proposalParamsSchema), async (context) =>
       context.json(await service.approveProposalFromHumanInterface(context.req.valid("param").proposalId)))
+    .post("/proposals/:proposalId/decline", zValidator("param", proposalParamsSchema), async (context) =>
+      context.json(await service.declineProposalFromHumanInterface(context.req.valid("param").proposalId)))
     .post("/proposals/:proposalId/apply", zValidator("param", proposalParamsSchema), async (context) =>
       context.json(await service.applyApprovedProposal(context.req.valid("param").proposalId)))
     .get("/batches", zValidator("query", accountQuerySchema), async (context) =>
@@ -368,6 +409,9 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
       }
       if (error instanceof DraftConflictError) {
         return context.json({ error: error.message, code: "draft_conflict" as const }, 409);
+      }
+      if (error instanceof CertificateTrustError) {
+        return context.json({ error: error.message, code: "certificate_untrusted" as const, certificate: error.certificate }, 400);
       }
       return context.json({ error: error.message }, 400);
     });

@@ -2,7 +2,7 @@
 
 Postreeve is a self-hosted email client for humans and agents. It connects to Gmail through Google OAuth and to standard providers through IMAP and SMTP while keeping credentials and control on your machine.
 
-Humans can read, search, compose, send, mark, move, and safely trash mail across multiple accounts. External agents can inspect mail and apply explicit mailbox actions through page-scoped WebMCP tools. Applied work remains visible in Activity and supported actions can be undone.
+Humans can read, search, compose, send, mark, move, and safely trash mail across multiple accounts. External agents can inspect mail, prepare proposals and apply explicit mailbox actions through page-scoped WebMCP tools or, once you authorize them, through the remote MCP endpoint at `/mcp`. Applied work remains visible in Activity and supported actions can be undone.
 
 Gmail synchronization consumes account history and repairs expired cursors through bounded full-message pages followed by history catch-up. Repair preserves existing canonical messages, conversations and local workflow references; incomplete repairs retain unseen locations until the account snapshot finishes.
 
@@ -23,13 +23,35 @@ bun run verify
 bun run start
 ```
 
-Open [http://127.0.0.1:3000](http://127.0.0.1:3000). A new installation starts empty and asks you to connect an email account.
+Open [http://localhost:3000](http://localhost:3000). A new installation first asks you to claim it as its owner (see [Sign-in](#sign-in)), then to connect an email account. Press `?` for keyboard shortcuts. Chromium-based browsers and Safari can install Postreeve as an app from this address; the installed app caches only the interface, never mail.
 
 `bun run setup:local` creates an ignored `.env`, generates a 32-byte encryption key without printing it, and prepares the local data directory. Keep that `.env` backed up securely. Existing encrypted account credentials cannot be recovered if `POSTREEVE_MASTER_KEY` is lost or changed.
 
-Postreeve binds to `127.0.0.1` by default because the web interface does not have authentication yet. Do not expose it to a public or shared network.
+Postreeve binds to `127.0.0.1` by default. Serve it to other machines only over https with `POSTREEVE_PUBLIC_URL` set (see [Hosting](#hosting)).
 
-To block pages that rebind their own domain to your machine, the server only answers requests addressed to `127.0.0.1`, `localhost` or `[::1]` (on any port), plus the address in `POSTREEVE_HOST` when it names one, and it rejects API writes sent from another site. Binding to `0.0.0.0` therefore still accepts only loopback names; set `POSTREEVE_HOST` to the exact address or hostname you browse to if you deliberately serve it elsewhere.
+To block pages that rebind their own domain to your machine, the server only answers requests addressed to `127.0.0.1`, `localhost` or `[::1]` (on any port), plus the address in `POSTREEVE_HOST` when it names one and the host of `POSTREEVE_PUBLIC_URL`, and it rejects API writes sent from another site. Binding to `0.0.0.0` therefore still accepts only those names.
+
+### Sign-in
+
+Postreeve has one owner, and every API call, including the live event stream and attachment downloads, needs the owner's session. Only `GET /api/health` and the sign-in endpoints are public.
+
+On first start without an owner, the server logs `Postreeve has no owner yet. Setup token for this run: …`. Open Postreeve, enter that token and choose a password of at least 12 characters. Set `POSTREEVE_SETUP_TOKEN` (16 characters or more) instead to choose the token yourself; the server never logs a token from the environment. The token stops working once the owner exists, so a stranger who finds a fresh public instance cannot claim it.
+
+Right after setup Postreeve offers to add a passkey. Passkeys are the primary sign-in and the password is the fallback. Passkeys need a domain name over a secure connection, so they work at `http://localhost:3000` and at the `POSTREEVE_PUBLIC_URL` address, not at `http://127.0.0.1:3000`. A passkey belongs to the address it was created on. **Settings → Security** adds and removes passkeys, changes the password (which signs out every other session), lists sessions, signs out one or all other sessions, and signs out.
+
+Sessions end after 7 days without use and 30 days after sign-in at the latest. The session cookie is `HttpOnly` and `SameSite=Lax`, and `Secure` over https. The database stores only a hash of each session token and an argon2id hash of the password. After 5 failed attempts in 15 minutes a client must wait; after 50 failed password or setup attempts from all clients, password sign-in pauses for everyone while passkeys keep working.
+
+Lost both the password and every passkey? Stop Postreeve, run `sqlite3 data/postreeve.sqlite "DELETE FROM owner; DELETE FROM owner_sessions; DELETE FROM owner_passkeys;"`, and start it again to get a new setup token. Mail accounts and history are kept.
+
+The desktop app does not use owner sign-in; its per-launch token authenticates it.
+
+### Hosting
+
+| Variable | Purpose |
+| --- | --- |
+| `POSTREEVE_PUBLIC_URL` | The https origin people open, for example `https://box.tail1234.ts.net` behind `tailscale serve`. Its host is accepted by the host check, it is the passkey origin and relying party, and session cookies are `Secure` there. |
+| `POSTREEVE_TRUST_PROXY` | Set to `1` behind a reverse proxy such as `tailscale serve` so the server believes the rightmost `X-Forwarded-Proto`, `X-Forwarded-Host` and `X-Forwarded-For` values. Leave it unset when clients reach Postreeve directly, or they could forge these headers. Tailscale identity headers such as `Tailscale-User-Login` are never treated as sign-in: anything that reaches the port can send them. |
+| `POSTREEVE_SETUP_TOKEN` | Optional fixed setup token for claiming a new instance. |
 
 ## Desktop app
 
@@ -52,7 +74,7 @@ POSTREEVE_GOOGLE_CLIENT_ID=your-desktop-client-id
 POSTREEVE_GOOGLE_CLIENT_SECRET=your-desktop-client-secret
 ```
 
-Restart Postreeve, select **Add account**, and choose **Continue with Google**. Google redirects back to the loopback-only Postreeve server. Postreeve stores the refresh token in the encrypted credential vault; your Google password never enters the app. Google OAuth apps in Testing mode issue refresh tokens that expire after seven days, so local testing may require periodic reauthorization.
+Restart Postreeve, select **Add account**, and choose **Continue with Google**. Google redirects back to the loopback-only Postreeve server (a hosted server with `POSTREEVE_PUBLIC_URL` uses a Web application client instead; see [docs/self-host.md](docs/self-host.md#google-accounts)). Postreeve stores the refresh token in the encrypted credential vault; your Google password never enters the app. Google OAuth apps in Testing mode issue refresh tokens that expire after seven days, so local testing may require periodic reauthorization.
 
 For other providers, select **Add account**, enter the email address and select **Find settings**. Postreeve proposes IMAP and SMTP settings from its built-in list (iCloud including me.com and mac.com, Fastmail, Yahoo, AOL, Zoho, GMX, Gmail), the domain's own Thunderbird autoconfig file, the Thunderbird ISPDB at `autoconfig.thunderbird.net`, or the domain's MX host when it belongs to one of those providers (for example a custom domain hosted at iCloud or Fastmail). Lookups run on the server over HTTPS only, never follow redirects, time out after five seconds, read at most 64 KiB and never include your password or email address. Every proposed field stays editable, and providers that need an app-specific password show how to create one. Gmail addresses point to **Continue with Google** when it is configured. Outlook.com/Hotmail and Proton Mail are recognized but cannot be connected yet: Microsoft requires its own sign-in, and Proton Mail Bridge uses a self-signed certificate. You can also enter the settings supplied by your provider by hand. Postreeve authenticates to both services before saving the encrypted credentials. The SMTP check uses the provider's non-sending verification mechanism. Prefer an app-specific password when the provider supports one.
 
@@ -78,7 +100,11 @@ New mail arrives without waiting for the poll. Each IMAP account keeps one extra
 
 Synchronization health is available in **Settings → Sync & storage**, including safe retry and human reauthorization instructions. Health distinguishes healthy, catching up, degraded, disconnected and reauthorization required. Authentication failures pause automatic retries; failures contain fixed actionable guidance, never raw provider responses.
 
-Retained preview and bounded searchable body text expire 30 days after refresh and are limited to 100 MiB per account by default. Set `POSTREEVE_CONTENT_RETENTION_DAYS` (1–3650) and `POSTREEVE_CONTENT_RETENTION_BYTES` (positive integer) to change these server-wide defaults. Retention clears the oldest eligible preview/body content, preserving every indexed message's headers, identity, locations, conversation links and proposal history. It does not bound total database size or change provider mail. Full bodies remain fetched on demand. Synchronization indexes up to 32,768 characters of body text from bounded MIME reads (64 KiB text/source budget); missing or expired content is reported separately from synchronization coverage. SQLite search matches literal case-insensitive text in sender, recipients, subject, retained headers, preview and body fields; Gmail query syntax is not supported. Account and unified mailbox views use backend cursor pages of 50, with no 100-message navigation ceiling. Provider fallback is bounded to 100 matches per source, 10 source calls, 1,000 search matches and five seconds of waiting per query; failures leave cached results usable. Cursor ordering uses the first indexed canonical date/sender/subject, so newly observed duplicate copies cannot move existing rows between pages. Displayed metadata and location flags remain current. Cursors are bound to sources, query, filter and sort; canonical identity merges and deletions do not promise a frozen snapshot.
+Retained preview and bounded searchable body text expire 365 days after refresh and are limited to 64 MiB per account by default. On disk the index costs about five times the retained text (the summary copy, the full-text copy and its trigram index), so the default budget bounds an account's searchable content at roughly 320 MiB; lower `POSTREEVE_CONTENT_RETENTION_BYTES` on a small volume with several busy accounts. Set `POSTREEVE_CONTENT_RETENTION_DAYS` (1–3650) and `POSTREEVE_CONTENT_RETENTION_BYTES` (positive integer) to change these server-wide defaults. Retention clears the oldest eligible preview/body content, preserving every indexed message's headers, identity, locations, conversation links and proposal history. It does not bound total database size or change provider mail. Full bodies remain fetched on demand. Synchronization indexes up to 32,768 characters of body text from bounded MIME reads (64 KiB text/source budget); missing or expired content is reported separately from synchronization coverage.
+
+Search matches words and `"quoted phrases"` as literal case-insensitive text in sender, recipients, subject, retained headers, preview and body fields. Operators narrow it: `from:`, `to:` (any recipient), `cc:`, `subject:`, `has:attachment` (a `multipart/mixed` message), `is:unread`, `is:read`, `is:flagged`, `before:YYYY-MM-DD` and `after:YYYY-MM-DD` (UTC days, received time), `in:<folder>` (path, last path segment or a special-use name such as `in:sent`), `account:<address or name>`, and `in:anywhere`; a leading `-` negates any term or operator. Unknown `name:value` words stay literal text. The same query string works in the search box and in the WebMCP `search_messages` tool. **Everywhere** in the list header (or `in:anywhere`) searches every indexed folder of every account from the local index only, without provider fallback. Account and unified mailbox views use backend cursor pages of 50, with no 100-message navigation ceiling. Provider fallback searches the free text only, and is bounded to 100 matches per source, 10 source calls, 1,000 search matches and five seconds of waiting per query; failures leave cached results usable. Cursor ordering uses the first indexed canonical date/sender/subject, kept in an indexed sort-key table, so newly observed duplicate copies cannot move existing rows between pages. Displayed metadata and location flags remain current. Cursors are bound to sources, scope, query, filter, sort and grouping; canonical identity merges and deletions do not promise a frozen snapshot. **Conversations** in the list header groups the list into one row per conversation in the current view, showing participants, the message count, the latest snippet and unread state; an action on a group applies to each of its messages in the view.
+
+`bun scripts/bench-mail-query.ts [count] [runs]` seeds synthetic summaries into a temporary SQLite file and prints p50/p95 page latency for list, unified, search and grouped queries.
 
 ## Run your own mail server (Stalwart)
 
@@ -98,9 +124,21 @@ Start with a scoped request:
 
 > List my accounts and folders. Inspect unread messages in my inbox, explain what you recommend, and wait for my next instruction before applying actions.
 
-WebMCP mirrors the completed mailbox workflow available in the UI: it can inspect accounts, folders, and messages; send a new message from an account's primary address; apply explicit move, Trash, and read-state actions; inspect Activity; and undo supported operations. Sending real mail requires explicit user approval. Permanent deletion remains unavailable everywhere.
+WebMCP mirrors the completed mailbox workflow available in the UI: it can inspect accounts, folders, and messages; send a new message from an account's primary address; apply explicit move, Trash, and read-state actions; inspect Activity; and undo supported operations. Sending real mail requires explicit user approval. Permanent deletion is never available to agents; people can delete from an IMAP account's Trash or Spam after a confirmation dialog.
 
 Use GPT-5.6 Sol or GPT-5.6 Terra for site tools. GPT-5.6 Luna currently has WebMCP disabled.
+
+## Connect remote agents over MCP
+
+Postreeve serves MCP at `<your origin>/mcp` with OAuth 2.1 (PKCE and dynamic client registration). Set `POSTREEVE_PUBLIC_URL` to the hosted origin, such as `https://mail.example.com`, so the advertised OAuth URLs match; on loopback the request origin is used. Each connection opens a consent page in your signed-in browser where you choose **Read only**, **Read and prepare** (recommended: the agent proposes mailbox changes and drafts replies, you accept and send) or **Read, prepare and act**, and which accounts it may reach. Remote agents can never send mail, send a draft, or accept or decline a proposal. Manage and revoke connections under **Settings → Connected agents**; every call they make shows in Activity under their name.
+
+- **claude.ai**: Settings → Connectors → Add custom connector, URL `https://mail.example.com/mcp`. Leave the OAuth client fields empty; Claude registers itself.
+- **Claude Code**: `claude mcp add --transport http postreeve https://mail.example.com/mcp`, then run `/mcp` in Claude Code to sign in. For a headless machine, create a personal access token in Settings and add `--header "Authorization: Bearer <token>"` instead.
+- **ChatGPT**: Settings → Connectors → Advanced → enable Developer mode, then Create connector with the URL `https://mail.example.com/mcp` and OAuth authentication.
+
+If agents reach Postreeve on a different origin than your browser (for example `https://mcp.example.com` published by a reverse proxy while the UI stays on your tailnet), set `POSTREEVE_MCP_PUBLIC_URL` to that origin: it becomes the OAuth issuer and the `/mcp` resource, while the consent page stays on `POSTREEVE_PUBLIC_URL`, and connectors use `<POSTREEVE_MCP_PUBLIC_URL>/mcp`.
+
+When only the agent endpoints face the internet, serve them from a separate listener built with `createPublicAgentAccess`, which carries exactly these paths and answers 404 to everything else, or expose exactly `/mcp`, `/.well-known/oauth-protected-resource`, `/.well-known/oauth-protected-resource/mcp`, `/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/token` and `/oauth/revoke`. Keep `/oauth/authorize` private: your own browser opens it, so it only needs to be reachable from your devices. These endpoints are rate limited (per client address, taken from `X-Forwarded-For` only when the connection comes from a loopback proxy, and per token on `/mcp`), cap request bodies at 1 MiB (`/mcp`) and 16 KiB (OAuth), and answer unexpected failures with a bare `server_error`.
 
 ## Docker
 
@@ -111,18 +149,23 @@ bun run setup:local
 docker compose up --build
 ```
 
-Docker Compose publishes Postreeve only on `127.0.0.1:3000` and stores SQLite data in the `postreeve-data` volume.
+Docker Compose publishes Postreeve only on `127.0.0.1:3000`, stores SQLite data in the `postreeve-data` volume and writes daily snapshots to `./backups`. Find the setup token for a new instance with `docker compose logs postreeve`.
+
+## Self-hosting
+
+To run Postreeve on an always-on machine and use it from your other devices, follow [docs/self-host.md](docs/self-host.md): Docker Compose on loopback, the UI over HTTPS on your tailnet through `tailscale serve`, Caddy as the public TLS front for mail and the remote MCP endpoints, a firewall, Google OAuth on the hosted URL, scheduled `VACUUM INTO` snapshots with restore, and graceful shutdown.
 
 ## Commands
 
 - `bun run setup:local`: create local private configuration without overwriting an existing `.env`
 - `bun run verify`: run strict typechecking, deterministic tests, and the production build
 - `bun run start`: serve the production application
+- `bun run backup [create | list | verify <file> | restore <file>]`: snapshot or restore the database (see the self-hosting guide)
 - `bun run dev`: run the API server in watch mode after building the web application
 - `bun run desktop`: build and open the Electron desktop application
 - `bun run desktop:pack`: create an unpacked desktop application
 - `bun run desktop:dist`: create the current platform's desktop installers
-- `bun run test:e2e`: run the Playwright browser workflow
+- `bun run test:e2e`: run the Playwright browser workflow (set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to use an already installed Chromium)
 
 Licensed under the [Apache License 2.0](LICENSE).
 

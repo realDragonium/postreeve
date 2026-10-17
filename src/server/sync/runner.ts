@@ -1,4 +1,5 @@
 import type { RetentionPolicy } from "../../shared/synchronization";
+import { isCertificateError } from "../mail/tls-trust";
 import type { MailProviderRegistry } from "../mail/provider";
 import { additiveSynchronization, SynchronizationError, syncScopeSchema } from "../mail/synchronization";
 import type { SynchronizationStore, SyncClaim } from "./store";
@@ -171,5 +172,7 @@ function synchronizationFailureKind(error: unknown): "provider" | "reauthorizati
   if (typeof error === "object" && error !== null && "authenticationFailed" in error && error.authenticationFailed === true) {
     return "reauthorization";
   }
+  // An untrusted or changed certificate needs the owner to review it; retrying cannot fix it.
+  if (isCertificateError(error)) return "reauthorization";
   return "provider";
 }

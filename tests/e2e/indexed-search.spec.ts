@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./support/owner-session";
 
 test("pages beyond 100 across accounts and searches unopened retained body content", async ({ page, request }) => {
   const server = spawn("bun", ["--no-env-file", "tests/fixtures/indexed-search-server.ts"], { stdio: ["ignore", "pipe", "pipe"] });

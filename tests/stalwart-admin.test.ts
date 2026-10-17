@@ -271,14 +271,14 @@ describe("aliases, catch-all and identities", () => {
     await expect(admin.addAlias(server.id, id, { address: "info@elsewhere.example.com" })).rejects.toThrow("not a domain on this server");
   });
 
-  test("a catch-all must point at an existing address and reports the wildcard identity as skipped", async () => {
+  test("a catch-all must point at an existing address and registers the wildcard identity", async () => {
     const { admin, fake, server, domain } = await withDomain();
     const id = fake.addMailbox("alice", domain.id);
     await expect(admin.setCatchAll(server.id, domain.id, { address: "nobody@example.org" })).rejects.toThrow("is not a mailbox");
     await admin.addMailboxToPostreeve(server.id, id);
     const result = await admin.setCatchAll(server.id, domain.id, { address: "alice@example.org" });
     expect(result.domain.catchAll).toBe("alice@example.org");
-    expect(result.identity).toMatchObject({ address: "*@example.org", status: "skipped" });
+    expect(result.identity).toMatchObject({ address: "*@example.org", status: "registered" });
     expect((await admin.setCatchAll(server.id, domain.id, { address: null })).domain.catchAll).toBeNull();
   });
 });

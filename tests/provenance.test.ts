@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { OperationBatch, Proposal, MessageRef } from "../src/shared/contracts";
-import { buildProvenance, provenanceKey, recordUserBatch } from "../src/web/provenance";
+import { actorOf, agentBatchNames, buildProvenance, provenanceKey, recordUserBatch } from "../src/web/provenance";
 
 const ref: MessageRef = { accountId: "a", mailbox: "INBOX", uidValidity: "1", uid: 7, modseq: null };
 const key = provenanceKey(ref);
@@ -74,5 +74,17 @@ describe("buildProvenance", () => {
     expect(buildProvenance([batch({ id: "unknown" })], []).get(key)?.lead).toBe("marked read");
     recordUserBatch("mine");
     expect(buildProvenance([batch({ id: "mine" })], []).get(key)?.lead).toBe("you marked read");
+  });
+
+  test("a batch the server audited for a remote agent carries that agent's name", () => {
+    const agents = agentBatchNames([
+      { id: 1, grantId: "g", agentName: "ChatGPT", tool: "apply_message_actions", accountId: "a", outcome: "ok",
+        summary: "1 item", error: null, targetKind: "batch", targetId: "remote", createdAt: "2026-08-01T09:00:00.000Z" },
+      { id: 2, grantId: "g", agentName: "ChatGPT", tool: "create_proposal", accountId: "a", outcome: "ok",
+        summary: "", error: null, targetKind: "proposal", targetId: "p9", createdAt: "2026-08-01T09:00:00.000Z" },
+    ]);
+    expect([...agents]).toEqual([["remote", "ChatGPT"]]);
+    expect(actorOf("remote", agents)).toBe("assistant");
+    expect(buildProvenance([batch({ id: "remote" })], [], agents).get(key)?.lead).toBe("ChatGPT marked read");
   });
 });

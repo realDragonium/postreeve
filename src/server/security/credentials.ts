@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { tlsPinSchema } from "../mail/tls-trust";
 
 export const imapCredentialsSchema = z.object({
   host: z.string().min(1),
@@ -7,6 +8,7 @@ export const imapCredentialsSchema = z.object({
   secure: z.boolean(),
   username: z.string().min(1),
   password: z.string().min(1),
+  tlsPin: tlsPinSchema.optional(),
 });
 
 export type ImapCredentials = z.infer<typeof imapCredentialsSchema>;
@@ -18,6 +20,7 @@ export const smtpCredentialsSchema = z.object({
   username: z.string().min(1),
   password: z.string().min(1),
   saveSentCopy: z.boolean().optional(),
+  tlsPin: tlsPinSchema.optional(),
 });
 
 export const imapAccountCredentialsSchema = z.object({

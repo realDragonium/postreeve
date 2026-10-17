@@ -15,6 +15,7 @@
     "desktop:pack": "bun run build:desktop && electron-builder --dir",
     "desktop:dist": "bun run build:desktop && electron-builder",
     "start": "bun src/server/index.ts",
+    "backup": "bun scripts/backup.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test --path-ignore-patterns='tests/e2e/**'",
     "test:e2e": "playwright test",
@@ -22,7 +23,11 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@fontsource/instrument-sans": "^5.3.0",
     "@hono/zod-validator": "latest",
+    "@simplewebauthn/browser": "^13.3.0",
+    "@simplewebauthn/server": "^13.3.3",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@tailwindcss/vite": "latest",
     "@tanstack/react-query": "latest",
     "dompurify": "latest",
@@ -55,6 +60,9 @@
     "electron-builder": "^26.15.3",
     "typescript": "latest",
     "vite": "latest"
+  },
+  "overrides": {
+    "@peculiar/asn1-schema": "2.11.0"
   },
   "build": {
     "appId": "nl.dragonium.postreeve",

@@ -1,38 +1,28 @@
+import { SecurityView } from "./SecurityView";
+import { ConnectedAgentsView } from "./ConnectedAgentsView";
 import { SyncStorageView } from "./SyncStorageView";
 import { MailServerView } from "./admin/MailServerView";
 import type { Account, Folder } from "../shared/contracts";
 import { assistantTools } from "./assistant-tools";
 import { railFor, type ThemePreference } from "./theme";
 import type { NotificationAccess, NotificationPreferences } from "./notifications";
+import { shortcutGroups } from "./keyboard";
+import { ShortcutTable } from "./ShortcutHelp";
 
 export const settingsSections = [
   "Accounts",
   "Mail server",
   "Assistant control",
+  "Connected agents",
   "Appearance",
   "Notifications",
+  "Security",
   "Keyboard shortcuts",
   "Rules & filters",
   "Sync & storage",
 ] as const;
 
 export type SettingsSection = (typeof settingsSections)[number];
-
-const shortcuts: readonly (readonly [string, string])[] = [
-  ["↵ / click", "open the focused message"],
-  ["esc", "back to the list"],
-  ["j / ↓", "move down"],
-  ["k / ↑", "move up"],
-  ["x", "add the focused message to the selection"],
-  ["⌘-click", "add one message to the selection"],
-  ["shift-click", "select a range"],
-  ["e", "archive the selection"],
-  ["!", "move the selection to Spam, or out of Spam"],
-  ["u", "toggle read and unread"],
-  ["/", "focus the search box"],
-  ["[", "hide or show the sidebar"],
-  ["⌘Z", "undo the last batch of operations"],
-];
 
 function Toolbar({ title, meta, action }: { title: string; meta: string; action?: React.ReactNode }) {
   return <div className="toolbar">
@@ -68,9 +58,17 @@ export interface SettingsViewProps {
   onManageAccount: (accountId: string) => void;
   onManageIdentities: (accountId: string) => void;
   onAddAccount: () => void;
+  onShowShortcuts: () => void;
 }
 
 export function SettingsView(props: SettingsViewProps) {
+  if (props.section === "Security") {
+    return <>
+      <Toolbar title="Security" meta="single owner · passkeys and password" />
+      <SecurityView />
+    </>;
+  }
+
   if (props.section === "Appearance") {
     return <>
       <Toolbar
@@ -144,23 +142,24 @@ export function SettingsView(props: SettingsViewProps) {
   }
 
   if (props.section === "Keyboard shortcuts") {
+    const count = shortcutGroups.reduce((total, group) => total + group.entries.length, 0);
     return <>
-      <Toolbar title="Keyboard shortcuts" meta={`${shortcuts.length} bindings · active in the mailbox`} />
-      <div className="readscroll"><div className="pad" style={{ "--grid-cols": "120px minmax(0,1fr)" } as React.CSSProperties}>
-        <div className="grid-head"><span className="t-sec">Key</span><span className="t-sec">Does</span></div>
-        <div className="thin" />
-        {shortcuts.map(([key, description]) => (
-          <div className="grid-row" key={key}>
-            <span className="t-ink t-num" style={{ fontSize: 11 }}>{key}</span>
-            <span className="t-body">{description}</span>
-          </div>
-        ))}
+      <Toolbar
+        title="Keyboard shortcuts"
+        meta={`${count} bindings · active in the mailbox`}
+        action={<button className="chip" onClick={props.onShowShortcuts}>Show overlay   ?</button>}
+      />
+      <div className="readscroll"><div className="pad">
+        <ShortcutTable />
         <p className="t-dim" style={{ maxWidth: 760, margin: "20px 0 0" }}>
-          Shortcuts are ignored while a text field has focus, so typing in search never triggers an operation.
+          Shortcuts are ignored while a text field or the message editor has focus and while a dialog is open, so typing never triggers an operation.
+          ⌘-click adds one message to the selection and shift-click selects a range.
         </p>
       </div></div>
     </>;
   }
+
+  if (props.section === "Connected agents") return <ConnectedAgentsView accounts={props.accounts} />;
 
   if (props.section === "Assistant control") {
     const exposedCount = assistantTools.length - props.hiddenTools.size;
@@ -197,9 +196,9 @@ export function SettingsView(props: SettingsViewProps) {
           </div>;
         })}
         <p className="t-dim" style={{ maxWidth: 820, margin: "18px 0 0" }}>
-          A confirm-first tier, where a write tool stops as a proposal until you accept it, is not built yet: nothing in the
-          server can hold a tool call open. Until it is, <code>send_message</code> is the one irreversible tool here — hide it
-          if you would rather the assistant never sent mail on your behalf.
+          <code>create_proposal</code> and <code>update_proposal</code> only prepare changes; they wait on the message until you
+          accept them. <code>send_message</code> is the one irreversible tool here — hide it if you would rather the assistant
+          never sent mail on your behalf. Agents outside this page are managed under Connected agents.
         </p>
       </div></div>
     </>;

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { simpleParser } from "mailparser";
 import { z } from "zod";
-import { GmailMailClient, type HttpFetch } from "../src/server/mail/gmail";
+import { GMAIL_PERMANENT_DELETE_UNAVAILABLE, GmailMailClient, type HttpFetch } from "../src/server/mail/gmail";
 import {
   MailProviderRegistry,
   toCanonicalObservation,
@@ -1614,3 +1614,19 @@ describe("Gmail compatibility", () => {
 function json(value: unknown): Response {
   return Response.json(value);
 }
+
+test("Gmail refuses permanent delete without calling Google", async () => {
+  const requests: string[] = [];
+  const client = new GmailMailClient({
+    account: { id: "gmail-account", name: "Gmail", email: "person@gmail.test", kind: "gmail" },
+    credentials: { kind: "gmail", refreshToken: "token" },
+    clientId: "client",
+    fetch: async (input) => {
+      requests.push(String(input));
+      throw new Error("Google must not be called");
+    },
+  });
+  await expect(client.deletePermanently("gmail-account")).rejects.toThrow(GMAIL_PERMANENT_DELETE_UNAVAILABLE);
+  await expect(client.emptyFolder("gmail-account")).rejects.toThrow("Gmail removes messages from Trash and Spam after 30 days");
+  expect(requests).toEqual([]);
+});
