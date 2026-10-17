@@ -10,7 +10,14 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   projects: [
-    { name: "chromium", use: { ...devices["Desktop Chrome"] } },
+    {
+      name: "chromium",
+      use: {
+        ...devices["Desktop Chrome"],
+        // Lets a machine with a preinstalled browser run the suite without a Playwright download.
+        ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { launchOptions: { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } } : {}),
+      },
+    },
   ],
   webServer: {
     command: "bun run dev:web --host 127.0.0.1 --port 4187",
