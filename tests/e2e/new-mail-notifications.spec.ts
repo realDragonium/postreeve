@@ -1,4 +1,4 @@
-import { expect, test, type Route } from "@playwright/test";
+import { expect, test, type Route } from "./support/owner-session";
 import { canonicalMessageSummarySchema, type Account, type CanonicalMessageDetail, type Folder } from "../../src/shared/contracts";
 import type { MailboxEvent } from "../../src/shared/mailbox-events";
 

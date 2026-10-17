@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
+import { AuthGate } from "./AuthGate";
 import "./styles.css";
 
 if (window.location.protocol === "postreeve:") {
@@ -27,7 +28,9 @@ if (!root) throw new Error("Postreeve root element is missing");
 createRoot(root).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <App />
+      <AuthGate>
+        <App />
+      </AuthGate>
     </QueryClientProvider>
   </StrictMode>,
 );

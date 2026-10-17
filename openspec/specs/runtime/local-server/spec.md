@@ -1,19 +1,19 @@
 # Local Server Specification
 
 ## Purpose
-Covers the Postreeve server process: its environment configuration and defaults, loopback binding, security headers, serving the web bundle, the health endpoint, the shared API error format, startup, the optional desktop API token and the Docker Compose deployment. The Electron shell that launches the server as a sidecar is specified in runtime/desktop-app; the master key in accounts/credential-vault; Google settings in accounts/gmail-accounts; recovery of interrupted draft sends at startup in compose/drafts; upload and message size limits in compose/draft-files.
+Covers the Postreeve server process: its environment configuration and defaults, loopback binding, allowed hosts and cross-site write rejection, security headers, serving the web bundle, the health endpoint, the shared API error format, startup, the optional desktop API token and the Docker Compose deployment. Owner sign-in and sessions are specified in runtime/owner-auth; the Electron shell that launches the server as a sidecar in runtime/desktop-app; the master key in accounts/credential-vault; Google settings in accounts/gmail-accounts; recovery of interrupted draft sends at startup in compose/drafts; upload and message size limits in compose/draft-files.
 
 ## Requirements
 
 ### Requirement: Environment configuration defaults
-The server SHALL read its configuration from environment variables with these defaults: `POSTREEVE_HOST` `127.0.0.1`, `PORT` `3000`, `POSTREEVE_DB_PATH` `./data/postreeve.sqlite`, `POSTREEVE_MAX_ATTACHMENT_BYTES` 26214400, `POSTREEVE_MAX_UPLOAD_BYTES` 20971520 and `POSTREEVE_MAX_MESSAGE_BYTES` 26214400. It SHALL create the database file's parent directory when it does not exist.
+The server SHALL read its configuration from environment variables with these defaults: `POSTREEVE_HOST` `127.0.0.1`, `PORT` `3000`, `POSTREEVE_DB_PATH` `./data/postreeve.sqlite`, `POSTREEVE_MAX_ATTACHMENT_BYTES` 26214400, `POSTREEVE_MAX_UPLOAD_BYTES` 20971520 and `POSTREEVE_MAX_MESSAGE_BYTES` 26214400. `POSTREEVE_PUBLIC_URL`, `POSTREEVE_TRUST_PROXY` and `POSTREEVE_SETUP_TOKEN` are unset by default. It SHALL create the database file's parent directory when it does not exist.
 
 #### Scenario: No configuration
 - **WHEN** the server starts with none of these variables set
-- **THEN** it listens on `127.0.0.1:3000` and stores data in `./data/postreeve.sqlite`
+- **THEN** it listens on `127.0.0.1:3000`, stores data in `./data/postreeve.sqlite` and trusts no proxy headers
 
 ### Requirement: Invalid configuration stops startup
-The server SHALL refuse to start unless the host is non-empty after trimming, the port is an integer from 1 to 65535 and each byte limit is a positive integer.
+The server SHALL refuse to start unless the host is non-empty after trimming, the port is an integer from 1 to 65535, each byte limit is a positive integer, `POSTREEVE_PUBLIC_URL`, when set, is an `http` or `https` URL without path, query or fragment, and `POSTREEVE_SETUP_TOKEN`, when set, has at least 16 characters.
 
 #### Scenario: Invalid port
 - **WHEN** `PORT` is `70000`
@@ -23,8 +23,12 @@ The server SHALL refuse to start unless the host is non-empty after trimming, th
 - **WHEN** `POSTREEVE_MAX_UPLOAD_BYTES` is `0`
 - **THEN** the server exits during startup without listening
 
+#### Scenario: Public URL with a path
+- **WHEN** `POSTREEVE_PUBLIC_URL` is `https://example.test/mail`
+- **THEN** the server exits during startup without listening
+
 ### Requirement: The server binds to loopback by default
-The server SHALL listen on `POSTREEVE_HOST`, which defaults to `127.0.0.1`, and SHALL log `Postreeve listening on http://<host>:<port>` once listening. Outside the desktop app the web interface and API have no authentication, so the default binding MUST remain loopback-only.
+The server SHALL listen on `POSTREEVE_HOST`, which defaults to `127.0.0.1`, and SHALL log `Postreeve listening on http://<host>:<port>` once listening. The web interface and API require the owner's sign-in (runtime/owner-auth); a deployment reachable from other machines SHALL set `POSTREEVE_PUBLIC_URL` and serve it over https.
 
 #### Scenario: Default start
 - **WHEN** a user runs `bun run start` with the `.env` from `bun run setup:local`
@@ -81,7 +85,7 @@ The server SHALL open the database, migrate it, decrypt the credentials of every
 - **THEN** both accounts are usable as soon as the server is listening, without reconnecting
 
 ### Requirement: Optional bearer token for the desktop sidecar
-When `POSTREEVE_DESKTOP_TOKEN` is set to a non-blank value, the server SHALL require `Authorization: Bearer <token>` with exactly that token on every `/api/*` request except `GET /api/oauth/google/callback`, and SHALL answer any other request with 401 `{ error: "Unauthorized" }`. When it is unset or blank, the API SHALL require no token. When `POSTREEVE_DESKTOP_URL` is set, Google OAuth results SHALL redirect to that URL with the `google` and `accountId` query instead of to `/`.
+When `POSTREEVE_DESKTOP_TOKEN` is set to a non-blank value, the server SHALL require `Authorization: Bearer <token>` with exactly that token on every `/api/*` request except `GET /api/oauth/google/callback`, SHALL answer any other request with 401 `{ error: "Unauthorized" }`, and SHALL NOT require an owner session. When it is unset or blank, the API SHALL require the owner's session instead (runtime/owner-auth).
 
 #### Scenario: Missing token
 - **WHEN** the server runs with a desktop token and a request to `/api/health` has no `Authorization` header
@@ -90,6 +94,17 @@ When `POSTREEVE_DESKTOP_TOKEN` is set to a non-blank value, the server SHALL req
 #### Scenario: Google callback without token
 - **WHEN** Google redirects the browser to `/api/oauth/google/callback` on a server with a desktop token
 - **THEN** the request is handled without a token and is protected by its OAuth `state`
+
+#### Scenario: Desktop token without owner
+- **WHEN** the server runs with a desktop token, no owner exists, and the desktop app requests `/api/accounts` with the token
+- **THEN** the request is handled
+
+### Requirement: Google OAuth results return to the desktop URL
+When `POSTREEVE_DESKTOP_URL` is set, Google OAuth results SHALL redirect to that URL with the `google` and `accountId` query instead of to `/`.
+
+#### Scenario: Desktop Google connection
+- **WHEN** `POSTREEVE_DESKTOP_URL` is `postreeve://app/` and a Google connection succeeds
+- **THEN** the callback redirects to `postreeve://app/?google=connected&accountId=<id>`
 
 ### Requirement: Docker Compose publishes only on loopback
 The Compose deployment SHALL build the server image, publish container port 3000 only on host address `127.0.0.1:3000`, pass `POSTREEVE_MASTER_KEY` from the host environment or `.env`, store the database at `/app/data/postreeve.sqlite` in the named volume `postreeve-data`, run the server as the unprivileged `bun` user and restart it unless stopped. Inside the container the server SHALL listen on `0.0.0.0` so the published port reaches it.
@@ -103,7 +118,7 @@ The Compose deployment SHALL build the server image, publish container port 3000
 - **THEN** accounts and history persist in the `postreeve-data` volume
 
 ### Requirement: Requests must name an allowed host
-The server SHALL answer 403 `{ error: "Forbidden host" }` to any request whose `Host` header is missing or whose host name, ignoring case and port, is not `127.0.0.1`, `localhost`, `[::1]` or the configured `POSTREEVE_HOST`. A wildcard `POSTREEVE_HOST` (`0.0.0.0` or `::`) SHALL add no name, so only loopback names are accepted. This blocks DNS-rebinding pages from reaching the unauthenticated API.
+The server SHALL answer 403 `{ error: "Forbidden host" }` to any request whose `Host` header is missing or whose host name, ignoring case and port, is not `127.0.0.1`, `localhost`, `[::1]`, the configured `POSTREEVE_HOST` or the host name of `POSTREEVE_PUBLIC_URL`. A wildcard `POSTREEVE_HOST` (`0.0.0.0` or `::`) SHALL add no name. This blocks DNS-rebinding pages from reaching the API.
 
 #### Scenario: Browser on loopback
 - **WHEN** a browser requests `http://127.0.0.1:3000/api/health`
@@ -121,8 +136,12 @@ The server SHALL answer 403 `{ error: "Forbidden host" }` to any request whose `
 - **WHEN** `POSTREEVE_HOST` is `192.168.1.10` and a request carries `Host: 192.168.1.10:3000`
 - **THEN** the request is accepted
 
+#### Scenario: Hosted public URL
+- **WHEN** `POSTREEVE_PUBLIC_URL` is `https://postreeve.fly.dev`, the server listens on `0.0.0.0` and a request carries `Host: postreeve.fly.dev`
+- **THEN** the request is accepted
+
 ### Requirement: Cross-site state changes are rejected
-Unless a desktop token is configured, the server SHALL answer 403 `{ error: "Forbidden origin" }` to an `/api/*` request with a method other than `GET`, `HEAD` or `OPTIONS` whose `Origin` header is present and is not `http://<Host>` for the request's own `Host`. Requests without `Origin` SHALL be handled normally.
+Unless a desktop token is configured, the server SHALL answer 403 `{ error: "Forbidden origin" }` to an `/api/*` request with a method other than `GET`, `HEAD` or `OPTIONS` whose `Origin` header is present and is neither `<scheme>://<Host>` for the request's own scheme and `Host` nor, for a request to the `POSTREEVE_PUBLIC_URL` host, that URL's origin. The scheme SHALL come from `Fly-Forwarded-Proto` or `X-Forwarded-Proto` only when `POSTREEVE_TRUST_PROXY` is `1` or `true`.
 
 #### Scenario: Same-origin send
 - **WHEN** the web interface at `http://127.0.0.1:3000` posts to `/api/messages/send`
@@ -132,16 +151,39 @@ Unless a desktop token is configured, the server SHALL answer 403 `{ error: "For
 - **WHEN** a page at `http://localhost:8080` posts to `http://localhost:3000/api/messages/send`
 - **THEN** the response is 403 and nothing is sent
 
+#### Scenario: Hosted origin behind a proxy
+- **WHEN** `POSTREEVE_PUBLIC_URL` is `https://postreeve.fly.dev` and the page posts with `Origin: https://postreeve.fly.dev` over the proxy's plain-http connection
+- **THEN** the request is handled
+
 #### Scenario: Desktop app
 - **WHEN** the desktop protocol proxy forwards a `POST` with the launch token and `Origin: postreeve://app`
 - **THEN** the request is handled
 
+### Requirement: Origin-less cross-site writes are rejected
+Unless a desktop token is configured, the server SHALL answer 403 `{ error: "Forbidden origin" }` to an `/api/*` request with a method other than `GET`, `HEAD` or `OPTIONS` that has no `Origin` header and whose `Sec-Fetch-Site` is `cross-site` or `same-site`. Requests without either header SHALL be handled normally, so session cookies, which are `SameSite=Lax`, alone never authorize a cross-site write from a browser.
+
+#### Scenario: Sibling subdomain without Origin
+- **WHEN** a request without `Origin` posts to `/api/auth/login/password` with `Sec-Fetch-Site: same-site`
+- **THEN** the response is 403
+
+#### Scenario: Command-line client
+- **WHEN** a script posts to `/api/auth/login/password` without `Origin` or `Sec-Fetch-Site`
+- **THEN** the request is handled
+
 ### Requirement: Event stream endpoint
-`GET /api/events` SHALL answer `text/event-stream` and stay open until the client disconnects. It SHALL be protected by the same optional bearer token as other API routes and SHALL send a keep-alive often enough that idle-connection timeouts do not close it.
+`GET /api/events` SHALL answer `text/event-stream` and stay open until the client disconnects. It SHALL require the owner's session, or the bearer token when a desktop token is configured, like other API routes, SHALL close an open stream once its session has ended, and SHALL send a keep-alive often enough that idle-connection timeouts do not close it.
 
 #### Scenario: Token required
 - **WHEN** the server runs with a desktop token and `/api/events` is requested without it
 - **THEN** the response is 401
+
+#### Scenario: Session required
+- **WHEN** the server runs without a desktop token and `/api/events` is requested without an owner session
+- **THEN** the response is 401
+
+#### Scenario: Session revoked while streaming
+- **WHEN** the owner signs out the session an open event stream was opened with
+- **THEN** the server closes that stream within one keep-alive interval
 
 #### Scenario: Idle stream
 - **WHEN** no mailbox changes occur for a minute

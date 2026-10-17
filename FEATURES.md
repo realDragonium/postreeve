@@ -29,6 +29,14 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Reauthorize Gmail | Complete | Partial | `request_reauthorization` provides human guidance; Google login and consent remain interactive UI steps. |
 | Remove an account and its local history | Complete | Not covered | No matching WebMCP tool exists. Removing an account through the UI never deletes provider mail. |
 
+## Owner sign-in
+
+| Feature | Web UI | WebMCP | WebMCP tool or reason |
+| --- | --- | --- | --- |
+| Claim a new instance with the setup token | Complete | Not covered | Owner setup happens before any page tools register. |
+| Sign in with a passkey or the password | Complete | Not covered | WebMCP tools run inside the signed-in page and use its session; they never sign in. |
+| Manage passkeys, the password and sessions | Complete | Not covered | **Settings → Security** is a human-only workflow; no tool may change the owner's credentials. |
+
 ## Folders and mailbox navigation
 
 | Feature | Web UI | WebMCP | WebMCP tool or reason |

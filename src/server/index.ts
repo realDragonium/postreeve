@@ -1,9 +1,7 @@
 import { defaultRetentionPolicy } from "../shared/synchronization";
 import { DEFAULT_MAX_UPLOAD_BYTES, DEFAULT_MAX_MESSAGE_BYTES } from "./mail/outgoing-content";
-import { serveStatic } from "hono/bun";
-import { Hono } from "hono";
 import { z } from "zod";
-import { createApi } from "./api";
+import { createServerApp } from "./app";
 import { PostreeveService } from "./core/postreeve";
 import { Store } from "./db/store";
 import { GoogleOAuth } from "./google/oauth";
@@ -13,9 +11,8 @@ import { MailProviderRegistry } from "./mail/provider";
 import { MailSendPreDispatchError, MailSenderRegistry } from "./mail/sender";
 import { SmtpMailSender } from "./mail/smtp";
 import { CredentialVault } from "./security/credentials";
-import { desktopApiAuthentication } from "./security/desktop-auth";
-import { postreeveSecureHeaders } from "./security/headers";
-import { allowedHostGuard, sameOriginGuard } from "./security/request-origin";
+import { OwnerAuth } from "./security/owner-auth";
+import { parsePublicUrl, parseTrustProxy } from "./security/request-context";
 
 const store = new Store();
 const providers = new MailProviderRegistry();
@@ -40,6 +37,16 @@ const serverConfig = z.object({
   hostname: process.env.POSTREEVE_HOST ?? "127.0.0.1",
   port: process.env.PORT ?? "3000",
   maxAttachmentBytes: process.env.POSTREEVE_MAX_ATTACHMENT_BYTES ?? String(25 * 1024 * 1024),
+});
+const desktopToken = process.env.POSTREEVE_DESKTOP_TOKEN;
+const auth = new OwnerAuth({
+  store: store.owner,
+  trust: {
+    publicUrl: parsePublicUrl(process.env.POSTREEVE_PUBLIC_URL),
+    trustProxy: parseTrustProxy(process.env.POSTREEVE_TRUST_PROXY),
+  },
+  setupToken: process.env.POSTREEVE_SETUP_TOKEN,
+  desktopToken,
 });
 const googleOAuth = googleClientId && googleClientSecret
   ? new GoogleOAuth(
@@ -96,22 +103,21 @@ await service.recoverInterruptedDraftSends();
 await service.initialize();
 service.synchronization.start();
 
-const desktopToken = process.env.POSTREEVE_DESKTOP_TOKEN;
-const app = new Hono();
-app.use("*", postreeveSecureHeaders);
-app.use("*", allowedHostGuard(serverConfig.hostname));
-// With a desktop token every API write is already authenticated, and the protocol proxy forwards a postreeve:// Origin.
-if (!desktopToken?.trim()) app.use("/api/*", sameOriginGuard());
-app.use("/api/*", desktopApiAuthentication(desktopToken));
-app.route("/", createApi(service, googleOAuth, {
-  oauthReturnUrl: process.env.POSTREEVE_DESKTOP_URL,
-}));
-app.use("/*", serveStatic({ root: "./dist" }));
-app.get("/*", serveStatic({ path: "./dist/index.html" }));
+const app = createServerApp({
+  service,
+  auth,
+  hostname: serverConfig.hostname,
+  googleOAuth,
+  desktopToken,
+  api: { oauthReturnUrl: process.env.POSTREEVE_DESKTOP_URL },
+  staticRoot: "./dist",
+});
 
 // The mailbox event stream sends a keep-alive every 15 seconds, so idle connections must outlive that.
 const server = Bun.serve({ hostname: serverConfig.hostname, port: serverConfig.port, idleTimeout: 60, fetch: app.fetch });
 console.info(`Postreeve listening on http://${server.hostname}:${server.port}`);
+const setupToken = auth.desktop ? null : auth.setupTokenToLog();
+if (setupToken) console.info(`Postreeve has no owner yet. Setup token for this run: ${setupToken}`);
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {

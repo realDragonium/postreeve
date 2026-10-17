@@ -1,5 +1,5 @@
 import { mailboxQuerySchema } from "../../src/shared/mailbox-query";
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { expect, stubOwnerSession, test, type Page, type Route } from "./support/owner-session";
 import {
   createFolderInputSchema,
   createAccountInputSchema,
@@ -1575,6 +1575,7 @@ test("uploads binary files, retries failures, and reopens them in another client
   expect(fixture.drafts[0]?.body).toBe("Edited after the upload response was lost.");
   const second = await browser.newPage();
   try {
+    await stubOwnerSession(second);
     await wire(second);
     await second.goto("/");
     await second.getByRole("button", { name: /Drafts/ }).click();

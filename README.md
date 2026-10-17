@@ -23,13 +23,35 @@ bun run verify
 bun run start
 ```
 
-Open [http://127.0.0.1:3000](http://127.0.0.1:3000). A new installation starts empty and asks you to connect an email account.
+Open [http://localhost:3000](http://localhost:3000). A new installation first asks you to claim it as its owner (see [Sign-in](#sign-in)), then to connect an email account.
 
 `bun run setup:local` creates an ignored `.env`, generates a 32-byte encryption key without printing it, and prepares the local data directory. Keep that `.env` backed up securely. Existing encrypted account credentials cannot be recovered if `POSTREEVE_MASTER_KEY` is lost or changed.
 
-Postreeve binds to `127.0.0.1` by default because the web interface does not have authentication yet. Do not expose it to a public or shared network.
+Postreeve binds to `127.0.0.1` by default. Serve it to other machines only over https with `POSTREEVE_PUBLIC_URL` set (see [Hosting](#hosting)).
 
-To block pages that rebind their own domain to your machine, the server only answers requests addressed to `127.0.0.1`, `localhost` or `[::1]` (on any port), plus the address in `POSTREEVE_HOST` when it names one, and it rejects API writes sent from another site. Binding to `0.0.0.0` therefore still accepts only loopback names; set `POSTREEVE_HOST` to the exact address or hostname you browse to if you deliberately serve it elsewhere.
+To block pages that rebind their own domain to your machine, the server only answers requests addressed to `127.0.0.1`, `localhost` or `[::1]` (on any port), plus the address in `POSTREEVE_HOST` when it names one and the host of `POSTREEVE_PUBLIC_URL`, and it rejects API writes sent from another site. Binding to `0.0.0.0` therefore still accepts only those names.
+
+### Sign-in
+
+Postreeve has one owner, and every API call, including the live event stream and attachment downloads, needs the owner's session. Only `GET /api/health` and the sign-in endpoints are public.
+
+On first start without an owner, the server logs `Postreeve has no owner yet. Setup token for this run: …`. Open Postreeve, enter that token and choose a password of at least 12 characters. Set `POSTREEVE_SETUP_TOKEN` (16 characters or more) instead to choose the token yourself; the server never logs a token from the environment. The token stops working once the owner exists, so a stranger who finds a fresh public instance cannot claim it.
+
+Right after setup Postreeve offers to add a passkey. Passkeys are the primary sign-in and the password is the fallback. Passkeys need a domain name over a secure connection, so they work at `http://localhost:3000` and at the `POSTREEVE_PUBLIC_URL` address, not at `http://127.0.0.1:3000`. A passkey belongs to the address it was created on. **Settings → Security** adds and removes passkeys, changes the password (which signs out every other session), lists sessions, signs out one or all other sessions, and signs out.
+
+Sessions end after 7 days without use and 30 days after sign-in at the latest. The session cookie is `HttpOnly` and `SameSite=Lax`, and `Secure` over https. The database stores only a hash of each session token and an argon2id hash of the password. After 5 failed attempts in 15 minutes a client must wait; after 50 failed password or setup attempts from all clients, password sign-in pauses for everyone while passkeys keep working.
+
+Lost both the password and every passkey? Stop Postreeve, run `sqlite3 data/postreeve.sqlite "DELETE FROM owner; DELETE FROM owner_sessions; DELETE FROM owner_passkeys;"`, and start it again to get a new setup token. Mail accounts and history are kept.
+
+The desktop app does not use owner sign-in; its per-launch token authenticates it.
+
+### Hosting
+
+| Variable | Purpose |
+| --- | --- |
+| `POSTREEVE_PUBLIC_URL` | The https origin people open, for example `https://postreeve.fly.dev`. Its host is accepted by the host check, it is the passkey origin and relying party, and session cookies are `Secure` there. |
+| `POSTREEVE_TRUST_PROXY` | Set to `1` behind a reverse proxy such as Fly.io so the server believes `Fly-Forwarded-Proto`/`X-Forwarded-Proto` and `Fly-Client-IP`/`X-Forwarded-For`. Leave it unset when clients reach Postreeve directly, or they could forge these headers. |
+| `POSTREEVE_SETUP_TOKEN` | Optional fixed setup token for claiming a new instance. |
 
 ## Desktop app
 
@@ -101,7 +123,7 @@ bun run setup:local
 docker compose up --build
 ```
 
-Docker Compose publishes Postreeve only on `127.0.0.1:3000` and stores SQLite data in the `postreeve-data` volume.
+Docker Compose publishes Postreeve only on `127.0.0.1:3000` and stores SQLite data in the `postreeve-data` volume. Find the setup token for a new instance with `docker compose logs postreeve`.
 
 ## Commands
 

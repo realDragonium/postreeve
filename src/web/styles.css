@@ -354,3 +354,11 @@ legend { padding: 0 6px; font-size: 10px; font-weight: 500; letter-spacing: .1em
 }
 .recipient-suggestions li { padding: 4px 8px; font-size: 11px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .recipient-suggestions li.on { background: var(--sel); }
+
+/* ── Owner sign-in ─────────────────────────────────────────────────── */
+.auth-screen { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; background: var(--bg); }
+.auth-card { width: 100%; max-width: 380px; display: grid; gap: 14px; }
+.auth-title { font-size: 20px; font-weight: 600; color: var(--ink); margin: 6px 0 0; }
+.auth-form { display: grid; gap: 12px; }
+.auth-form .btn, .auth-form .chip, .auth-primary { justify-content: center; height: 30px; }
+.auth-actions { display: flex; align-items: center; gap: 16px; }

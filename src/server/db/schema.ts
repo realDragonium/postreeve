@@ -299,3 +299,33 @@ export const messageLocations = sqliteTable("message_locations", {
   uniqueIndex("message_locations_tenant_account_provider_mailbox_location_key_unique")
     .on(table.tenantId, table.accountId, table.provider, table.mailbox, table.locationKey),
 ]);
+
+export const owner = sqliteTable("owner", {
+  id: integer("id").primaryKey(),
+  passwordHash: text("password_hash").notNull(),
+  webauthnUserId: text("webauthn_user_id").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [check("owner_single_row_check", sql`${table.id} = 1`)]);
+
+export const ownerPasskeys = sqliteTable("owner_passkeys", {
+  id: text("id").primaryKey(),
+  name: text("name").notNull(),
+  publicKey: blob("public_key", { mode: "buffer" }).notNull(),
+  counter: integer("counter").notNull(),
+  transports: text("transports", { mode: "json" }).$type<string[]>().notNull(),
+  deviceType: text("device_type").notNull(),
+  backedUp: integer("backed_up", { mode: "boolean" }).notNull(),
+  createdAt: text("created_at").notNull(),
+  lastUsedAt: text("last_used_at"),
+});
+
+export const ownerSessions = sqliteTable("owner_sessions", {
+  id: text("id").primaryKey(),
+  tokenHash: text("token_hash").notNull().unique(),
+  method: text("method", { enum: ["password", "passkey"] }).notNull(),
+  userAgent: text("user_agent").notNull(),
+  createdAt: text("created_at").notNull(),
+  lastSeenAt: text("last_seen_at").notNull(),
+  expiresAt: text("expires_at").notNull(),
+}, (table) => [index("owner_sessions_expires_idx").on(table.expiresAt)]);

@@ -1,3 +1,4 @@
+import { SecurityView } from "./SecurityView";
 import { SyncStorageView } from "./SyncStorageView";
 import type { Account, Folder } from "../shared/contracts";
 import { assistantTools } from "./assistant-tools";
@@ -9,6 +10,7 @@ export const settingsSections = [
   "Assistant control",
   "Appearance",
   "Notifications",
+  "Security",
   "Keyboard shortcuts",
   "Rules & filters",
   "Sync & storage",
@@ -69,6 +71,13 @@ export interface SettingsViewProps {
 }
 
 export function SettingsView(props: SettingsViewProps) {
+  if (props.section === "Security") {
+    return <>
+      <Toolbar title="Security" meta="single owner · passkeys and password" />
+      <SecurityView />
+    </>;
+  }
+
   if (props.section === "Appearance") {
     return <>
       <Toolbar

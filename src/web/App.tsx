@@ -12,6 +12,7 @@ import { Reader } from "./Reader";
 import { conversationThread } from "./conversation-view";
 import { Sidebar } from "./Sidebar";
 import { SettingsView, settingsSections, type SettingsSection } from "./SettingsView";
+import { useOwner } from "./AuthGate";
 import { AccountSetup, ComposeModal, DraftsSheet, FolderSheet, IdentitySheet, type ComposeIntent } from "./panels";
 import {
   countLine,
@@ -92,6 +93,9 @@ function App() {
   const queryClient = useQueryClient();
   const theme = useTheme();
   const searchRef = useRef<HTMLInputElement>(null);
+  const owner = useOwner();
+  // The desktop app is authenticated by its launch token and has no owner sign-in to manage.
+  const sections = owner.desktop ? settingsSections.filter((value) => value !== "Security") : settingsSections;
 
   const [view, setView] = useState<View>("mail");
   const [section, setSection] = useState<SettingsSection>("Accounts");
@@ -580,6 +584,7 @@ function App() {
     ? accounts.find(({ id }) => id === overlay.accountId) ?? null
     : null;
   const hasAccounts = accounts.length > 0;
+  const showSecurity = view === "settings" && section === "Security" && !owner.desktop;
 
   return <div className="shell">
     <div className="topbar">
@@ -633,7 +638,7 @@ function App() {
           filter={filter}
           view={view}
           section={section}
-          sections={settingsSections}
+          sections={sections}
           onScope={changeScope}
           onFilter={(next) => { setFilter(next); setFocus(0); setSelected(new Set()); }}
           onView={(next) => { setView(next); setOpenKey(null); }}
@@ -648,13 +653,16 @@ function App() {
       </div>
 
       <div className="main">
-        {!hasAccounts && !accountsQuery.isLoading ? <div className="pad" style={{ maxWidth: 620 }}>
+        {!hasAccounts && !accountsQuery.isLoading && !showSecurity ? <div className="pad" style={{ maxWidth: 620 }}>
           <h1 style={{ fontSize: 20, marginBottom: 10 }}>Connect your email</h1>
           <p className="t-body" style={{ marginBottom: 18 }}>
             Add a Gmail account with OAuth, or the IMAP and SMTP settings from any other provider. Postreeve tests both
             connections before saving anything, and credentials stay encrypted on this server.
           </p>
           <button className="btn" onClick={() => setOverlay({ kind: "account", accountId: "new" })}>Connect account</button>
+          {owner.desktop ? null : <p className="t-dim" style={{ marginTop: 18 }}>
+            <button className="btn-quiet" onClick={() => { setView("settings"); setSection("Security"); }}>Passkeys, password and sessions</button>
+          </p>}
         </div> : null}
 
         {hasAccounts && view === "mail" ? <div className={`mail-view ${openKey ? "has-reader" : ""}`}>
@@ -743,7 +751,7 @@ function App() {
           onRetry={() => void refresh()}
         /> : null}
 
-        {hasAccounts && view === "settings" ? <SettingsView
+        {(hasAccounts || showSecurity) && view === "settings" ? <SettingsView
           section={section}
           accounts={accounts}
           foldersByAccount={foldersByAccount}

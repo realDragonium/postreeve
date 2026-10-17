@@ -1,6 +1,6 @@
 import { mailboxQuerySchema } from "../shared/mailbox-query";
 import { zValidator } from "@hono/zod-validator";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
 import {
@@ -60,6 +60,9 @@ const EVENT_KEEP_ALIVE_MS = 15_000;
 
 export interface ApiOptions {
   readonly oauthReturnUrl?: string | undefined;
+  /** Rechecked on every keep-alive so an event stream ends when its session is revoked or expires. */
+  readonly stillAuthorized?: (context: Context) => boolean;
+  readonly eventKeepAliveMs?: number;
   readonly discoverAccount?: DiscoverAccount;
 }
 
@@ -89,7 +92,13 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
       const unsubscribe = service.synchronization.events.subscribe(event => {
         void stream.writeSSE({ data: JSON.stringify(event) }).catch(ignore);
       });
-      const keepAlive = setInterval(() => { void stream.write(": keep-alive\n\n").catch(ignore); }, EVENT_KEEP_ALIVE_MS);
+      const keepAlive = setInterval(() => {
+        if (options.stillAuthorized && !options.stillAuthorized(context)) {
+          stream.abort();
+          return;
+        }
+        void stream.write(": keep-alive\n\n").catch(ignore);
+      }, options.eventKeepAliveMs ?? EVENT_KEEP_ALIVE_MS);
       keepAlive.unref();
       try {
         await stream.write(": connected\n\n");

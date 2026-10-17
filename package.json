@@ -23,6 +23,8 @@
   },
   "dependencies": {
     "@hono/zod-validator": "latest",
+    "@simplewebauthn/browser": "^13.3.0",
+    "@simplewebauthn/server": "^13.3.3",
     "@tailwindcss/vite": "latest",
     "@tanstack/react-query": "latest",
     "dompurify": "latest",
@@ -55,6 +57,9 @@
     "electron-builder": "^26.15.3",
     "typescript": "latest",
     "vite": "latest"
+  },
+  "overrides": {
+    "@peculiar/asn1-schema": "2.11.0"
   },
   "build": {
     "appId": "nl.dragonium.postreeve",

@@ -1,6 +1,7 @@
 import { mailboxPageSchema, type MailboxQueryInput, type MailboxPage } from "../shared/mailbox-query";
 import { accountHealthSchema, reauthorizationSchema, synchronizationStatusSchema } from "../shared/synchronization";
 import type { ZodType } from "zod";
+import { notifyUnauthenticated } from "./auth-api";
 import { z } from "zod";
 import {
   accountDiscoverySchema,
@@ -54,7 +55,7 @@ import {
   type UpdateAccountInput,
 } from "../shared/contracts";
 
-export type ApiErrorCode = "account_conflict" | "draft_conflict" | "draft_deleted" | "draft_not_found";
+export type ApiErrorCode = "account_conflict" | "draft_conflict" | "draft_deleted" | "draft_not_found" | "unauthenticated";
 
 export class ApiRequestError extends Error {
   readonly status: number;
@@ -80,6 +81,7 @@ function apiError(value: unknown): { message: string | null; code: ApiErrorCode 
       || value.code === "draft_conflict"
       || value.code === "draft_deleted"
       || value.code === "draft_not_found"
+      || value.code === "unauthenticated"
   )
     ? value.code
     : null;
@@ -98,6 +100,7 @@ async function request<T>(path: string, schema: ZodType<T>, init?: RequestInit):
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
     const error = apiError(body);
+    if (error.code === "unauthenticated") notifyUnauthenticated();
     throw new ApiRequestError(error.message ?? `Request failed (${response.status})`, response.status, error.code);
   }
 
@@ -128,6 +131,7 @@ async function requestAttachment(
   if (!response.ok) {
     const body: unknown = await response.json().catch(() => null);
     const error = apiError(body);
+    if (error.code === "unauthenticated") notifyUnauthenticated();
     throw new ApiRequestError(error.message ?? `Download failed (${response.status})`, response.status, error.code);
   }
   return response.blob();
