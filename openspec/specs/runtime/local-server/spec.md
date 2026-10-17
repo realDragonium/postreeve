@@ -118,7 +118,7 @@ The Compose deployment SHALL build the server image, publish container port 3000
 - **THEN** accounts and history persist in the `postreeve-data` volume
 
 ### Requirement: Requests must name an allowed host
-The server SHALL answer 403 `{ error: "Forbidden host" }` to any request whose `Host` header is missing or whose host name, ignoring case and port, is not `127.0.0.1`, `localhost`, `[::1]`, the configured `POSTREEVE_HOST` or the host name of `POSTREEVE_PUBLIC_URL`. When `POSTREEVE_TRUST_PROXY` is set and `X-Forwarded-Host` is present, its rightmost value SHALL also be one of these names. A wildcard `POSTREEVE_HOST` (`0.0.0.0` or `::`) SHALL add no name. This blocks DNS-rebinding pages from reaching the API.
+The allowed host names are `127.0.0.1`, `localhost`, `[::1]`, a non-wildcard `POSTREEVE_HOST` and the `POSTREEVE_PUBLIC_URL` host; `0.0.0.0` and `::` add none. The server SHALL answer 403 `{ error: "Forbidden host" }` when `Host` is missing or not allowed, ignoring case and port, or when the proxy is trusted and the rightmost `X-Forwarded-Host` is not allowed. This blocks DNS-rebinding pages from reaching the API.
 
 #### Scenario: Browser on loopback
 - **WHEN** a browser requests `http://127.0.0.1:3000/api/health`
@@ -145,7 +145,7 @@ The server SHALL answer 403 `{ error: "Forbidden host" }` to any request whose `
 - **THEN** the request is accepted
 
 ### Requirement: Cross-site state changes are rejected
-Unless a desktop token is configured, the server SHALL answer 403 `{ error: "Forbidden origin" }` to an `/api/*` request with a method other than `GET`, `HEAD` or `OPTIONS` whose `Origin` header is present and is neither `<scheme>://<host>` for the request's scheme and browser-facing host nor, for a request to the `POSTREEVE_PUBLIC_URL` host, that URL's origin. When `POSTREEVE_TRUST_PROXY` is `1` or `true`, the scheme and host SHALL come from the rightmost `X-Forwarded-Proto` and `X-Forwarded-Host` values when present; otherwise from the connection and `Host`.
+Unless a desktop token is configured, the server SHALL answer 403 `{ error: "Forbidden origin" }` to an `/api/*` write (any method but `GET`, `HEAD`, `OPTIONS`) whose `Origin` is present and is neither `<scheme>://<host>` of the request nor, for the `POSTREEVE_PUBLIC_URL` host, that URL's origin. Scheme and host SHALL come from the rightmost `X-Forwarded-Proto` and `X-Forwarded-Host` when `POSTREEVE_TRUST_PROXY` is `1` or `true` and they are present, else from the connection and `Host`.
 
 #### Scenario: Same-origin send
 - **WHEN** the web interface at `http://127.0.0.1:3000` posts to `/api/messages/send`
