@@ -59,7 +59,9 @@ tailscale serve status         # https://<machine>.<tailnet>.ts.net -> http://12
 curl -sf https://<machine>.<tailnet>.ts.net/api/health    # from another tailnet device
 ```
 
-This is a secure context, so passkeys (WebAuthn) work. The configuration survives reboots; remove it with `sudo tailscale serve --https=443 off`. `tailscale serve` passes the original `Host`, sets `X-Forwarded-Proto: https` and `X-Forwarded-For`, and adds `Tailscale-User-Login` for tailnet requests.
+This is a secure context, so passkeys (WebAuthn) work. The configuration survives reboots; remove it with `sudo tailscale serve --https=443 off`.
+
+What the proxy sends to Postreeve (from Tailscale's `ipn/ipnlocal/serve.go`): the original `Host`, `X-Forwarded-Host`, `X-Forwarded-Proto: https`, and `Tailscale-User-Login`/`Tailscale-User-Name` for tailnet requests. It uses Go's `httputil.ReverseProxy` with `Rewrite`. Go deletes any client-sent `X-Forwarded-*` headers before `Rewrite` runs, and Tailscale then **sets** `X-Forwarded-For` to exactly one address: the tailnet peer's IP, or the internet client's IP for Funnel. A client cannot inject entries, so the last (and only) entry is a sound rate-limit key. That holds only for traffic through Tailscale. A process on the host can reach `127.0.0.1:3000` directly with any header it likes.
 
 The certificate comes from Let's Encrypt, so the machine and tailnet names appear in public Certificate Transparency logs. That alone does not make the service reachable from the internet.
 
@@ -165,36 +167,50 @@ The public paths are fixed in `src/server/runtime/funnel-paths.ts`:
 | Path | Why it is public |
 | --- | --- |
 | `/mcp` | The MCP endpoint the connector calls |
-| `/.well-known/oauth-protected-resource` (and sub-paths) | Resource metadata the connector reads first |
+| `/.well-known/oauth-protected-resource` and sub-paths, including `/.well-known/oauth-protected-resource/mcp` | Resource metadata the connector fetches first |
 | `/.well-known/oauth-authorization-server` | Authorization server metadata |
 | `/oauth/register` | Dynamic client registration |
 | `/oauth/token` | Token exchange and refresh |
+| `/oauth/revoke` | Token revocation |
 
 `/oauth/authorize` is **not** public. The consent page needs your owner login, so the remote MCP server advertises it on the tailnet origin. When you connect claude.ai or ChatGPT, the consent page opens in your own browser, and that browser's device must be on the tailnet. The connector's servers never load it; they only call the endpoints above.
 
 Two layers enforce this:
 
 1. **Tailscale** maps only these paths on a separate Funnel port. Port 443 stays tailnet-only `tailscale serve`.
-2. **Postreeve** answers 404 to any request carrying `Tailscale-Funnel-Request` for a path outside the list, and to encoded or backslash paths. Tailscale sets that header on every Funnel request and deletes any copy a client sends, so the internet cannot forge or strip it. A missing Funnel path mapping therefore still cannot expose the UI.
+2. **Postreeve** answers a bare 404 to any request carrying `Tailscale-Funnel-Request` for a path outside the list, and to encoded or backslash paths. It honors the header whether or not `POSTREEVE_TRUST_PROXY` is set, because the header can only narrow access. Tailscale sets that header on every Funnel request and deletes any copy a client sends, so the internet cannot forge or strip it. A missing Funnel path mapping therefore still cannot expose the UI.
 
 Enable it (requires the `funnel` node attribute in your tailnet policy file):
 
 ```bash
-for path in /mcp /.well-known/oauth-protected-resource /.well-known/oauth-authorization-server /oauth/register /oauth/token; do
+for path in /mcp /.well-known/oauth-protected-resource /.well-known/oauth-authorization-server /oauth/register /oauth/token /oauth/revoke; do
   sudo tailscale funnel --bg --https=8443 --set-path="$path" "http://127.0.0.1:3000$path"
 done
 tailscale funnel status
-curl -s -o /dev/null -w '%{http_code}\n' https://<machine>.<tailnet>.ts.net:8443/api/health   # 404 from outside
+# From a device outside the tailnet (phone on mobile data):
+curl -s -o /dev/null -w '%{http_code}\n' https://<machine>.<tailnet>.ts.net:8443/.well-known/oauth-protected-resource/mcp   # 200
+curl -s -o /dev/null -w '%{http_code}\n' https://<machine>.<tailnet>.ts.net:8443/api/health                                 # 404
 ```
 
 The connector URL is `https://<machine>.<tailnet>.ts.net:8443/mcp`. Turn Funnel off with `sudo tailscale funnel --https=8443 off`.
 
 Risks you accept by enabling it:
 
-- Anyone on the internet can call these five paths. Their safety rests on the remote MCP server's OAuth (token validation, registration limits) and on the owner-login checks. Funnel traffic has no tailnet identity.
+- Anyone on the internet can call these paths. Their safety rests on the remote MCP server's OAuth (token validation, registration limits) and on the owner-login checks. Funnel traffic has no tailnet identity.
 - A connector holds a token that can read your mail and prepare actions. Only the human UI can approve proposals, but reading is enough to leak mail. Revoke the connector's grant when you stop using it.
 - The public origin is `https://<machine>.<tailnet>.ts.net:8443`, which differs from `POSTREEVE_PUBLIC_URL`. The remote MCP server's metadata and host checks must accept it.
 - Your home machine receives internet traffic, including scanners.
+
+## Same host as a mail server (poste.io, Stalwart)
+
+Postreeve can share a VPS with poste.io (and later Stalwart) that publish `25/80/443/465/587/993` on `0.0.0.0`.
+
+- **Port 443 does not conflict.** `tailscale serve` does not bind a host socket. Tailscale's netstack intercepts TCP to the machine's own Tailscale IP on serve ports before the kernel sees it (`wgengine/netstack`, `ShouldInterceptTCPPort`). Connections to the public IP on 443 still reach poste.io, and tailnet connections to `<machine>.<tailnet>.ts.net:443` reach Postreeve. As a side effect, poste.io's web UI is no longer reachable on the Tailscale IP's port 443; use its public hostname. Postreeve's own `127.0.0.1:3000` does not collide with the mail ports. Funnel traffic arrives over the tailnet, not on the public IP, so port 8443 does not conflict either. Check it after setup: from a tailnet device, `curl -sf https://<machine>.<tailnet>.ts.net/api/health` must return `{"ok":true}`, not a poste.io page.
+- **Caveat:** `tailscaled` also opens a host listener on the Tailscale IP for connections the machine makes to itself, which skip netstack. That listener can collide with a process on `0.0.0.0:443`. The result is that only the VPS's own requests to the ts.net URL may fail, and `journalctl -u tailscaled` shows the listen error. Other tailnet devices are unaffected. This is read from Tailscale's source, not tested on a host running poste.io.
+- **If tailnet devices get poste.io or a connection error on 443**, serve the app on another HTTPS port with `sudo tailscale serve --bg --https=8443 http://127.0.0.1:3000`. Then set `POSTREEVE_PUBLIC_URL=https://<machine>.<tailnet>.ts.net:8443`, and move Funnel to `--https=10000`.
+- **Keep Postreeve on its own Docker network.** Compose already creates `postreeve_default`. Do not attach Postreeve to poste.io's network, and do not attach poste.io to Postreeve's. A compromise of one container should not reach the other's internal ports.
+- **Connect to the mail server by its public hostname** (for example `mail.example.com`, IMAP 993 and SMTP 465/587), not by container name or `localhost`. That name matches poste.io's Let's Encrypt certificate, so TLS verification stays on, and the account keeps working if the mail server moves. From inside the container, the public hostname resolves to the VPS's public IP and Docker routes it back to the published ports. If your firewall blocks that hairpin, add `extra_hosts: ["mail.example.com:host-gateway"]` to the service in a `compose.override.yaml`; the name and certificate stay the same.
+- **Back up off the machine.** On one VPS, losing the box loses the mail server and Postreeve together, so local snapshots are not enough. Copy `./backups` with restic or rclone to another provider (see [Off-machine copies](#off-machine-copies)), keep the master key outside the VPS, and consider Contabo's own snapshots as a second layer. Back up poste.io's data directory with the same tool.
 
 ## Appendix: native systemd service (optional)
 

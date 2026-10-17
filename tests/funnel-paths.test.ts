@@ -13,8 +13,10 @@ describe("Funnel public-path allowlist", () => {
       "/.well-known/oauth-authorization-server",
       "/oauth/register",
       "/oauth/token",
+      "/oauth/revoke",
     ]);
     expect(isFunnelPublicPath("/.well-known/oauth-protected-resource/mcp")).toBe(true);
+    expect(isFunnelPublicPath("/oauth/revoke")).toBe(true);
     expect(isFunnelPublicPath("/oauth/authorize")).toBe(false);
     expect(isFunnelPublicPath("/mcpx")).toBe(false);
     expect(isFunnelPublicPath("/MCP")).toBe(false);
@@ -26,11 +28,11 @@ describe("Funnel public-path allowlist", () => {
     expect((await app.request("/oauth/token", { method: "POST", headers: funnel })).status).toBe(200);
   });
 
-  test("answers 404 to Funnel requests for the UI, the API, the consent page and encoded paths", async () => {
+  test("answers a bare 404 to Funnel requests for the UI, the API, the consent page and encoded paths", async () => {
     for (const path of ["/", "/index.html", "/api/health", "/api/accounts", "/oauth/authorize", "/mcp%2F..%2Fapi", "/assets/app.js"]) {
       const response = await app.request(path, { headers: funnel });
       expect(response.status).toBe(404);
-      expect(await response.json()).toEqual({ error: "Not found" });
+      expect(await response.text()).toBe("");
     }
   });
 
@@ -38,4 +40,14 @@ describe("Funnel public-path allowlist", () => {
     expect(await (await app.request("/api/accounts")).text()).toBe("reached /api/accounts");
     expect((await app.request("/oauth/authorize")).status).toBe(200);
   });
+});
+
+test("the guard does not depend on POSTREEVE_TRUST_PROXY", async () => {
+  const previous = process.env.POSTREEVE_TRUST_PROXY;
+  delete process.env.POSTREEVE_TRUST_PROXY;
+  try {
+    expect((await app.request("/api/accounts", { headers: funnel })).status).toBe(404);
+  } finally {
+    if (previous !== undefined) process.env.POSTREEVE_TRUST_PROXY = previous;
+  }
 });
