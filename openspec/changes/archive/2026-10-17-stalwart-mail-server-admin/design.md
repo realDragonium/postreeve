@@ -27,6 +27,8 @@ See proposal.md for motivation. Facts that shape the approach:
 
 **Left to Stalwart's own web admin on purpose:** network listeners and ports, TLS certificates and ACME providers, automatic DNS providers (`x:DnsServer`), the spam rule set, classifier training, DNSBLs and LLM settings, MTA routing, throttles, queues and hooks, Sieve system scripts, storage backends, clustering, tenants and roles, OIDC/LDAP directories, groups, masked email, telemetry, logs and traces, IP allow/block lists, outgoing (internal) reports, and bootstrap/recovery. These are set once per server, are dangerous to get wrong from a second UI, or have no day-to-day use for a one-person mail setup. Postreeve links to the Stalwart admin URL for them.
 
+**Spec location:** a new `server/` domain holds `mail-server-admin` and `dns-checklist`, because no existing domain (accounts are mailboxes Postreeve reads, runtime is how Postreeve itself runs) covers administering a mail server. The agent tools sit in the existing `agents/` domain, and the vault change modifies `accounts/credential-vault` in place.
+
 ## Goals / Non-Goals
 
 **Goals:**
@@ -63,6 +65,14 @@ See proposal.md for motivation. Facts that shape the approach:
 11. **Tool definitions now, registration at merge.** `src/server/stalwart/agent-tools.ts` exports `mailServerTools(services)` returning `WebMcpTool` objects with JSON Schemas made the same way as the existing tools. The WebMCP page tool set stays fixed at fifteen (agents/webmcp-tools is unchanged). When feat/remote-mcp merges, the coordinator adds these tools to its list: read-only tools under `mail:read`, `propose_mail_server_change` under `mail:propose`. This is a one-line integration, recorded here so it is not lost.
 
 12. **Fake Stalwart for tests.** `tests/support/fake-stalwart.ts` implements the used subset of `x:` methods over a `fetch` function with Stalwart's id style, encoding, error shapes (`invalidProperties`, `primaryKeyViolation`, `objectIsLinked`) and `dnsZoneFile` output copied from the real server. An opt-in `tests/stalwart-live.test.ts` runs the same service against a real instance when `POSTREEVE_STALWART_TEST_URL` and `POSTREEVE_STALWART_TEST_KEY` are set; `scripts/stalwart-test-instance.sh` boots a throwaway v0.16.26 on high loopback ports.
+
+13. **Findings from the live v0.16.26 instance**, each now handled in code or docs:
+    - A filtered `x:*/query` paged with `position` returns overlapping pages (828 trusted domains came back as 500 unique). Postreeve sends one unpaged query (Stalwart returns all ids up to its 5000 query limit) and then `get`s in chunks of 500. The fake reproduces the quirk so a regression fails the contract test.
+    - Stored settings (`x:SpamSettings`, `x:Http`) take effect only after an `x:Action` `ReloadSettings`; lookup lists after `ReloadLookupStores`. Postreeve issues the reload after each spam change and, if Stalwart refuses it (for example Pyzor cannot resolve its host on an offline machine), reports that the change is saved but not applied. Domains, accounts, lists and DKIM keys apply without a reload.
+    - Stalwart creates its default listeners (25, 443, 993, ...) only when none exist. The throwaway-instance script creates loopback listeners in recovery mode so it never binds privileged ports.
+    - Bun's TLS client cannot connect to an IP literal (no SNI name), so the mail hostname must be a hostname; Postreeve rejects an IP there.
+    - The `x:Http.allowedEndpoints` expression had no visible effect after a reload in testing, so the deployment keeps 443 closed instead of relying on it to hide the admin. That leaves MTA-STS policy hosting and autoconfig unavailable from the internet; `docs/stalwart.md` says so and how to add them later.
+14. **Where the area appears.** Settings is reachable only once Postreeve has at least one mailbox account, so the Mail server section shows up after the first account. Changing that is an `App.tsx` change owned by feat/web-ux; until then a first mailbox can be created through `POST /api/mail-servers/...` or by adding any existing account first.
 
 ## Risks / Trade-offs
 

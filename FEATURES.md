@@ -148,6 +148,25 @@ These features are not provider-backed today. Whether and how they should be exp
 | Desktop notifications for new mail | Complete | Not applicable | **Settings → Notifications** turns notifications on and mutes accounts. Unread Inbox arrivals notify while the window is in the background; clicking opens the message. Backfill and repair do not notify. Page-local presentation, not an agent workflow. |
 | Bounded preview/body retention | Complete | Complete | Defaults to 30 days since refresh and 100 MiB per account. Retained preview and searchable body text expire together. Headers, locations, canonical identities and workflow history remain retained, so recipient suggestions survive preview expiry and disappear only when the message leaves the index or its account is removed; this is not a total database-size limit. |
 
+## Mail server (Stalwart)
+
+The Mail server tools are shared agent tool definitions (`src/server/stalwart/agent-tools.ts`) for the remote agent layer; they are not part of the page's WebMCP tool set below.
+
+| Feature | Web UI | Agent tools | Tool or reason |
+| --- | --- | --- | --- |
+| Connect, edit and disconnect a Stalwart server | Complete | Not covered | Credentials are entered only by the owner. |
+| List domains, mailboxes, aliases, lists and catch-all | Complete | Complete | `list_mail_servers`, `list_mail_server_domains` |
+| Add and delete domains, set catch-all | Complete | Proposal only | `propose_mail_server_change`; deletion needs the name typed at approval. |
+| Create, edit, delete mailboxes and aliases | Complete | Proposal only | Agents never set passwords; the owner enters them at approval. |
+| Add a mailbox as a Postreeve account via app password | Complete | Proposal only | `createMailbox` with `addToPostreeve`. |
+| Mailing lists | Complete | Proposal only | |
+| DKIM keys | Complete | Proposal only | Private keys are generated in Postreeve, sent to Stalwart once and never stored or returned. |
+| DNS checklist with live verification | Complete | Complete | `check_mail_server_dns` |
+| Delivery queue: view, retry, cancel | Complete | Partial | `inspect_mail_server_queue`; retry and cancel are proposal operations. |
+| Received DMARC and TLS reports | Complete | Not covered | |
+| Spam thresholds and trusted/blocked domains | Complete | Proposal only | Threshold changes are proposal operations; list edits are UI only. |
+| Approve or reject a mail server proposal | Complete | Not available | Only the human-facing UI approves. |
+
 ## Current WebMCP tool set
 
 The following tools are discoverable only while the Postreeve page is open:

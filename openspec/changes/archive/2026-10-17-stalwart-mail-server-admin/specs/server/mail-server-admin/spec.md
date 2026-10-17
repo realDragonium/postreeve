@@ -7,7 +7,7 @@ Lets the owner run their Stalwart Mail Server from Postreeve: connect it, then m
 ## ADDED Requirements
 
 ### Requirement: Connect a Stalwart server
-The system SHALL let the user connect a Stalwart server by name, admin base URL and either an API key or an admin username and password. Before saving, it SHALL fetch the JMAP session and run a domain query with that credential, and SHALL save nothing if either fails. The admin URL MUST use `https`, except for loopback, private, or Tailscale (`100.64.0.0/10`, `*.ts.net`) hosts, which may use `http`.
+The system SHALL let the user connect a Stalwart server by name, admin base URL and either an API key or an admin username and password. Before saving, it SHALL fetch the JMAP session and run a domain query with that credential, and SHALL save nothing if either fails. The admin URL MUST use `https`, except for loopback, private-network (including single-label names such as a Docker service) or Tailscale (`100.64.0.0/10`, `*.ts.net`) hosts, which may use `http`.
 
 #### Scenario: Valid API key
 - **WHEN** the user connects `https://mail-admin.example.ts.net` with a working API key
@@ -20,6 +20,10 @@ The system SHALL let the user connect a Stalwart server by name, admin base URL 
 #### Scenario: Plain HTTP to a public host
 - **WHEN** the user enters `http://mail.example.com`
 - **THEN** the request fails before any connection with a message that the admin URL must use HTTPS
+
+#### Scenario: IP address as mail hostname
+- **WHEN** the user enters `203.0.113.5` as the mail hostname
+- **THEN** the request fails with a message to use the server's hostname, because IMAP and SMTP TLS need a name
 
 #### Scenario: Server that is not Stalwart 0.16 or later
 - **WHEN** the session lacks the `urn:stalwart:jmap` capability
@@ -154,11 +158,15 @@ The system SHALL list the DMARC aggregate and TLS reports Stalwart received, new
 - **THEN** the list shows the reporter, the date range and `8 pass · 2 fail`
 
 ### Requirement: Spam basics
-The system SHALL show and let the user change Stalwart's spam filter switch and the spam, reject and discard score thresholds, and SHALL let the user add and remove trusted and blocked sender domains. A threshold of 0 SHALL mean that action is off.
+The system SHALL show and let the user change Stalwart's spam filter switch and the spam, reject and discard score thresholds, and SHALL let the user add and remove trusted and blocked sender domains, asking Stalwart to reload after each change so it takes effect. A threshold of 0 SHALL mean that action is off. Lists SHALL be returned complete however long they are.
 
 #### Scenario: Raise the spam threshold
 - **WHEN** the user sets the spam threshold to 6
 - **THEN** Stalwart's spam settings have `scoreSpam` 6 and the other settings are unchanged
+
+#### Scenario: Stalwart cannot apply the change
+- **WHEN** Stalwart stores the new threshold but refuses to reload its settings
+- **THEN** the request fails with a message that the change is saved but not yet applied, naming Stalwart's reason
 
 #### Scenario: Block a domain
 - **WHEN** the user adds `spam.example` to blocked domains

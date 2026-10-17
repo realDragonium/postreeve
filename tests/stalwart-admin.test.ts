@@ -62,6 +62,22 @@ describe("connecting a Stalwart server", () => {
     store.close();
   });
 
+  test("keeps servers across a database reopen without migrating twice", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const dir = mkdtempSync(join(tmpdir(), "postreeve-mail-servers-"));
+    const path = join(dir, "test.sqlite");
+    const now = new Date().toISOString();
+    const first = new Store(path);
+    first.mailServers.insertServer({ id: crypto.randomUUID(), name: "A", baseUrl: ADMIN_URL, credentialKind: "apiKey", mailHostname: "mail.example.org", createdAt: now, updatedAt: now, encryptedCredential: "{}" });
+    first.close();
+    const second = new Store(path);
+    expect(second.mailServers.listServers().map(({ name }) => name)).toEqual(["A"]);
+    second.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   test("accepts admin username and password as Basic auth", async () => {
     const { admin } = harness();
     const server = await admin.connect({ name: "Basic", baseUrl: ADMIN_URL, credential: { kind: "basic", username: "admin@example.org", password: "admin-password" } });
@@ -340,12 +356,17 @@ describe("mailing lists, DKIM, queue, reports and spam", () => {
     const { admin, fake, server } = await withDomain();
     expect(await admin.updateSpamSettings(server.id, { spamThreshold: 6 })).toEqual({ enabled: true, spamThreshold: 6, rejectThreshold: 0, discardThreshold: 0 });
     expect(fake.objects.get("SpamSettings")!.get("singleton")).toMatchObject({ scoreSpam: 6, trustContacts: true, greylistFor: null });
+    expect(fake.list("Action").map((action) => action["@type"])).toEqual(["ReloadSettings"]);
+    fake.failNext.set("x:Action/set", { type: "validationFailed", description: "Invalid address" });
+    await expect(admin.updateSpamSettings(server.id, { rejectThreshold: 15 })).rejects.toThrow("Saved in Stalwart, but it could not apply the change yet");
+    expect(fake.objects.get("SpamSettings")!.get("singleton")).toMatchObject({ scoreReject: 15 });
     const entry = await admin.addSpamListEntry(server.id, "blocked", { domain: "Spam.Example.com" });
     expect(await admin.spamList(server.id, "blocked")).toEqual([{ id: entry.id, domain: "spam.example.com" }]);
     expect((await admin.spamList(server.id, "trusted")).map(({ domain }) => domain)).toEqual(["gmail.com", "outlook.com"]);
     await expect(admin.removeSpamListEntry(server.id, "trusted", entry.id)).rejects.toThrow("not found in that list");
     await admin.removeSpamListEntry(server.id, "blocked", entry.id);
     expect(await admin.spamList(server.id, "blocked")).toEqual([]);
+    expect(fake.list("Action").filter((action) => action["@type"] === "ReloadLookupStores")).toHaveLength(2);
   });
 
   test("returns every entry of a long list despite Stalwart's paging quirk", async () => {

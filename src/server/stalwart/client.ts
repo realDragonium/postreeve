@@ -259,7 +259,10 @@ export class StalwartClient {
     if (input.spamThreshold !== undefined) patch.scoreSpam = input.spamThreshold;
     if (input.rejectThreshold !== undefined) patch.scoreReject = input.rejectThreshold;
     if (input.discardThreshold !== undefined) patch.scoreDiscard = input.discardThreshold;
-    if (Object.keys(patch).length > 0) await this.jmap.update("SpamSettings", "singleton", patch);
+    if (Object.keys(patch).length > 0) {
+      await this.jmap.update("SpamSettings", "singleton", patch);
+      await this.reload("ReloadSettings");
+    }
     return this.spamSettings();
   }
 
@@ -271,6 +274,7 @@ export class StalwartClient {
 
   async addSpamListEntry(list: SpamListName, domain: string): Promise<SpamListEntry> {
     const created = await this.jmap.create("MemoryLookupKey", { namespace: spamNamespaces[list], key: domain, isGlobPattern: false });
+    await this.reload("ReloadLookupStores");
     return { id: text(created.id), domain };
   }
 
@@ -278,6 +282,17 @@ export class StalwartClient {
     const [entry] = await this.jmap.get("MemoryLookupKey", [id], ["namespace"]);
     if (!entry || entry.namespace !== spamNamespaces[list]) throw new MailServerError("Entry not found in that list", 404);
     await this.jmap.destroy("MemoryLookupKey", [id]);
+    await this.reload("ReloadLookupStores");
+  }
+
+  /** Stored settings take effect only after a reload; data objects such as domains and accounts do not need one. */
+  async reload(action: "ReloadSettings" | "ReloadLookupStores"): Promise<void> {
+    try {
+      await this.jmap.create("Action", { "@type": action });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message.replace(/^.*could not create the Action: /, "") : "unknown reason";
+      throw new MailServerError(`Saved in Stalwart, but it could not apply the change yet: ${reason}. Fix that in Stalwart's admin, then reload its settings there.`, 409);
+    }
   }
 }
 
