@@ -62,6 +62,11 @@ import {
   createProposalInputSchema,
   deleteFolderInputSchema,
   directActionInputSchema,
+  emptyFolderInputSchema,
+  permanentDeleteInputSchema,
+  type EmptyFolderInput,
+  type PermanentDeleteInput,
+  type PermanentDeleteResult,
   draftSchema,
   draftFileUploadSchema,
   draftVersionInputSchema,
@@ -1459,6 +1464,34 @@ export class PostreeveService {
     const dispatched = await this.#dispatchMessageSend(prepared);
     const receipt = await this.#saveSentCopy(prepared.account, dispatched.receipt, dispatched.mime);
     return { method: "mailto", target: mail.address, receipt };
+  }
+
+  /**
+   * Human-only: the UI confirms first, and nothing an agent can call reaches this. It records no batch because a
+   * permanent delete cannot be undone.
+   */
+  async deletePermanently(rawInput: PermanentDeleteInput): Promise<PermanentDeleteResult> {
+    const input = permanentDeleteInputSchema.parse(rawInput);
+    const account = await this.#requireAccount(input.accountId);
+    if (input.messages.some(({ accountId }) => accountId !== input.accountId)) {
+      throw new Error("Every message must belong to the selected account");
+    }
+    const provider = this.#providers.forAccount(input.accountId);
+    if (!provider.deletePermanently) throw new Error("This account cannot delete mail permanently");
+    const deleted = await provider.deletePermanently(input.accountId, input.messages);
+    this.#store.synchronization.confirmedRemoval({ tenantId: this.#context.tenantId, accountId: account.id, provider: account.kind }, input.messages);
+    return { deleted };
+  }
+
+  /** Human-only, like `deletePermanently`. */
+  async emptyFolder(rawInput: EmptyFolderInput): Promise<PermanentDeleteResult> {
+    const input = emptyFolderInputSchema.parse(rawInput);
+    const account = await this.#requireAccount(input.accountId);
+    const provider = this.#providers.forAccount(input.accountId);
+    if (!provider.emptyFolder) throw new Error("This account cannot delete mail permanently");
+    const deleted = await provider.emptyFolder(input.accountId, input.path);
+    this.#store.synchronization.confirmedMailboxCleared({ tenantId: this.#context.tenantId, accountId: account.id, provider: account.kind }, input.path);
+    return { deleted };
   }
 
   async applyDirectActions(rawInput: DirectActionInput): Promise<OperationBatch> {

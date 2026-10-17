@@ -16,6 +16,8 @@ import {
   deleteFolderInputSchema,
   discoverAccountInputSchema,
   directActionInputSchema,
+  emptyFolderInputSchema,
+  permanentDeleteInputSchema,
   draftIdSchema,
   draftFileUploadSchema,
   draftVersionInputSchema,
@@ -351,6 +353,17 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
         context.req.valid("query").accountId)))
     .post("/messages/send", zValidator("json", sendMessageInputSchema), async (context) =>
       context.json(await service.sendMessage(context.req.valid("json")), 201))
+    .post("/messages/delete-permanently", zValidator("json", permanentDeleteInputSchema), async (context) =>
+      context.json(await service.deletePermanently(context.req.valid("json"))))
+    .post(
+      "/accounts/:accountId/folders/empty",
+      zValidator("param", accountParamsSchema),
+      zValidator("json", emptyFolderInputSchema.omit({ accountId: true })),
+      async (context) => context.json(await service.emptyFolder({
+        accountId: context.req.valid("param").accountId,
+        ...context.req.valid("json"),
+      })),
+    )
     .post("/messages/unsubscribe", zValidator("json", unsubscribeInputSchema), async (context) =>
       context.json(await service.unsubscribe(context.req.valid("json"))))
     .post("/messages/actions", zValidator("json", directActionInputSchema), async (context) =>

@@ -1,0 +1,7 @@
+# Design
+
+## Decisions
+
+1. **Self-host the font instead of widening the CSP.** Adding `fonts.googleapis.com` and `fonts.gstatic.com` would touch the auth branch's `headers.ts`, send a request to Google on every launch, and still fail offline in the installed app. Bundled woff2 files are content-hashed under `/assets/`, so the service worker caches them like the rest of the shell. Each weight's CSS carries `unicode-range`, so only the Latin subset downloads for most mail.
+2. **Root cause of the identity race.** The migration starts as soon as accounts load, at the same moment as the first identities fetch. When it finishes while that first fetch is still in flight, TanStack Query's `invalidateQueries` does not restart the fetch: it only cancels a fetching query that already has data, otherwise it returns the in-flight promise. The pre-migration empty list then stays cached and nothing refetches. `refetchAfterMigration` calls `cancelQueries` first, then `invalidateQueries`. Drafts migration had the same pattern and gets the same fix.
+3. **Compose follows late identities.** Independently of the migration, a slow identities request could open a reply before the list arrived; `from` was computed once at mount. An effect now moves an untouched From to the recomputed default and swaps the signature with it. A From the person chose, a saved draft's identity, or a locked delivery is never changed.

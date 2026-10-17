@@ -33,6 +33,9 @@ import {
   recipientSuggestionSchema,
   sendReceiptSchema,
   unsubscribeResultSchema,
+  permanentDeleteConfirmation,
+  permanentDeleteResultSchema,
+  type PermanentDeleteResult,
   type Account,
   type AccountDiscovery,
   type AccountSettings,
@@ -346,6 +349,18 @@ export const api = {
       method: "POST",
       ...jsonBody(input),
       ...withSignal(signal),
+    }),
+  /** Call only after the person confirmed in the UI; there is no undo. */
+  deletePermanently: (accountId: string, messages: readonly MessageRef[]): Promise<PermanentDeleteResult> =>
+    request("/messages/delete-permanently", permanentDeleteResultSchema, {
+      method: "POST",
+      ...jsonBody({ accountId, messages, confirm: permanentDeleteConfirmation }),
+    }),
+  /** Call only after the person confirmed in the UI; there is no undo. */
+  emptyFolder: (accountId: string, path: string): Promise<PermanentDeleteResult> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/folders/empty`, permanentDeleteResultSchema, {
+      method: "POST",
+      ...jsonBody({ path, confirm: permanentDeleteConfirmation }),
     }),
   unsubscribe: (input: UnsubscribeInput): Promise<UnsubscribeResult> =>
     request("/messages/unsubscribe", unsubscribeResultSchema, { method: "POST", ...jsonBody(input) }),

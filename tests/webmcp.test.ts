@@ -573,6 +573,20 @@ describe("Postreeve WebMCP", () => {
     await expect(tool.execute({ accountId: account.id }, executeOptions())).rejects.toThrow();
   });
 
+  test("offers no tool or action that deletes mail permanently", async () => {
+    const tools = createPostreeveWebMcpTools(new FakeServices());
+    const contract = JSON.stringify(tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema }))).toLowerCase();
+    expect(contract).not.toContain("expunge");
+    expect(contract).not.toContain("delete_permanently");
+    expect(contract).not.toContain("empty_folder");
+    expect(tools.map(({ name }) => name).filter((name) => /delete|purge|empty/.test(name))).toEqual(["delete_folder"]);
+    const actions = tools.find(({ name }) => name === "apply_message_actions");
+    await expect(actions!.execute({
+      accountId: account.id,
+      items: [{ message: messageRef, subject: message.subject, action: { type: "delete" } }],
+    }, executeOptions())).rejects.toThrow();
+  });
+
   test("rejects message results without a canonical ID", async () => {
     class MissingCanonicalIdServices extends FakeServices {
       override async listMessages(

@@ -102,8 +102,8 @@ The system SHALL treat archiving as a `move` to the account's folder whose `spec
 - **WHEN** the open message's account has no folder with `specialUse` `archive`
 - **THEN** the Archive button is disabled with the title `This account has no Archive folder`
 
-### Requirement: Trash moves to the provider's Trash and nothing is permanently deleted
-The system SHALL apply `trash` by moving the message to the provider's Trash: the IMAP mailbox with the special-use `\Trash` attribute, or Gmail's trash operation. An IMAP account without such a mailbox SHALL fail the item with `This account has no discoverable special-use Trash mailbox`. No action, endpoint or tool SHALL permanently delete or expunge a message. The UI SHALL disable Trash when the account has no Trash folder or the open message is already in Trash.
+### Requirement: Trash moves to the provider's Trash and never deletes
+The system SHALL apply `trash` by moving the message to the provider's Trash: the IMAP special-use `\Trash` mailbox, or Gmail's trash operation. An IMAP account without one SHALL fail the item with `This account has no discoverable special-use Trash mailbox`. No action type, proposal or agent tool SHALL expunge a message. The UI SHALL disable Trash when the account has no Trash folder or the message is already in Trash.
 
 #### Scenario: Trash an IMAP message
 - **WHEN** a person trashes an IMAP message and the account has a `\Trash` mailbox
@@ -114,7 +114,7 @@ The system SHALL apply `trash` by moving the message to the provider's Trash: th
 - **THEN** the reader's Trash control is disabled and labelled `In Trash`
 
 ### Requirement: Action controls in the web UI
-The UI SHALL offer Archive, Mark read or Mark unread, Flag or Unflag, Move to… and Trash for the open message in the reader, and Archive, Mark read, Unread, Flag, Unflag, Move and Trash for the selection (or the focused message when nothing is selected) in the message list, plus the `e` (archive), `u` (toggle read) and `s` (toggle flag) shortcuts. Move destinations SHALL exclude the Trash folder, and in the reader also the message's current folder.
+The UI SHALL offer Archive, Mark read or Mark unread, Flag or Unflag, Move to… and Trash for the open message in the reader and for the selection, or else the focused message, in the list, plus the `e`, `u`, `Shift+U`, `s` and `#` shortcuts (runtime/web-shell). Move destinations SHALL exclude Trash, and in the reader also the message's current folder.
 
 #### Scenario: Reader move menu
 - **WHEN** a person opens the Move to… menu for an inbox message
@@ -123,6 +123,10 @@ The UI SHALL offer Archive, Mark read or Mark unread, Flag or Unflag, Move to…
 #### Scenario: Flag with the keyboard
 - **WHEN** a person presses `s` on a focused unflagged message
 - **THEN** the UI sends a `flag` action for that message
+
+#### Scenario: Mark unread with the keyboard
+- **WHEN** a person presses `Shift+U` on a focused read message
+- **THEN** the UI sends a `mark_unread` action for that message
 
 ### Requirement: Feedback after a UI action
 After a successful action the UI SHALL clear the selection, close the reader for a move or Trash, show a status (`Moved <n> to <folder>`, `Moved <n> to Trash`, `Marked <n> read`, `Marked <n> unread`, `Flagged <n>` or `Unflagged <n>`), add an undo entry and refresh the mailbox, folders and activity. A failed request SHALL show its error message.
@@ -208,3 +212,42 @@ The `!` shortcut SHALL send Not spam when the open or focused message is in the 
 #### Scenario: Modifier held
 - **WHEN** a person presses `!` with Control held
 - **THEN** no action is sent
+
+### Requirement: Permanent delete from Trash or Junk
+`POST /api/messages/delete-permanently` SHALL take `{ accountId, messages, confirm }` with 1 to 100 references of that account and `confirm` equal to `delete permanently`. It SHALL refuse the whole request when any reference is outside the account's special-use Trash or Junk folder, revalidate each reference, and expunge only the named messages. The response SHALL report `{ deleted }`. It SHALL NOT create an Activity batch or undo entry.
+
+#### Scenario: Delete a trashed message
+- **WHEN** a person deletes forever a current message in an IMAP account's Trash
+- **THEN** the server expunges that UID only and the response reports one deleted message
+
+#### Scenario: Inbox message refused
+- **WHEN** a request names a message in the Inbox
+- **THEN** the request fails with `Only messages in Trash or Spam can be deleted permanently` and nothing is deleted
+
+### Requirement: Expunge never removes other messages
+Without the IMAP `UIDPLUS` extension the system SHALL refuse a permanent delete when the folder holds `\Deleted` messages that were not named, because a plain `EXPUNGE` would remove them too.
+
+#### Scenario: Server without UIDPLUS
+- **WHEN** another client has marked a Trash message `\Deleted` and the server lacks `UIDPLUS`
+- **THEN** deleting a different Trash message fails and both messages remain
+
+### Requirement: Empty Trash and Spam
+`POST /api/accounts/<accountId>/folders/empty` SHALL take `{ path, confirm }`, accept only the account's special-use Trash or Junk folder, expunge every message in it and report `{ deleted }`.
+
+#### Scenario: Empty Trash
+- **WHEN** a person empties an IMAP account's Trash holding three messages
+- **THEN** the folder is empty and the response reports three deleted messages
+
+### Requirement: Gmail permanent delete is unavailable
+For Gmail accounts both endpoints SHALL fail with a message explaining that Postreeve's Gmail access cannot delete permanently and that Gmail removes Trash and Spam after 30 days. The UI SHALL NOT offer the controls for Gmail accounts.
+
+#### Scenario: Gmail Trash open
+- **WHEN** a person opens a Gmail account's Trash
+- **THEN** no Empty Trash control is shown and the strip explains Gmail's 30-day removal
+
+### Requirement: Permanent delete asks first
+The UI SHALL offer **Delete forever** in the reader for a message in Trash or Junk of an IMAP account, and above the list, when that folder is open, **Delete <n> forever** for a selection and **Empty Trash** or **Empty Spam**. Each SHALL open a dialog naming what will be deleted and stating that it cannot be undone, with Cancel focused, and SHALL send the request only after the person chooses the dialog's delete button.
+
+#### Scenario: Cancel
+- **WHEN** a person chooses Empty Trash and then Cancel
+- **THEN** no request is sent

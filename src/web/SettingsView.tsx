@@ -5,6 +5,8 @@ import type { Account, Folder } from "../shared/contracts";
 import { assistantTools } from "./assistant-tools";
 import { railFor, type ThemePreference } from "./theme";
 import type { NotificationAccess, NotificationPreferences } from "./notifications";
+import { shortcutGroups } from "./keyboard";
+import { ShortcutTable } from "./ShortcutHelp";
 
 export const settingsSections = [
   "Accounts",
@@ -19,22 +21,6 @@ export const settingsSections = [
 ] as const;
 
 export type SettingsSection = (typeof settingsSections)[number];
-
-const shortcuts: readonly (readonly [string, string])[] = [
-  ["↵ / click", "open the focused message"],
-  ["esc", "back to the list"],
-  ["j / ↓", "move down"],
-  ["k / ↑", "move up"],
-  ["x", "add the focused message to the selection"],
-  ["⌘-click", "add one message to the selection"],
-  ["shift-click", "select a range"],
-  ["e", "archive the selection"],
-  ["!", "move the selection to Spam, or out of Spam"],
-  ["u", "toggle read and unread"],
-  ["/", "focus the search box"],
-  ["[", "hide or show the sidebar"],
-  ["⌘Z", "undo the last batch of operations"],
-];
 
 function Toolbar({ title, meta, action }: { title: string; meta: string; action?: React.ReactNode }) {
   return <div className="toolbar">
@@ -70,6 +56,7 @@ export interface SettingsViewProps {
   onManageAccount: (accountId: string) => void;
   onManageIdentities: (accountId: string) => void;
   onAddAccount: () => void;
+  onShowShortcuts: () => void;
 }
 
 export function SettingsView(props: SettingsViewProps) {
@@ -153,19 +140,18 @@ export function SettingsView(props: SettingsViewProps) {
   }
 
   if (props.section === "Keyboard shortcuts") {
+    const count = shortcutGroups.reduce((total, group) => total + group.entries.length, 0);
     return <>
-      <Toolbar title="Keyboard shortcuts" meta={`${shortcuts.length} bindings · active in the mailbox`} />
-      <div className="readscroll"><div className="pad" style={{ "--grid-cols": "120px minmax(0,1fr)" } as React.CSSProperties}>
-        <div className="grid-head"><span className="t-sec">Key</span><span className="t-sec">Does</span></div>
-        <div className="thin" />
-        {shortcuts.map(([key, description]) => (
-          <div className="grid-row" key={key}>
-            <span className="t-ink t-num" style={{ fontSize: 11 }}>{key}</span>
-            <span className="t-body">{description}</span>
-          </div>
-        ))}
+      <Toolbar
+        title="Keyboard shortcuts"
+        meta={`${count} bindings · active in the mailbox`}
+        action={<button className="chip" onClick={props.onShowShortcuts}>Show overlay   ?</button>}
+      />
+      <div className="readscroll"><div className="pad">
+        <ShortcutTable />
         <p className="t-dim" style={{ maxWidth: 760, margin: "20px 0 0" }}>
-          Shortcuts are ignored while a text field has focus, so typing in search never triggers an operation.
+          Shortcuts are ignored while a text field or the message editor has focus and while a dialog is open, so typing never triggers an operation.
+          ⌘-click adds one message to the selection and shift-click selects a range.
         </p>
       </div></div>
     </>;

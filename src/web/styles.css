@@ -336,6 +336,32 @@ legend { padding: 0 6px; font-size: 10px; font-weight: 500; letter-spacing: .1em
 
 .side-scrim { display: none; }
 
+/* ── Error fallback and shortcut help ──────────────────────────────── */
+.crash { display: flex; flex-direction: column; gap: 10px; padding: 24px; max-width: 640px; }
+.crash-title { font-size: 15px; }
+.crash-message {
+  margin: 0; padding: 8px 10px; background: var(--field); color: var(--ink);
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.crash-actions { display: flex; align-items: center; gap: 10px; }
+.shortcut-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 18px 28px; }
+.shortcut-list { margin: 0; }
+.shortcut-row { display: grid; grid-template-columns: 92px minmax(0, 1fr); align-items: baseline; gap: 10px; padding: 4px 0; border-top: 1px solid var(--div); }
+.shortcut-row dd { margin: 0; }
+kbd { font: 500 11px/1.4 "Instrument Sans", system-ui, sans-serif; color: var(--ink); white-space: nowrap; }
+
+/* ── Attachment previews ───────────────────────────────────────────── */
+.attachment-previews { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.attachment-preview { margin: 0; }
+.attachment-preview img { display: block; max-width: 100%; max-height: 70vh; height: auto; background: var(--field); }
+.attachment-preview figcaption { margin-top: 4px; }
+
+/* ── Permanent delete ──────────────────────────────────────────────── */
+.purge-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; flex: none; padding: 8px 24px; border-bottom: 1px solid var(--div); background: var(--panel); }
+.sheet.confirm { width: min(460px, 100%); }
+.btn-destructive { background: var(--ink); color: var(--inv); }
+.btn-destructive:hover:not(:disabled) { background: var(--accent); }
+
 @media (max-width: 900px) {
   .body-grid { grid-template-columns: minmax(0, 1fr); }
   .main { grid-column: 1; }
@@ -344,6 +370,79 @@ legend { padding: 0 6px; font-size: 10px; font-weight: 500; letter-spacing: .1em
   .search { max-width: none; }
   .mail-view.has-reader .mail-list-pane { display: none; }
   .mail-view.has-reader .mail-reader-pane { flex: 1; }
+}
+
+/* Installed web apps draw under notches and home indicators; keep content inside the safe area. */
+@supports (height: 100dvh) { .shell { height: 100dvh; } }
+.shell { padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left); }
+.topbar { padding-top: env(safe-area-inset-top); height: calc(48px + env(safe-area-inset-top)); }
+.list, .readscroll, .side { padding-bottom: env(safe-area-inset-bottom); }
+.toast { bottom: calc(20px + env(safe-area-inset-bottom)); }
+
+/* Touch: every control a finger can hit is at least 44px tall. */
+@media (pointer: coarse), (max-width: 640px) {
+  :root { --row-h: 44px; }
+  .chip, .btn, .opt, .nav-row, .side-entry, .group, .frow, .load-more { min-height: 44px; }
+  .icon-button { width: 44px; height: 44px; }
+  .btn-quiet, .btn-underline, .btn-danger, .search-clear { min-height: 44px; display: inline-flex; align-items: center; }
+  .input, select.input { min-height: 44px; }
+  .check { min-height: 44px; }
+  .check input { width: 20px; height: 20px; }
+}
+
+/* Phone: one pane at a time, full-screen dialogs. */
+@media (max-width: 640px) {
+  /* 16px stops iOS from zooming into a focused field. */
+  .input, .search input, .rich-editor-content { font-size: 16px; }
+  .topbar { flex-wrap: wrap; height: auto; gap: 4px 14px; padding: env(safe-area-inset-top) 12px 8px 4px; }
+  .brand-group { gap: 4px; }
+  .tabs { margin-left: auto; }
+  .search { order: 3; flex-basis: 100%; height: 40px; max-width: none; margin-left: 8px; }
+  .side {
+    top: 0; width: min(86vw, 320px); z-index: 46;
+    padding-top: env(safe-area-inset-top); box-shadow: 0 0 32px color-mix(in srgb, #000 30%, transparent);
+  }
+  .side-scrim { inset: 0; z-index: 45; }
+  .scope { padding: 12px 12px 8px; gap: 8px 12px; }
+  .sorts { order: 3; width: 100%; margin-left: 0; overflow-x: auto; }
+  .actions { flex-wrap: wrap; margin-left: auto; }
+  .hintbar { display: none; }
+
+  /* Two-line rows: sender and time over subject and preview. */
+  .row {
+    grid-template-columns: 2px 14px minmax(0, 1fr) auto auto;
+    grid-template-areas: "rail dot sender mark time" "rail dot subject subject subject" "rail dot lead lead lead";
+    height: auto; min-height: 64px; padding: 8px 0; row-gap: 2px;
+  }
+  .row-rail { grid-area: rail; height: 100%; }
+  .row-dot { grid-area: dot; align-self: start; margin-top: 7px; }
+  .row-sender { grid-area: sender; padding-left: 4px; }
+  .row-subject { grid-area: subject; padding: 0 12px 0 4px; }
+  .row-mark { grid-area: mark; padding-right: 6px; }
+  .row-lead-wrap { grid-area: lead; display: flex; padding: 0 12px 0 4px; }
+  .row-time { grid-area: time; padding-right: 12px; }
+
+  .mail-reader-pane .toolbar { position: sticky; top: 0; z-index: 2; background: var(--bg); padding: 6px 12px; gap: 6px 12px; }
+  .mail-reader-pane .toolbar-end { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 2px; }
+  .mail-reader-pane .toolbar-end > * { flex: none; }
+  .readinner { padding: 18px 12px 32px; }
+  .msgsubj { font-size: 18px; }
+  .email-frame-shell { margin-left: -12px; width: calc(100% + 24px); }
+
+  .overlay { padding: 0; place-items: stretch; }
+  .sheet { width: 100%; min-height: 100vh; min-height: 100dvh; border: 0; box-shadow: none; }
+  .sheet.confirm { width: 100%; min-height: 0; align-self: end; }
+  .overlay:has(.sheet.confirm) { place-items: end stretch; }
+  .sheet-head { padding: calc(12px + env(safe-area-inset-top)) 12px 12px; flex-wrap: wrap; }
+  .sheet-body { flex: 1; max-height: none; padding: 14px 12px; }
+  .sheet-foot { flex-wrap: wrap; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); position: sticky; bottom: 0; background: var(--bg); }
+  .field-grid { grid-template-columns: minmax(0, 1fr); }
+  .rich-editor-content { max-height: none; min-height: 40vh; }
+  .rich-toolbar { flex-wrap: wrap; }
+
+  .toast { left: 12px; right: 12px; flex-wrap: wrap; }
+  .pad { padding: 14px 12px 28px; }
+  .purge-strip { padding: 8px 12px; }
 }
 
 /* ── Recipient suggestions ─────────────────────────────────────────── */

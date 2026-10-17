@@ -467,6 +467,42 @@ export class ImapMailProvider implements MailProvider {
     });
   }
 
+  async deletePermanently(accountId: string, references: readonly MessageRef[]): Promise<number> {
+    this.#assertAccount(accountId);
+    for (const reference of references) this.#assertReference(reference);
+    const paths = new Set(references.map(({ mailbox }) => mailbox));
+    const [path] = paths;
+    if (path === undefined) return 0;
+    if (paths.size > 1) throw new Error("Permanent delete works on one folder at a time");
+    return this.#withClient(async (client) => {
+      await assertPurgeable(client, path);
+      const opened = await client.mailboxOpen(path);
+      // Validate every message before flagging any, so a stale reference deletes nothing.
+      for (const reference of references) {
+        assertUidValidity(opened, reference);
+        assertCurrentMessage(await client.fetchOne(reference.uid, { uid: true, flags: true }, { uid: true }), reference);
+      }
+      return expungeUids(client, references.map(({ uid }) => uid));
+    });
+  }
+
+  async emptyFolder(accountId: string, path: string): Promise<number> {
+    this.#assertAccount(accountId);
+    return this.#withClient(async (client) => {
+      await assertPurgeable(client, path);
+      await client.mailboxOpen(path);
+      let deleted = 0;
+      // Bounded rounds keep a server that never confirms removal from looping forever.
+      for (let round = 0; round < MAX_EMPTY_ROUNDS; round += 1) {
+        const uids = await searchUids(client, { all: true }, EMPTY_CHUNK);
+        if (uids.length === 0) return deleted;
+        if (!await client.messageDelete(uids, { uid: true })) throw new Error("IMAP server did not confirm emptying the folder");
+        deleted += uids.length;
+      }
+      throw new Error("The folder still has messages after emptying; try again");
+    });
+  }
+
   async undo(applied: AppliedMailAction): Promise<ProviderLocationMove | null> {
     this.#assertReference(applied.current);
     this.#assertReference(applied.previous);
@@ -867,6 +903,32 @@ async function retireDraftUids(client: ImapClient, uids: readonly number[]): Pro
       }
     }
   }
+}
+
+const PURGE_REFUSAL = "Only messages in Trash or Spam can be deleted permanently";
+const EMPTY_CHUNK = 500;
+const MAX_EMPTY_ROUNDS = 400;
+
+async function assertPurgeable(client: ImapClient, path: string): Promise<void> {
+  const mailbox = (await client.list()).find((candidate) => candidate.path === path);
+  const use = mailbox ? specialUseFor(mailbox) : null;
+  if (!mailbox || hasFlag(mailbox.flags, "\\Noselect") || (use !== "trash" && use !== "junk")) throw new Error(PURGE_REFUSAL);
+}
+
+/**
+ * With UIDPLUS, `UID EXPUNGE` removes exactly these UIDs. Without it, plain `EXPUNGE` removes every `\Deleted`
+ * message in the folder, so the call refuses when another message is already marked deleted.
+ */
+async function expungeUids(client: ImapClient, uids: readonly number[]): Promise<number> {
+  if (!client.capabilities.has("UIDPLUS")) {
+    const targets = new Set(uids);
+    const marked = await searchUids(client, { deleted: true }, 100_000);
+    if (marked.some((uid) => !targets.has(uid))) {
+      throw new Error("This folder has other messages marked deleted and the server cannot remove single messages; use Empty instead");
+    }
+  }
+  if (!await client.messageDelete([...uids], { uid: true })) throw new Error("IMAP server did not confirm the permanent delete");
+  return uids.length;
 }
 
 async function exactUidExists(client: ImapClient, uid: number): Promise<boolean> {

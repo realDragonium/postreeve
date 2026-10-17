@@ -20,7 +20,7 @@ The web page SHALL register its tools with `document.modelContext`, or `navigato
 Every tool SHALL perform an operation a person can perform in the web UI, through Postreeve's server API, and SHALL NOT introduce an agent-only workflow or capability. Where the UI can do more than a tool, the tool SHALL offer the narrower operation rather than a different one. The one exception is preparing proposals, which exist so that the person accepts them in the UI.
 
 #### Scenario: No agent-only operation
-- **WHEN** an agent looks for a way to change mail that the UI does not offer, such as permanent deletion
+- **WHEN** an agent looks for a way to change mail that the UI does not offer
 - **THEN** no tool provides it
 
 ### Requirement: The person controls which tools are offered
@@ -216,3 +216,10 @@ No page or remote tool SHALL send, claim or recover a draft. Sending a draft SHA
 #### Scenario: Agent wants to send its draft
 - **WHEN** an agent lists tools
 - **THEN** no tool sends a draft
+
+### Requirement: No permanent delete tool
+No WebMCP tool SHALL delete a message permanently or empty a folder, and `apply_message_actions` SHALL NOT accept an action that does. Permanent deletion requires a human confirmation in the UI.
+
+#### Scenario: Tool list inspected
+- **WHEN** the registered tools and their input schemas are inspected
+- **THEN** none can permanently delete mail or empty a folder

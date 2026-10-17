@@ -72,6 +72,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Render sanitized HTML mail | Complete | Equivalent | WebMCP receives message content rather than rendering it. |
 | Block remote images in displayed HTML | Complete | Equivalent | This is a UI privacy control; WebMCP does not load message images. |
 | Show plain-text mail | Complete | Complete | Returned by `read_messages`. |
+| Preview image and PDF attachments | Complete | Not applicable | PNG, JPEG, GIF, WebP, AVIF and BMP images show inline (up to 8 of at most 10 MB load on their own); PDFs open in a new tab. SVG is never previewed. Bytes come from the attachment download endpoint; no frame or CSP change. `read_messages` already lists attachments. |
 | Unsubscribe from a mailing list | Complete | Not available | The reader offers Unsubscribe from `List-Unsubscribe`: RFC 8058 one-click POST, an email from the delivered identity, or opening the link, always after a human confirmation. Agents can see the options in `read_messages` but cannot unsubscribe, because that confirmation cannot pass through WebMCP. |
 
 ## Message selection and actions
@@ -86,7 +87,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Report spam or mark not spam | Complete | Complete | `apply_message_actions` with `move` to the account's junk folder, or from it to the inbox. The UI offers Spam / Not spam buttons and the `!` shortcut. No `$Junk` keywords are set. |
 | Move to another folder | Complete | Complete | `apply_message_actions` with `move`. |
 | Move to Trash | Complete | Complete | `apply_message_actions` with `trash`. |
-| Permanently delete mail | Not available | Not available | Not implemented. Trash currently means moving to the provider's Trash folder. |
+| Permanently delete mail | Partial | Not available | IMAP accounts only: **Delete forever** in the reader and for a selection, plus **Empty Trash** / **Empty Spam**, each after a confirmation dialog, and only for messages in the special-use Trash or Junk folder. Gmail is not supported because Postreeve's `gmail.modify` grant cannot delete; Gmail removes Trash and Spam after 30 days. Deliberately no WebMCP tool or action: the confirmation is human-only. Trash still only moves. |
 | Flag or unflag mail | Complete | Complete | `apply_message_actions` with `flag` or `unflag` (IMAP `\Flagged`, Gmail `STARRED`). |
 
 Every WebMCP mutation revalidates the stable message reference, records an audited batch, isolates work to one account, and returns individual success or failure results.
@@ -141,7 +142,7 @@ Agents prepare drafts; only the person sends them, from the compose form.
 | Inspect per-message action results | Complete | Complete | Returned in each activity batch. |
 | See applied, failed, undone, and partial states | Complete | Complete | Returned batch and operation statuses. |
 | Undo supported actions | Complete | Complete | `undo_batch` |
-| Undo permanent deletion | Not available | Not available | Permanent deletion is never performed. |
+| Undo permanent deletion | Not available | Not available | Permanent deletion cannot be undone, so it records no Activity batch; the confirmation dialog says so. |
 | See which agent did what | Complete | Not applicable | Activity names a remote agent on every batch it applied and lists its other calls (reads, proposals, folder changes) from the server's audit. WebMCP and UI batches stay attributed in this browser only. |
 
 ## Proposals
@@ -162,6 +163,15 @@ Agents prepare drafts; only the person sends them, from the compose form.
 | Automatically move incoming mail | Not available | Not available | No background rule execution exists. |
 | Automatically forward or redirect mail | Not available | Not available | No forwarding implementation exists. |
 | Schedule mailbox work | Not available | Not available | Postreeve currently acts only while the page and user workflow are active. |
+
+## Web app
+
+| Feature | Web UI | WebMCP | WebMCP tool or reason |
+| --- | --- | --- | --- |
+| Keyboard shortcuts | Complete | Not applicable | `j`/`k`, Enter, Escape, `x`, `e`, `#`, `!`, `u`, Shift+U, `s`, `c`, `r`, `a`, `f`, `/`, `[`, `g` then `i`/`s`/`d`/`t`, ⌘Z/Ctrl+Z, and `?` for a help overlay (also in **Settings → Keyboard shortcuts**). Ignored while typing in any field or the message editor and while a dialog is open. |
+| Use on a phone | Complete | Not applicable | At 640 px and below: sidebar drawer, list and reader as separate screens with back (including the browser back gesture), 44 px touch targets, full-screen compose and dialogs, safe-area insets. |
+| Install as an app (PWA) | Complete | Not applicable | Web app manifest, icons and a service worker that caches only the app shell, never `/api/` responses or mail. Production builds only; installable from `http://127.0.0.1` or HTTPS. |
+| Recover from a display error | Complete | Not applicable | Error boundaries around the app, the reader and compose show the error with Reload and Try again instead of a blank page. |
 
 ## Synchronization and retention
 

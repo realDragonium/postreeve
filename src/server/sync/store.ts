@@ -361,6 +361,17 @@ export class SynchronizationStore {
     }).immediate();
   }
 
+  /** Drops locations the provider confirmed it expunged, so lists update before the next synchronization. */
+  confirmedRemoval(account: SyncAccount, references: readonly MessageRef[]): void {
+    if (references.some(({ accountId }) => accountId !== account.accountId)) throw new Error("Removal crossed account scope");
+    this.sqlite.transaction(() => { for (const reference of references) this.#remove(account, reference); }).immediate();
+  }
+
+  confirmedMailboxCleared(account: SyncAccount, mailbox: string): void {
+    this.sqlite.query("DELETE FROM message_locations WHERE tenant_id=? AND account_id=? AND provider=? AND mailbox=?")
+      .run(account.tenantId, account.accountId, account.provider, mailbox);
+  }
+
   indexed(tenantId: string, accountId: string, mailbox: string, limit = 100): CanonicalMessageSummary[] {
     return this.query(tenantId, { sources: [{ accountId, mailbox }], limit }).messages;
   }
