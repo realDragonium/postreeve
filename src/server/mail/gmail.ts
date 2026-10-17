@@ -127,6 +127,9 @@ export interface GmailClientConfig {
   fetch?: HttpFetch;
 }
 
+export const GMAIL_PERMANENT_DELETE_UNAVAILABLE =
+  "Postreeve's Gmail access cannot delete mail permanently. Gmail removes messages from Trash and Spam after 30 days.";
+
 export class GmailMailClient implements MailProvider, MailSender {
   readonly #account: Account & { kind: "gmail" };
   readonly #credentials: GmailAccountCredentials;
@@ -387,6 +390,17 @@ export class GmailMailClient implements MailProvider, MailSender {
     );
     if (body.size !== part.body.size) throw new Error("Gmail returned inconsistent attachment size");
     return decodeGmailPartBody(body.data, body.size);
+  }
+
+  // Gmail's delete endpoints need the full https://mail.google.com/ scope; Postreeve asks only for gmail.modify.
+  async deletePermanently(accountId: string): Promise<number> {
+    this.#assertAccount(accountId);
+    throw new Error(GMAIL_PERMANENT_DELETE_UNAVAILABLE);
+  }
+
+  async emptyFolder(accountId: string): Promise<number> {
+    this.#assertAccount(accountId);
+    throw new Error(GMAIL_PERMANENT_DELETE_UNAVAILABLE);
   }
 
   async revalidate(reference: MessageRef): Promise<boolean> {

@@ -57,11 +57,15 @@ For IMAP, undo SHALL reverse an operation only when the message is still at the 
 - **THEN** the operation is `undo_failed` with an error naming that the mailbox changed, and the message stays where it is
 
 ### Requirement: What undo does not reverse
-Undo SHALL leave `failed` operations as `failed` and SHALL NOT re-attempt them. An applied operation with no provider effect (a proposal's `leave` item) SHALL become `not_undoable`. Operations whose status is `not_undoable` or `failed` SHALL NOT count against an `undone` batch status. Because no action permanently deletes mail, there is no permanent deletion to undo.
+Undo SHALL leave `failed` operations as `failed` and SHALL NOT re-attempt them. An applied operation with no provider effect (a proposal's `leave` item) SHALL become `not_undoable`. Operations whose status is `not_undoable` or `failed` SHALL NOT count against an `undone` batch status. No action type permanently deletes mail; the separate permanent delete (actions/message-actions) creates no batch and cannot be undone.
 
 #### Scenario: Partially applied batch
 - **WHEN** a `partially_applied` batch with one applied and one failed operation is undone
 - **THEN** the applied operation becomes `undone`, the failed one stays `failed`, and the batch is `undone`
+
+#### Scenario: After a permanent delete
+- **WHEN** a person empties Trash
+- **THEN** Activity shows no new batch and no undo entry is offered
 
 ### Requirement: Undo keeps message identity and the proposal in step
 When undo moves a message back, the system SHALL retain its local identity at the restored location; if that fails, the operation SHALL stay `undone` with an `error` warning. After undo, the proposal that produced the batch SHALL take the batch's new status (`undone` or `partially_undone`).

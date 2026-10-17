@@ -16,6 +16,8 @@ import { AccountSetup, ComposeModal, DraftsSheet, FolderSheet, IdentitySheet, ty
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ShortcutHelp } from "./ShortcutHelp";
 import { goChordMs, isTypingTarget, shortcutCommand } from "./keyboard";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { canDeletePermanently, emptyLabel, messageCount, purgeableFolder, type PurgeableUse } from "./permanent-delete";
 import {
   countLine,
   messageIdentityKeys,
@@ -78,6 +80,12 @@ type Overlay =
   | { kind: "drafts" }
   | null;
 
+/** A permanent delete waiting for the person's confirmation. */
+type PendingPurge =
+  | { readonly kind: "messages"; readonly accountId: string; readonly messages: readonly MessageSummary[]; readonly folderName: string }
+  | { readonly kind: "folder"; readonly accountId: string; readonly path: string; readonly use: PurgeableUse; readonly total: number }
+  | null;
+
 interface UndoEntry {
   readonly label: string;
   readonly batchIds: readonly string[];
@@ -116,6 +124,7 @@ function App() {
   const [hiddenTools, setHiddenTools] = useState<ReadonlySet<string>>(loadHiddenTools);
   const [overlay, setOverlay] = useState<Overlay>(null);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [purge, setPurge] = useState<PendingPurge>(null);
   useEffect(() => storeHiddenTools(hiddenTools), [hiddenTools]);
   const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>(() => loadNotificationPreferences(localStorage));
   const [notificationPermission, setNotificationPermission] = useState<NotificationAccess>(notificationAccess);
@@ -322,6 +331,27 @@ function App() {
     },
     onError: (error) => flash(error.message),
   });
+
+  const purgeMutation = useMutation({
+    mutationFn: (pending: NonNullable<PendingPurge>) => pending.kind === "folder"
+      ? api.emptyFolder(pending.accountId, pending.path)
+      : api.deletePermanently(pending.accountId, pending.messages.map(({ ref }) => ref)),
+    onSuccess: async ({ deleted }, pending) => {
+      setPurge(null);
+      setSelected(new Set());
+      if (pending.kind === "folder" || pending.messages.some((message) => messageMatchesKey(message, openKey))) setOpenKey(null);
+      flash(`Deleted ${messageCount(deleted)} permanently`);
+      await refresh();
+    },
+  });
+
+  function confirmDeleteForever(messagesToDelete: readonly MessageSummary[]): void {
+    const [firstMessage] = messagesToDelete;
+    if (!firstMessage) return;
+    const folder = purgeableFolder(foldersByAccount.get(firstMessage.ref.accountId) ?? [], firstMessage.ref.mailbox);
+    purgeMutation.reset();
+    setPurge({ kind: "messages", accountId: firstMessage.ref.accountId, messages: messagesToDelete, folderName: folder?.name ?? firstMessage.ref.mailbox });
+  }
 
   function undoLast(): void {
     const entry = undoStack[0];
@@ -548,7 +578,7 @@ function App() {
         }
         return;
       }
-      if (overlay !== null) return;
+      if (overlay !== null || purge !== null) return;
       const chord = goChord.current > Date.now();
       goChord.current = 0;
       const command = shortcutCommand(event, chord);
@@ -652,6 +682,25 @@ function App() {
     ? accounts.find(({ id }) => id === overlay.accountId) ?? null
     : null;
   const hasAccounts = accounts.length > 0;
+  const scopeAccount = scopeAccountId ? accounts.find(({ id }) => id === scopeAccountId) : undefined;
+  const scopePurgeable = scope?.kind === "account" ? purgeableFolder(scopeFolders, scope.path) : null;
+  const purgeSelection = scopePurgeable ? messages.filter((message) => messageIsSelected(message, selected)) : [];
+  const purgeStrip = scopeAccount && scopePurgeable ? <div className="purge-strip" role="region" aria-label="Permanent delete">
+    {canDeletePermanently(scopeAccount) ? <>
+      <span className="t-dim">Messages deleted here are gone for good.</span>
+      {purgeSelection.length > 0 ? <button className="chip btn-danger" onClick={() => confirmDeleteForever(purgeSelection)}>
+        Delete {messageCount(purgeSelection.length)} forever
+      </button> : null}
+      <button
+        className="chip btn-danger"
+        disabled={scopePurgeable.total === 0 && messages.length === 0}
+        onClick={() => {
+          purgeMutation.reset();
+          setPurge({ kind: "folder", accountId: scopeAccount.id, path: scopePurgeable.path, use: scopePurgeable.specialUse, total: scopePurgeable.total });
+        }}
+      >{emptyLabel(scopePurgeable.specialUse)}</button>
+    </> : <span className="t-dim">Gmail removes messages from {scopePurgeable.specialUse === "trash" ? "Trash" : "Spam"} after 30 days. Postreeve's Gmail access cannot delete mail permanently.</span>}
+  </div> : null;
 
   return <div className="shell">
     <div className="topbar">
@@ -731,6 +780,7 @@ function App() {
 
         {hasAccounts && view === "mail" ? <div className={`mail-view ${openKey ? "has-reader" : ""}`}>
           <section className="mail-list-pane" aria-label="Mailbox list">
+            {purgeStrip}
             <MessageList
               messages={messages}
               provenance={provenance}
@@ -801,6 +851,9 @@ function App() {
                 intent: { mode, message: source },
               })}
               onDownloadAttachment={downloadReceivedAttachment}
+              {...(purgeableFolder(foldersByAccount.get(openMessage.ref.accountId) ?? [], openMessage.ref.mailbox)
+                && canDeletePermanently(accounts.find(({ id }) => id === openMessage.ref.accountId))
+                ? { onDeleteForever: () => confirmDeleteForever([openMessage]) } : {})}
             /> : <div className="pad t-dim">Loading message…</div>}
             </ErrorBoundary>
           </section> : null}
@@ -901,6 +954,24 @@ function App() {
     /> : null}
 
     {helpOpen ? <ShortcutHelp onClose={() => setHelpOpen(false)} /> : null}
+
+    {purge ? <ConfirmDialog
+      title={purge.kind === "folder" ? `${emptyLabel(purge.use)}?` : `Delete ${messageCount(purge.messages.length)} forever?`}
+      confirmLabel={purge.kind === "folder" ? emptyLabel(purge.use) : "Delete forever"}
+      busy={purgeMutation.isPending}
+      error={purgeMutation.error?.message ?? null}
+      onCancel={() => setPurge(null)}
+      onConfirm={() => purgeMutation.mutate(purge)}
+    >
+      <p className="t-body" style={{ margin: 0, fontSize: 13 }}>
+        {purge.kind === "folder"
+          ? `Every message in ${purge.use === "trash" ? "Trash" : "Spam"} for ${accounts.find(({ id }) => id === purge.accountId)?.email ?? "this account"} (${messageCount(purge.total)} by the last count) will be deleted from the mail server.`
+          : purge.messages.length === 1
+            ? `“${purge.messages[0]!.subject || "(No subject)"}” will be deleted from ${purge.folderName} on the mail server.`
+            : `${messageCount(purge.messages.length)} will be deleted from ${purge.folderName} on the mail server.`}
+      </p>
+      <p className="t-body" style={{ margin: 0, fontSize: 13, fontWeight: 600, color: "var(--ink)" }}>This cannot be undone.</p>
+    </ConfirmDialog> : null}
 
     {overlay?.kind === "compose" && accounts.find(({ id }) => id === overlay.accountId) ? <ErrorBoundary label="compose window" retry resetKeys={[overlay.intent]} onDismiss={() => setOverlay(null)}><ComposeModal
       key={overlay.intent.draft?.id ?? "new-compose"}

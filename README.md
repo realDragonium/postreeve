@@ -23,7 +23,7 @@ bun run verify
 bun run start
 ```
 
-Open [http://127.0.0.1:3000](http://127.0.0.1:3000). A new installation starts empty and asks you to connect an email account.
+Open [http://127.0.0.1:3000](http://127.0.0.1:3000). A new installation starts empty and asks you to connect an email account. Press `?` for keyboard shortcuts. Chromium-based browsers and Safari can install Postreeve as an app from this address; the installed app caches only the interface, never mail.
 
 `bun run setup:local` creates an ignored `.env`, generates a 32-byte encryption key without printing it, and prepares the local data directory. Keep that `.env` backed up securely. Existing encrypted account credentials cannot be recovered if `POSTREEVE_MASTER_KEY` is lost or changed.
 
@@ -88,7 +88,7 @@ Start with a scoped request:
 
 > List my accounts and folders. Inspect unread messages in my inbox, explain what you recommend, and wait for my next instruction before applying actions.
 
-WebMCP mirrors the completed mailbox workflow available in the UI: it can inspect accounts, folders, and messages; send a new message from an account's primary address; apply explicit move, Trash, and read-state actions; inspect Activity; and undo supported operations. Sending real mail requires explicit user approval. Permanent deletion remains unavailable everywhere.
+WebMCP mirrors the completed mailbox workflow available in the UI: it can inspect accounts, folders, and messages; send a new message from an account's primary address; apply explicit move, Trash, and read-state actions; inspect Activity; and undo supported operations. Sending real mail requires explicit user approval. Permanent deletion is never available to agents; people can delete from an IMAP account's Trash or Spam after a confirmation dialog.
 
 Use GPT-5.6 Sol or GPT-5.6 Terra for site tools. GPT-5.6 Luna currently has WebMCP disabled.
 
@@ -112,7 +112,7 @@ Docker Compose publishes Postreeve only on `127.0.0.1:3000` and stores SQLite da
 - `bun run desktop`: build and open the Electron desktop application
 - `bun run desktop:pack`: create an unpacked desktop application
 - `bun run desktop:dist`: create the current platform's desktop installers
-- `bun run test:e2e`: run the Playwright browser workflow
+- `bun run test:e2e`: run the Playwright browser workflow (set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to use an already installed Chromium)
 
 Licensed under the [Apache License 2.0](LICENSE).
 

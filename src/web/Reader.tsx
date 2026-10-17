@@ -34,6 +34,8 @@ export interface ReaderProps {
   onUndo: () => void;
   onCompose: (mode: ComposeFromMode, source: CanonicalMessageDetail) => void;
   onDownloadAttachment: (accountId: string, attachment: ReceivedAttachment) => Promise<void>;
+  /** Present only for a message in an IMAP account's Trash or Spam; it opens a confirmation, never deletes directly. */
+  onDeleteForever?: () => void;
 }
 
 export function Reader(props: ReaderProps) {
@@ -81,6 +83,7 @@ export function Reader(props: ReaderProps) {
           {destinations.map((folder) => <option key={folder.path} value={folder.path}>{folder.name}</option>)}
         </select>
         <button className="chip" disabled={props.busy || inTrash || !hasTrash} onClick={() => props.onAction({ type: "trash" })}>{inTrash ? "In Trash" : "Trash"}</button>
+        {props.onDeleteForever ? <button className="chip btn-danger" disabled={props.busy} onClick={props.onDeleteForever}>Delete forever</button> : null}
       </span>
     </div>
 

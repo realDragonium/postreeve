@@ -46,7 +46,7 @@ For Gmail accounts both endpoints SHALL fail with a message explaining that Post
 - **THEN** no Empty Trash control is shown and the strip explains Gmail's 30-day removal
 
 ### Requirement: Permanent delete asks first
-The UI SHALL offer **Delete forever** in the reader for a message in Trash or Junk of an IMAP account, and **Empty Trash** or **Empty Spam** above the list when that folder is open. Each SHALL open a dialog naming what will be deleted and stating that it cannot be undone, with Cancel focused, and SHALL send the request only after the person chooses the dialog's delete button.
+The UI SHALL offer **Delete forever** in the reader for a message in Trash or Junk of an IMAP account, and above the list, when that folder is open, **Delete <n> forever** for a selection and **Empty Trash** or **Empty Spam**. Each SHALL open a dialog naming what will be deleted and stating that it cannot be undone, with Cancel focused, and SHALL send the request only after the person chooses the dialog's delete button.
 
 #### Scenario: Cancel
 - **WHEN** a person chooses Empty Trash and then Cancel

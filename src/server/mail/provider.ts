@@ -149,6 +149,13 @@ export interface MailProvider {
   ): Promise<ProviderAttachmentDownload>;
   searchMessages(accountId: string, mailbox: string, query: string, limit: number): Promise<ProviderMessageSummary[]>;
   revalidate(reference: MessageRef): Promise<boolean>;
+  /**
+   * Expunges messages from one special-use Trash or Junk folder and returns how many were removed. Only the
+   * human-confirmed UI path calls this; no action type, proposal or agent tool reaches it.
+   */
+  deletePermanently?(accountId: string, references: readonly MessageRef[]): Promise<number>;
+  /** Expunges every message in the special-use Trash or Junk folder at `path`. Same callers as `deletePermanently`. */
+  emptyFolder?(accountId: string, path: string): Promise<number>;
   apply(reference: MessageRef, action: TriageAction): Promise<AppliedMailAction>;
   undo(applied: AppliedMailAction): Promise<ProviderLocationMove | null>;
 }

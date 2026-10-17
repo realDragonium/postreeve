@@ -455,6 +455,23 @@ export const updateDraftInputSchema = draftContentSchema.extend({
 });
 export const draftVersionInputSchema = z.object({ version: z.number().int().positive() });
 
+/** Typed by the UI after the person confirms; it names the request, it does not authenticate it. */
+export const permanentDeleteConfirmation = "delete permanently";
+
+export const permanentDeleteInputSchema = z.object({
+  accountId: accountIdSchema,
+  messages: z.array(messageRefSchema).min(1).max(100),
+  confirm: z.literal(permanentDeleteConfirmation),
+});
+
+export const emptyFolderInputSchema = z.object({
+  accountId: accountIdSchema,
+  path: folderPathSchema,
+  confirm: z.literal(permanentDeleteConfirmation),
+});
+
+export const permanentDeleteResultSchema = z.object({ deleted: z.number().int().nonnegative() });
+
 export const directActionInputSchema = z.object({
   accountId: accountIdSchema,
   items: z.array(z.object({
@@ -538,6 +555,9 @@ export type CreateDraftInput = z.infer<typeof createDraftInputSchema>;
 export type UpdateDraftInput = z.infer<typeof updateDraftInputSchema>;
 export type DraftVersionInput = z.infer<typeof draftVersionInputSchema>;
 export type DirectActionInput = z.infer<typeof directActionInputSchema>;
+export type PermanentDeleteInput = z.infer<typeof permanentDeleteInputSchema>;
+export type EmptyFolderInput = z.infer<typeof emptyFolderInputSchema>;
+export type PermanentDeleteResult = z.infer<typeof permanentDeleteResultSchema>;
 export type ListMessagesInput = z.infer<typeof listMessagesInputSchema>;
 export type CreateProposalInput = z.infer<typeof createProposalInputSchema>;
 export type UpdateProposalInput = z.infer<typeof updateProposalInputSchema>;
