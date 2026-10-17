@@ -22,7 +22,7 @@ export interface OAuthDependencies {
   readonly getOwnerSession: (c: Context) => unknown;
   /** Origin of the web UI and the consent page (`POSTREEVE_PUBLIC_URL`). */
   readonly publicUrl?: string | undefined;
-  /** Origin agents reach (`POSTREEVE_MCP_PUBLIC_URL`, e.g. a Funnel port); issuer and resource live here. */
+  /** Origin agents reach (`POSTREEVE_MCP_PUBLIC_URL`, e.g. https://mcp.example.com); issuer and resource live here. */
   readonly mcpPublicUrl?: string | undefined;
   /** false on the public listener: the consent page needs the owner's session and stays private. */
   readonly authorize?: boolean;

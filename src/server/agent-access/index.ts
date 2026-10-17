@@ -17,7 +17,7 @@ export interface AgentAccessOptions {
   readonly store: AgentAccessStore;
   /** `POSTREEVE_PUBLIC_URL`; without it the request origin is used, which is right on loopback. */
   readonly publicUrl?: string | undefined;
-  /** `POSTREEVE_MCP_PUBLIC_URL`: the origin agents reach when it differs from the UI's (for example a Funnel port). */
+  /** `POSTREEVE_MCP_PUBLIC_URL`: the origin agents reach when it differs from the UI's (for example a separate public listener). */
   readonly mcpPublicUrl?: string | undefined;
   readonly getOwnerSession?: (c: Context) => unknown;
   readonly requireOwner?: MiddlewareHandler;
