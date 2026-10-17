@@ -35,7 +35,7 @@ Each `POST /mcp` builds a low-level SDK `Server` and a `WebStandardStreamableHTT
 ### Own OAuth authorization server, tokens opaque and hashed
 Postreeve is both resource and authorization server, as the MCP spec allows. Tokens are 32 random bytes, base64url, with a type prefix (`pva_`, `pvr_`, `pvt_`, `pvc_`, `pvs_`) so leaked tokens are identifiable. Storage is SHA-256: the tokens have 256 bits of entropy, so a slow hash adds nothing. Lookup by hash avoids timing leaks on comparison. Alternative: JWT access tokens. Rejected: revocation must take effect on the next call, which needs a lookup anyway.
 
-Access tokens last 1 hour; refresh tokens rotate on every use and last 30 days; reuse of a rotated refresh token or a used code revokes the grant (OAuth 2.1 recommendation). PATs do not expire; the owner revokes them.
+Access tokens last 1 hour; refresh tokens rotate on every use and last 30 days; reuse of a rotated refresh token or a used code revokes the grant (OAuth 2.1 recommendation). PATs do not expire; the owner revokes them. A rotated refresh token presented again within 30 seconds fails with `invalid_grant` but does not revoke the grant: two concurrent refreshes from one connector are a normal race, not theft. Later reuse revokes the grant.
 
 A grant is the "connected agent": one per consent or PAT, holding scopes, account restriction (null for all, including future accounts), name and last use. Tokens hang off a grant, so revoking a grant ends every token.
 

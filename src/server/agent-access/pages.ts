@@ -58,7 +58,7 @@ export function consentPage(input: ConsentPageInput): string {
 <form method="post" action="/oauth/authorize">
   <input type="hidden" name="request_id" value="${escapeHtml(input.requestId)}">
   <fieldset><legend>What it may do</legend>${tiers}
-    <p class="dim" style="margin:8px 0 0">Act means moving, flagging, trashing and undoing mail, and changing folders; every action is audited and undoable.
+    <p class="dim" style="margin:8px 0 0">Act means moving, flagging, trashing and undoing mail, and changing folders. Every call is audited; mail actions can be undone.
     No agent can send mail or accept a proposal: those stay with you in Postreeve.</p></fieldset>
   <fieldset><legend>Which accounts</legend>
     <label><input type="radio" name="scope_accounts" value="all" checked> All accounts, including ones added later</label>

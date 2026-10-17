@@ -1,6 +1,15 @@
 import { mailboxPageSchema, type MailboxQueryInput, type MailboxPage } from "../shared/mailbox-query";
 import { accountHealthSchema, reauthorizationSchema, synchronizationStatusSchema } from "../shared/synchronization";
 import type { ZodType } from "zod";
+import {
+  agentEventSchema,
+  connectedAgentSchema,
+  createdPersonalTokenSchema,
+  type AgentEvent,
+  type ConnectedAgent,
+  type CreatedPersonalToken,
+  type CreatePersonalTokenInput,
+} from "../shared/agent-access";
 import { z } from "zod";
 import {
   accountDiscoverySchema,
@@ -345,6 +354,14 @@ export const api = {
       method: "POST",
       ...withSignal(signal),
     }),
+  connectedAgents: (signal?: AbortSignal): Promise<ConnectedAgent[]> =>
+    request("/agent-access/agents", connectedAgentSchema.array(), withSignal(signal)),
+  revokeAgent: (id: string): Promise<{ ok: true }> =>
+    request(`/agent-access/agents/${encodeURIComponent(id)}`, z.object({ ok: z.literal(true) }), { method: "DELETE" }),
+  createPersonalToken: (input: CreatePersonalTokenInput): Promise<CreatedPersonalToken> =>
+    request("/agent-access/tokens", createdPersonalTokenSchema, { method: "POST", ...jsonBody(input) }),
+  agentEvents: (signal?: AbortSignal): Promise<AgentEvent[]> =>
+    request("/agent-access/events?limit=500", agentEventSchema.array(), withSignal(signal)),
   batches: (accountId: string, signal?: AbortSignal): Promise<OperationBatch[]> =>
     request(`/batches?accountId=${encodeURIComponent(accountId)}`, operationBatchSchema.array(), withSignal(signal)),
   undoBatch: (id: string, signal?: AbortSignal): Promise<OperationBatch> =>

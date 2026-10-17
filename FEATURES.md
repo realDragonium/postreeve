@@ -1,6 +1,6 @@
 # Postreeve feature and WebMCP coverage
 
-This document tracks what a person can currently do in Postreeve's web interface and whether the same capability is available through page-scoped WebMCP.
+This document tracks what a person can currently do in Postreeve's web interface and whether the same capability is available to agents: through page-scoped WebMCP, and through the authorized remote MCP endpoint at `/mcp`, which shares the same tool definitions (see [Remote MCP](#remote-mcp)).
 
 WebMCP follows one product rule: it mirrors user mailbox workflows and must not introduce a separate agent-only workflow. A missing WebMCP capability in this document describes the current implementation, not a decision that the gap should remain.
 
@@ -50,7 +50,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | --- | --- | --- | --- |
 | List message summaries | Complete | Complete | `list_messages` also shows the same mailbox view in the UI. |
 | Read full message bodies | Complete | Complete | `read_messages` |
-| Read the whole conversation, including your own replies in Sent and other folders | Complete | Not covered | No conversation tool exists; `read_messages` reads individual references. The reader collapses read messages and loads each body when expanded. |
+| Read the whole conversation, including your own replies in Sent and other folders | Complete | Complete | `read_conversation` returns up to 50 messages oldest first with bodies, across accounts. The reader collapses read messages and loads each body when expanded. |
 | Group the message list by conversation | Not available | Not available | The list shows individual messages; opening one shows its conversation. |
 | Search within a folder | Complete | Complete | `search_messages` writes the query into the UI and shows the matching messages. |
 | Filter all, unread, or flagged messages | Complete | Complete | `list_messages.filter` and `search_messages.filter` update the visible UI filter. |
@@ -127,6 +127,16 @@ These features are not provider-backed today. Whether and how they should be exp
 | See applied, failed, undone, and partial states | Complete | Complete | Returned batch and operation statuses. |
 | Undo supported actions | Complete | Complete | `undo_batch` |
 | Undo permanent deletion | Not available | Not available | Permanent deletion is never performed. |
+| See which agent did what | Complete | Not applicable | Activity names a remote agent on every batch it applied and lists its other calls (reads, proposals, folder changes) from the server's audit. WebMCP and UI batches stay attributed in this browser only. |
+
+## Proposals
+
+| Feature | Web UI | WebMCP | WebMCP tool or reason |
+| --- | --- | --- | --- |
+| Prepare a set of actions for the person to review | Not applicable | Complete | `create_proposal`; changes no mail. The message list shows `◇ proposes …` on each message. |
+| Edit a waiting proposal or move it to review | Not applicable | Complete | `update_proposal`; only `review` is accepted as a status. |
+| List proposals | Complete (markers and sidebar counts) | Complete | `list_proposals` |
+| Accept (approve and apply) a proposal | Complete | Not available | Only the human UI approves. No WebMCP or remote MCP tool can approve or apply. |
 
 ## Rules and automation
 
@@ -167,7 +177,32 @@ The following tools are discoverable only while the Postreeve page is open:
 13. `inspect_synchronization`
 14. `retry_synchronization`
 15. `request_reauthorization`
+16. `read_conversation`
+17. `list_proposals`
+18. `create_proposal`
+19. `update_proposal`
 
-Calling `list_messages` or `search_messages` updates the open page to the same account, folder, query, filter, sort order, and message results returned to the AI. Calling a folder-management tool updates the open page's folder list and keeps the selected mailbox valid.
+Calling `list_messages` or `search_messages` updates the open page to the same account, folder, query, filter, sort order, and message results returned to the AI. With no source, they list every account's inbox. Calling a folder-management tool updates the open page's folder list and keeps the selected mailbox valid. A created or updated proposal shows on its messages right away.
 
-The former proposal tools are absent because there is no matching completed user-facing proposal workflow in the current UI.
+The page works the same on a hosted HTTPS origin under the owner's session cookie: its tools call `/api` with same-origin requests and assume nothing about loopback.
+
+## Remote MCP
+
+Agents outside the browser connect to `<origin>/mcp` (Streamable HTTP, stateless JSON). The tool definitions are the page's, from one shared layer; what a remote agent sees depends on the tier the owner granted.
+
+| Tier (scopes) | Tools |
+| --- | --- |
+| Read only (`mail:read`) | `list_accounts`, `list_folders`, `list_messages`, `search_messages`, `read_messages`, `read_conversation`, `list_activity`, `list_proposals`, `inspect_synchronization`, `request_reauthorization` |
+| Read and propose (`+ mail:propose`) | adds `create_proposal`, `update_proposal` |
+| Read, propose and act (`+ mail:act`) | adds `create_folder`, `rename_folder`, `delete_folder`, `apply_message_actions`, `undo_batch`, `retry_synchronization` |
+
+Remote agents never get `send_message`, unsubscribe, or anything that approves or applies a proposal. A grant can be limited to chosen accounts; other accounts are invisible and refused.
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| OAuth 2.1 with PKCE, dynamic client registration, metadata discovery | Complete | claude.ai and ChatGPT connectors, Claude Code `--transport http`. |
+| Consent with tier and account choice | Complete | Requires the signed-in owner. |
+| Refresh token rotation with reuse detection, token revocation | Complete | Access tokens last 1 hour, refresh tokens 30 days. |
+| Personal access tokens for CLI agents | Complete | **Settings → Connected agents**; shown once, no expiry, revocable. |
+| List connected agents with last use, revoke | Complete | **Settings → Connected agents**. |
+| Audit of every remote call | Complete | Shown in Activity under the agent's name; newest 5,000 kept. |

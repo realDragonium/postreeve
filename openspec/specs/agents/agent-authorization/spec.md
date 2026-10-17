@@ -1,10 +1,9 @@
-# Spec Delta
+# agents/agent-authorization Specification
 
 ## Purpose
-
 Covers how the owner authorizes agents to use remote MCP: the OAuth 2.1 authorization server Postreeve runs for itself, the consent page, scopes and account restriction, token lifecycle, personal access tokens and the Connected agents settings.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Public origin
 The server SHALL use `POSTREEVE_PUBLIC_URL`'s origin, when set, as OAuth issuer and as the origin of every advertised URL, and otherwise the origin of the request. The protected resource SHALL be `<origin>/mcp`.
@@ -79,7 +78,7 @@ The consent form SHALL post to `/oauth/authorize` with a single-use pending requ
 - **THEN** the response is 400 `invalid_grant` and the tokens issued from it stop working
 
 ### Requirement: Refresh token rotation
-`grant_type=refresh_token` SHALL issue a new access token and a new refresh token, revoke the presented refresh token, and allow narrowing but not widening the scope. A refresh token is valid 30 days from issue. Presenting a revoked refresh token SHALL fail with `invalid_grant` and revoke the whole grant.
+`grant_type=refresh_token` SHALL issue a new access token and a new refresh token, revoke the presented refresh token, and allow narrowing but not widening the scope. A refresh token is valid 30 days from issue. Presenting a rotated refresh token SHALL fail with `invalid_grant`, and more than 30 seconds after its rotation SHALL also revoke the whole grant.
 
 #### Scenario: Rotate
 - **WHEN** a client refreshes with its refresh token

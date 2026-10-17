@@ -3,7 +3,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Activity view
-The UI SHALL offer an Activity tab listing one row per operation from every account's batches and one row per remote agent tool call that produced no batch, newest first, with actor, operation (such as `moved to Archive`, `marked read` or the call's summary), folder and UID or account, relative time, an `(undone)` suffix for undone operations and any error. Each batch whose status is `applied` or `partially_applied` SHALL offer one Undo button. With no rows it SHALL say `Nothing yet.`; a load error SHALL be shown with `Try again`.
+The UI SHALL offer an Activity tab with one row per batch operation and per remote agent call that produced no batch, newest first: actor, operation (such as `moved to Archive` or the call's summary), folder and UID or account, relative time, `(undone)` for undone operations and any error. Each `applied` or `partially_applied` batch SHALL offer one Undo button. With no rows it SHALL say `Nothing yet.`; a load error SHALL show `Try again`.
 
 #### Scenario: Undo from Activity
 - **WHEN** a person moves a message to Archive, opens Activity and selects Undo

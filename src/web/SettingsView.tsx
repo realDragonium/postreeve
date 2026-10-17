@@ -1,3 +1,4 @@
+import { ConnectedAgentsView } from "./ConnectedAgentsView";
 import { SyncStorageView } from "./SyncStorageView";
 import type { Account, Folder } from "../shared/contracts";
 import { assistantTools } from "./assistant-tools";
@@ -7,6 +8,7 @@ import type { NotificationAccess, NotificationPreferences } from "./notification
 export const settingsSections = [
   "Accounts",
   "Assistant control",
+  "Connected agents",
   "Appearance",
   "Notifications",
   "Keyboard shortcuts",
@@ -160,6 +162,8 @@ export function SettingsView(props: SettingsViewProps) {
     </>;
   }
 
+  if (props.section === "Connected agents") return <ConnectedAgentsView accounts={props.accounts} />;
+
   if (props.section === "Assistant control") {
     const exposedCount = assistantTools.length - props.hiddenTools.size;
     return <>
@@ -195,9 +199,9 @@ export function SettingsView(props: SettingsViewProps) {
           </div>;
         })}
         <p className="t-dim" style={{ maxWidth: 820, margin: "18px 0 0" }}>
-          A confirm-first tier, where a write tool stops as a proposal until you accept it, is not built yet: nothing in the
-          server can hold a tool call open. Until it is, <code>send_message</code> is the one irreversible tool here — hide it
-          if you would rather the assistant never sent mail on your behalf.
+          <code>create_proposal</code> and <code>update_proposal</code> only prepare changes; they wait on the message until you
+          accept them. <code>send_message</code> is the one irreversible tool here — hide it if you would rather the assistant
+          never sent mail on your behalf. Agents outside this page are managed under Connected agents.
         </p>
       </div></div>
     </>;

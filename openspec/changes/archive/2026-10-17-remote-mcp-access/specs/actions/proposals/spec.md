@@ -3,7 +3,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Only the human-facing interface approves
-The system SHALL approve a proposal only through `approveProposalFromHumanInterface`, reached by `POST /api/proposals/<proposalId>/approve`, which the web UI calls when a person accepts a proposal. Approval SHALL move a `draft` or `review` proposal to `approved` and set `approvedAt`; any other status SHALL be refused with 400 `Only a draft or review proposal can be approved`. No WebMCP tool, remote MCP tool or other API operation SHALL approve or apply a proposal; agent tools MAY create, update and list proposals.
+The system SHALL approve a proposal only through `approveProposalFromHumanInterface`, reached by `POST /api/proposals/<proposalId>/approve`, which the web UI calls when a person accepts a proposal. Approval SHALL move a `draft` or `review` proposal to `approved` and set `approvedAt`; any other status SHALL be refused with 400 `Only a draft or review proposal can be approved`. No agent tool (WebMCP or remote MCP) and no other API operation SHALL approve or apply a proposal.
 
 #### Scenario: Human accepts
 - **WHEN** the UI posts approve for a proposal in `review`

@@ -31,6 +31,7 @@ import {
   type Scope,
 } from "./mail-view";
 import {
+  agentBatchNames,
   buildProvenance,
   provenanceKey,
   recordUserBatch,
@@ -181,7 +182,10 @@ function App() {
     queries: accounts.map((account) => ({ queryKey: ["proposals", account.id], queryFn: () => api.proposals(account.id) })),
   });
   const proposals = proposalResults.flatMap((result) => result.data ?? []);
-  const provenance = useMemo(() => buildProvenance(batches, proposals), [batches, proposals]);
+  // Remote agents act without this page, so their calls come from the server's audit; a failure leaves attribution browser-local.
+  const agentEventsQuery = useQuery({ queryKey: ["agent-events"], queryFn: ({ signal }) => api.agentEvents(signal), refetchInterval: 15_000 });
+  const agentEvents = useMemo(() => agentEventsQuery.data ?? [], [agentEventsQuery.data]);
+  const provenance = useMemo(() => buildProvenance(batches, proposals, agentBatchNames(agentEvents)), [batches, proposals, agentEvents]);
   const awaitingByAccount = new Map<string, number>(accounts.map((account, index) => [
     account.id,
     (proposalResults[index]?.data ?? [])
@@ -738,6 +742,8 @@ function App() {
 
         {hasAccounts && view === "activity" ? <ActivityView
           batches={batches}
+          agentEvents={agentEvents}
+          accounts={accounts}
           loading={batchResults.some((result) => result.isLoading)}
           error={batchResults.find((result) => result.error)?.error?.message ?? null}
           actorFilter={actorFilter}

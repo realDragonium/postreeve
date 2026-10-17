@@ -1,7 +1,7 @@
 # Proposals Specification
 
 ## Purpose
-Covers proposals: a titled set of mailbox actions that is prepared and edited first and changes mail only after a human approves it in the UI. It defines the proposal record, its API, its status lifecycle, the human approval boundary and how applying produces a batch. The actions themselves and their per-item results are specified in actions/message-actions; batches and undo in actions/activity-undo; the agent tools, which include no proposal tools, in agents/webmcp-tools.
+Covers proposals: a titled set of mailbox actions that is prepared and edited first and changes mail only after a human approves it in the UI. It defines the proposal record, its API, its status lifecycle, the human approval boundary and how applying produces a batch. The actions themselves and their per-item results are specified in actions/message-actions; batches and undo in actions/activity-undo; the agent tools that prepare (but never approve) proposals in agents/webmcp-tools and agents/remote-mcp.
 
 ## Requirements
 
@@ -46,15 +46,19 @@ The system SHALL update a proposal at `PUT /api/proposals/<proposalId>` with any
 - **THEN** the response is 400 `Only draft or review proposals can be edited`
 
 ### Requirement: Only the human-facing interface approves
-The system SHALL approve a proposal only through `approveProposalFromHumanInterface`, reached by `POST /api/proposals/<proposalId>/approve`, which the web UI calls when a person accepts a proposal. Approval SHALL move a `draft` or `review` proposal to `approved` and set `approvedAt`; any other status SHALL be refused with 400 `Only a draft or review proposal can be approved`. No WebMCP tool and no other API operation SHALL approve a proposal.
+The system SHALL approve a proposal only through `approveProposalFromHumanInterface`, reached by `POST /api/proposals/<proposalId>/approve`, which the web UI calls when a person accepts a proposal. Approval SHALL move a `draft` or `review` proposal to `approved` and set `approvedAt`; any other status SHALL be refused with 400 `Only a draft or review proposal can be approved`. No agent tool (WebMCP or remote MCP) and no other API operation SHALL approve or apply a proposal.
 
 #### Scenario: Human accepts
 - **WHEN** the UI posts approve for a proposal in `review`
 - **THEN** the proposal is `approved` with `approvedAt` set
 
 #### Scenario: Agent tools cannot approve
-- **WHEN** an agent lists the WebMCP tools
-- **THEN** no tool creates, updates, approves or applies a proposal
+- **WHEN** an agent lists the WebMCP or remote MCP tools
+- **THEN** no tool approves or applies a proposal, and `update_proposal` refuses any status other than `review`
+
+#### Scenario: Remote agent prepares, person accepts
+- **WHEN** a remote agent creates a proposal and the person selects Accept in the UI
+- **THEN** the proposal is approved and applied only by that UI action
 
 ### Requirement: Applying requires approval
 The system SHALL apply a proposal at `POST /api/proposals/<proposalId>/apply` only when its status is `approved` and `approvedAt` is set; otherwise it SHALL refuse with 400 `Human approval is required before applying a proposal` and change no mail. An unknown proposal SHALL be refused with 400 `Proposal not found`.
