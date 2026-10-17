@@ -9,7 +9,7 @@ import { handleMcpRequest } from "../mcp/server";
 import { createServerAgentServices } from "../mcp/services";
 import { getOwnerSession as defaultGetOwnerSession, requireOwner as defaultRequireOwner } from "../security/owner-auth";
 import { clientAddress, limitBody, limitByAddress, rateLimited, RateLimiter } from "./limits";
-import { authenticateBearer, oauthRoutes, publicOrigin, resourceMetadataUrl } from "./oauth";
+import { authenticateBearer, issuerOrigin, oauthRoutes, resourceMetadataUrl, resourceUrl } from "./oauth";
 import type { AgentAccessStore, AgentGrant } from "./store";
 
 export interface AgentAccessOptions {
@@ -17,6 +17,8 @@ export interface AgentAccessOptions {
   readonly store: AgentAccessStore;
   /** `POSTREEVE_PUBLIC_URL`; without it the request origin is used, which is right on loopback. */
   readonly publicUrl?: string | undefined;
+  /** `POSTREEVE_MCP_PUBLIC_URL`: the origin agents reach when it differs from the UI's (for example a Funnel port). */
+  readonly mcpPublicUrl?: string | undefined;
   readonly getOwnerSession?: (c: Context) => unknown;
   readonly requireOwner?: MiddlewareHandler;
   readonly limiter?: RateLimiter;
@@ -60,10 +62,10 @@ export function createAgentAccess(options: AgentAccessOptions) {
   app.post("/oauth/token", limitBody(OAUTH_BODY_LIMIT), limitByAddress(limiter, "token", 60, MINUTE));
   app.post("/oauth/revoke", limitBody(OAUTH_BODY_LIMIT), limitByAddress(limiter, "revoke", 60, MINUTE));
   app.post("/mcp", limitBody(MCP_BODY_LIMIT));
-  app.route("/", oauthRoutes({ store, listAccounts: () => service.listAccounts(), getOwnerSession, publicUrl: options.publicUrl }));
+  app.route("/", oauthRoutes({ store, listAccounts: () => service.listAccounts(), getOwnerSession, publicUrl: options.publicUrl, mcpPublicUrl: options.mcpPublicUrl }));
 
   app.post("/mcp", async (c) => {
-    const origin = publicOrigin(c, options.publicUrl);
+    const origin = issuerOrigin(c, options);
     const authorization = c.req.header("Authorization");
     const agent = authenticateBearer(store, authorization, origin);
     if (!agent) {
@@ -91,6 +93,7 @@ export function createAgentAccess(options: AgentAccessOptions) {
   const agentApi = new Hono()
     .use("*", requireOwner)
     .get("/agents", (c) => c.json(store.listActiveGrants().map(toConnectedAgent)))
+    .get("/endpoint", (c) => c.json({ mcpUrl: resourceUrl(issuerOrigin(c, options)) }))
     .delete("/agents/:grantId", (c) => {
       if (!store.revokeGrant(c.req.param("grantId"))) return c.json({ error: "Agent not found" }, 404);
       return c.json({ ok: true as const });

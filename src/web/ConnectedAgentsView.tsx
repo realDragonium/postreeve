@@ -20,7 +20,8 @@ export function ConnectedAgentsView({ accounts }: { accounts: readonly Account[]
     mutationFn: () => api.createPersonalToken({ name: name.trim(), tier, accountIds: chosen ? [...chosen] : null }),
     onSuccess: (result) => { setCreated(result); setName(""); void refresh(); },
   });
-  const endpoint = `${window.location.origin}/mcp`;
+  const endpointQuery = useQuery({ queryKey: ["agent-endpoint"], queryFn: ({ signal }) => api.agentEndpoint(signal), staleTime: Infinity });
+  const endpoint = endpointQuery.data?.mcpUrl ?? `${window.location.origin}/mcp`;
   const accountLabel = (ids: readonly string[] | null) => ids === null ? "All accounts"
     : ids.map((id) => accounts.find((account) => account.id === id)?.email ?? "removed account").join(", ");
 

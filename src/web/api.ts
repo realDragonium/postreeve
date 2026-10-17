@@ -358,6 +358,8 @@ export const api = {
     }),
   connectedAgents: (signal?: AbortSignal): Promise<ConnectedAgent[]> =>
     request("/agent-access/agents", connectedAgentSchema.array(), withSignal(signal)),
+  agentEndpoint: (signal?: AbortSignal): Promise<{ mcpUrl: string }> =>
+    request("/agent-access/endpoint", z.object({ mcpUrl: z.url() }), withSignal(signal)),
   revokeAgent: (id: string): Promise<{ ok: true }> =>
     request(`/agent-access/agents/${encodeURIComponent(id)}`, z.object({ ok: z.literal(true) }), { method: "DELETE" }),
   createPersonalToken: (input: CreatePersonalTokenInput): Promise<CreatedPersonalToken> =>

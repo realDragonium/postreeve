@@ -20,11 +20,22 @@ export interface OAuthDependencies {
   readonly store: AgentAccessStore;
   readonly listAccounts: () => Promise<Account[]>;
   readonly getOwnerSession: (c: Context) => unknown;
+  /** Origin of the web UI and the consent page (`POSTREEVE_PUBLIC_URL`). */
   readonly publicUrl?: string | undefined;
+  /** Origin agents reach (`POSTREEVE_MCP_PUBLIC_URL`, e.g. a Funnel port); issuer and resource live here. */
+  readonly mcpPublicUrl?: string | undefined;
 }
 
 export function publicOrigin(c: Context, publicUrl: string | undefined): string {
   return new URL(publicUrl?.trim() || c.req.url).origin;
+}
+
+/**
+ * The issuer must equal the origin its metadata is fetched from (RFC 8414), so it follows the
+ * agent-facing origin; only the consent page stays on the UI origin.
+ */
+export function issuerOrigin(c: Context, urls: { publicUrl?: string | undefined; mcpPublicUrl?: string | undefined }): string {
+  return publicOrigin(c, urls.mcpPublicUrl?.trim() || urls.publicUrl);
 }
 
 export function resourceUrl(origin: string): string {
@@ -115,7 +126,8 @@ export function authenticateBearer(store: AgentAccessStore, authorization: strin
 export function oauthRoutes(deps: OAuthDependencies) {
   const { store } = deps;
   const pending = new Map<string, PendingAuthorization>();
-  const origin = (c: Context) => publicOrigin(c, deps.publicUrl);
+  const origin = (c: Context) => issuerOrigin(c, deps);
+  const uiOrigin = (c: Context) => publicOrigin(c, deps.publicUrl);
 
   function takePending(id: string): PendingAuthorization | null {
     const now = Date.now();
@@ -172,7 +184,7 @@ export function oauthRoutes(deps: OAuthDependencies) {
       const issuer = origin(c);
       return c.json({
         issuer,
-        authorization_endpoint: `${issuer}/oauth/authorize`,
+        authorization_endpoint: `${uiOrigin(c)}/oauth/authorize`,
         token_endpoint: `${issuer}/oauth/token`,
         registration_endpoint: `${issuer}/oauth/register`,
         revocation_endpoint: `${issuer}/oauth/revoke`,
@@ -249,7 +261,7 @@ export function oauthRoutes(deps: OAuthDependencies) {
     .post("/oauth/authorize", async (c) => {
       const issuer = origin(c);
       const requestOrigin = c.req.header("Origin");
-      if (requestOrigin !== undefined && requestOrigin !== issuer && requestOrigin !== new URL(c.req.url).origin) {
+      if (requestOrigin !== undefined && requestOrigin !== uiOrigin(c) && requestOrigin !== new URL(c.req.url).origin) {
         return c.html(noticePage("Request refused", "The consent form must be sent from this Postreeve page."), 403);
       }
       if (!await deps.getOwnerSession(c)) return c.html(signInPage(), 401);

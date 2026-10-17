@@ -6,11 +6,15 @@ Covers how the owner authorizes agents to use remote MCP: the OAuth 2.1 authoriz
 ## Requirements
 
 ### Requirement: Public origin
-The server SHALL use `POSTREEVE_PUBLIC_URL`'s origin, when set, as OAuth issuer and as the origin of every advertised URL, and otherwise the origin of the request. The protected resource SHALL be `<origin>/mcp`.
+The server SHALL use the origin of `POSTREEVE_MCP_PUBLIC_URL`, or of `POSTREEVE_PUBLIC_URL` when it is unset, or else of the request, as the OAuth issuer, as the protected resource `<origin>/mcp` and for the registration, token and revocation endpoints. `authorization_endpoint` and the consent form's same-origin check SHALL use the origin of `POSTREEVE_PUBLIC_URL`, or else of the request.
 
 #### Scenario: Hosted origin
 - **WHEN** `POSTREEVE_PUBLIC_URL` is `https://mail.example.com/` and metadata is requested
 - **THEN** the issuer is `https://mail.example.com` and the resource is `https://mail.example.com/mcp`
+
+#### Scenario: Separate agent origin
+- **WHEN** `POSTREEVE_PUBLIC_URL` is `https://box.tail.ts.net` and `POSTREEVE_MCP_PUBLIC_URL` is `https://box.tail.ts.net:8443`
+- **THEN** the issuer and resource use `:8443` and `authorization_endpoint` is `https://box.tail.ts.net/oauth/authorize`
 
 ### Requirement: Protected resource metadata
 The server SHALL answer `GET /.well-known/oauth-protected-resource` and `GET /.well-known/oauth-protected-resource/mcp` with RFC 9728 metadata: `resource`, `authorization_servers` holding the issuer, `scopes_supported` (`mail:read`, `mail:propose`, `mail:draft`, `mail:act`), `bearer_methods_supported: ["header"]` and `resource_name`.

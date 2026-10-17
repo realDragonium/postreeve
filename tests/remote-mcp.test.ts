@@ -453,6 +453,60 @@ describe("remote MCP endpoint", () => {
   });
 });
 
+describe("separate agent origin (Funnel port)", () => {
+  test("issuer, resource and token endpoints follow POSTREEVE_MCP_PUBLIC_URL; consent stays on the UI origin", async () => {
+    const harness = await createTestHarness();
+    const ui = "https://box.tail.ts.net";
+    const agentOrigin = "https://box.tail.ts.net:8443";
+    const app = createAgentAccess({
+      service: harness.service, store: harness.store.agentAccess, publicUrl: ui, mcpPublicUrl: `${agentOrigin}/`,
+      getOwnerSession: () => ({ id: "owner" }), requireOwner: async (_c, next) => next(),
+    });
+    const metadata = await (await app.request(`${agentOrigin}/.well-known/oauth-authorization-server`)).json();
+    expect(metadata).toMatchObject({
+      issuer: agentOrigin, authorization_endpoint: `${ui}/oauth/authorize`, token_endpoint: `${agentOrigin}/oauth/token`,
+      registration_endpoint: `${agentOrigin}/oauth/register`, revocation_endpoint: `${agentOrigin}/oauth/revoke`,
+    });
+    expect(await (await app.request(`${agentOrigin}/.well-known/oauth-protected-resource/mcp`)).json())
+      .toMatchObject({ resource: `${agentOrigin}/mcp`, authorization_servers: [agentOrigin] });
+
+    const registered = await (await app.request(`${agentOrigin}/oauth/register`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_name: "Claude", redirect_uris: [redirectUri] }),
+    })).json() as { client_id: string };
+    const query = new URLSearchParams({
+      response_type: "code", client_id: registered.client_id, redirect_uri: redirectUri, code_challenge: challenge,
+      code_challenge_method: "S256", state: "s", resource: `${agentOrigin}/mcp`,
+    });
+    const page = await app.request(`${ui}/oauth/authorize?${query}`);
+    expect(page.status).toBe(200);
+    const requestId = /name="request_id" value="([^"]+)"/.exec(await page.text())![1]!;
+    const decided = await app.request(`${ui}/oauth/authorize`, {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded", Origin: ui },
+      body: new URLSearchParams({ request_id: requestId, decision: "allow", tier: "read", scope_accounts: "all" }),
+    });
+    const location = new URL(decided.headers.get("Location")!);
+    expect(location.searchParams.get("iss")).toBe(agentOrigin);
+    const tokens = await (await app.request(`${agentOrigin}/oauth/token`, {
+      method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code", code: location.searchParams.get("code")!, redirect_uri: redirectUri,
+        client_id: registered.client_id, code_verifier: verifier,
+      }),
+    })).json() as { access_token: string };
+    const call = (target: string, token: string | null) => app.request(`${target}/mcp`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect((await call(agentOrigin, tokens.access_token)).status).toBe(200);
+    expect((await call(agentOrigin, null)).headers.get("WWW-Authenticate"))
+      .toBe(`Bearer resource_metadata="${agentOrigin}/.well-known/oauth-protected-resource/mcp"`);
+    expect(await (await app.request(`${ui}/api/agent-access/endpoint`)).json()).toEqual({ mcpUrl: `${agentOrigin}/mcp` });
+    harness.store.close();
+  });
+});
+
 describe("internet-facing bounds", () => {
   test("rate limits registration per forwarded address and MCP calls per token", async () => {
     const context = await setup();

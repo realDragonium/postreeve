@@ -107,7 +107,9 @@ app.use("/api/*", desktopApiAuthentication(desktopToken));
 app.route("/", createApi(service, googleOAuth, {
   oauthReturnUrl: process.env.POSTREEVE_DESKTOP_URL,
 }));
-app.route("/", createAgentAccess({ service, store: store.agentAccess, publicUrl: process.env.POSTREEVE_PUBLIC_URL }));
+app.route("/", createAgentAccess({
+  service, store: store.agentAccess, publicUrl: process.env.POSTREEVE_PUBLIC_URL, mcpPublicUrl: process.env.POSTREEVE_MCP_PUBLIC_URL,
+}));
 app.use("/*", serveStatic({ root: "./dist" }));
 app.get("/*", serveStatic({ path: "./dist/index.html" }));
 
