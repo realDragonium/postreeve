@@ -17,6 +17,7 @@ import { desktopApiAuthentication } from "./security/desktop-auth";
 import { postreeveSecureHeaders } from "./security/headers";
 import { allowedHostGuard, sameOriginGuard } from "./security/request-origin";
 import { backupPolicyFromEnvironment, scheduleBackups } from "./runtime/backup";
+import { funnelPathGuard } from "./runtime/funnel-paths";
 import { createShutdown } from "./runtime/shutdown";
 
 const databasePath = process.env.POSTREEVE_DB_PATH ?? "./data/postreeve.sqlite";
@@ -106,6 +107,8 @@ const desktopToken = process.env.POSTREEVE_DESKTOP_TOKEN;
 const shutdownController = new AbortController();
 const app = new Hono();
 app.use("*", postreeveSecureHeaders);
+// Requests from the public internet through Tailscale Funnel may reach only the remote MCP and OAuth paths.
+app.use("*", funnelPathGuard());
 app.use("*", allowedHostGuard(serverConfig.hostname));
 // With a desktop token every API write is already authenticated, and the protocol proxy forwards a postreeve:// Origin.
 if (!desktopToken?.trim()) app.use("/api/*", sameOriginGuard());
