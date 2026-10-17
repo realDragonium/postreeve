@@ -7,6 +7,7 @@ const providerNames: Record<MailProviderId, string> = {
   aol: "AOL Mail",
   zoho: "Zoho Mail",
   gmx: "GMX",
+  strato: "Strato",
   gmail: "Gmail",
   outlook: "Outlook.com",
   proton: "Proton Mail",
@@ -44,6 +45,8 @@ export function providerGuidance(provider: MailProviderId | null, googleConfigur
       return "Turn on IMAP access in GMX settings before connecting. With two-factor authentication on, use an app-specific password.";
     case "zoho":
       return "Turn on IMAP access in Zoho Mail settings before connecting. With two-factor authentication on, use an app-specific password.";
+    case "strato":
+      return "Strato signs in with the full email address and the mailbox password set in the Strato customer area under E-Mail.";
     case "gmail":
       return googleConfigured
         ? "This is a Google account. Use Continue with Google above instead of a password; your Google password never enters Postreeve."
@@ -51,7 +54,7 @@ export function providerGuidance(provider: MailProviderId | null, googleConfigur
     case "outlook":
       return "Outlook.com, Hotmail and Microsoft 365 require Microsoft sign-in, which Postreeve does not support yet. These addresses cannot be connected with a password.";
     case "proton":
-      return "Proton Mail works only through Proton Mail Bridge, whose self-signed certificate Postreeve does not trust yet. These addresses cannot be connected yet.";
+      return "Proton Mail works only through Proton Mail Bridge. Postreeve filled in the Bridge's default local ports; check them and the Bridge password in the Bridge app, then Test connection: Postreeve shows the Bridge's self-signed certificate so you can compare its fingerprint and trust it.";
     case null:
       return null;
   }

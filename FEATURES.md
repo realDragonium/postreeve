@@ -23,8 +23,9 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Use multiple Gmail and IMAP/SMTP accounts | Complete | Complete | All mailbox tools are scoped by `accountId`. |
 | Connect Gmail through Google OAuth | Complete | Not covered | No matching WebMCP tool exists. The current UI uses an interactive Google login and consent flow. |
 | Add an IMAP/SMTP account | Complete | Not covered | No matching WebMCP tool exists. |
-| Propose IMAP/SMTP settings from an email address | Complete | Not covered | **Find settings** uses the built-in provider list, Thunderbird autoconfig, the ISPDB and MX matching, with fixed app-password guidance. No matching WebMCP tool exists. |
+| Propose IMAP/SMTP settings from an email address | Complete | Not covered | **Find settings** uses the built-in provider list (including Strato custom domains by MX and Proton Mail Bridge's local defaults), Thunderbird autoconfig, the ISPDB and MX matching, with fixed app-password guidance. No matching WebMCP tool exists. |
 | Test IMAP and SMTP settings | Complete | Not covered | No matching WebMCP tool exists. |
+| Trust a self-signed or IP-addressed server certificate | Complete | Not covered | A failed test shows the IMAP or SMTP certificate's SHA-256 fingerprint, subject and validity; the owner can pin it per account. Pinned connections verify the exact certificate, and a changed one pauses synchronization for review. Covers self-hosted servers such as poste.io and Proton Mail Bridge. |
 | Update or reconnect an IMAP/SMTP account | Complete | Not covered | No matching WebMCP tool exists. |
 | Reauthorize Gmail | Complete | Partial | `request_reauthorization` provides human guidance; Google login and consent remain interactive UI steps. |
 | Remove an account and its local history | Complete | Not covered | No matching WebMCP tool exists. Removing an account through the UI never deletes provider mail. |

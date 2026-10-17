@@ -274,6 +274,24 @@ export const operationBatchSchema = z.object({
   updatedAt: z.iso.datetime(),
 });
 
+/** A SHA-256 certificate fingerprint, with or without colons, normalized to 64 lower-case hex digits. */
+export const certificateFingerprintSchema = z.string().trim()
+  .transform((value) => value.replace(/[:\s]/g, "").toLowerCase())
+  .pipe(z.string().regex(/^[0-9a-f]{64}$/, "Use a SHA-256 certificate fingerprint"));
+
+/** A server certificate Postreeve could not verify, shown so the owner can decide to trust it. */
+export const presentedCertificateSchema = z.object({
+  service: z.enum(["imap", "smtp"]),
+  host: z.string().min(1),
+  port: z.number().int().min(1).max(65535),
+  fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+  subject: z.string(),
+  issuer: z.string(),
+  validFrom: z.iso.datetime(),
+  validTo: z.iso.datetime(),
+  selfSigned: z.boolean(),
+});
+
 export const createAccountInputSchema = z.object({
   kind: z.literal("imap"),
   name: z.string().min(1),
@@ -289,6 +307,9 @@ export const createAccountInputSchema = z.object({
   smtpUsername: z.string().min(1),
   smtpPassword: z.string().min(1),
   saveSentCopy: z.boolean().optional(),
+  /** Fingerprints of certificates the owner chose to trust after reviewing them. */
+  imapTrustedCertificate: certificateFingerprintSchema.optional(),
+  smtpTrustedCertificate: certificateFingerprintSchema.optional(),
 });
 
 export const accountSettingsSchema = z.object({
@@ -305,11 +326,13 @@ export const accountSettingsSchema = z.object({
   smtpSecure: z.boolean(),
   smtpUsername: z.string().min(1),
   saveSentCopy: z.boolean(),
+  imapTrustedCertificate: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  smtpTrustedCertificate: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
 });
 
 export const discoverAccountInputSchema = z.object({ email: z.email() });
 
-export const mailProviderIds = ["icloud", "fastmail", "yahoo", "aol", "zoho", "gmx", "gmail", "outlook", "proton"] as const;
+export const mailProviderIds = ["icloud", "fastmail", "yahoo", "aol", "zoho", "gmx", "strato", "gmail", "outlook", "proton"] as const;
 
 export const discoveredAccountSettingsSchema = accountSettingsSchema.pick({
   host: true, port: true, secure: true, username: true,
@@ -324,6 +347,9 @@ export const accountDiscoverySchema = z.object({
 
 export const updateAccountInputSchema = accountSettingsSchema.omit({ id: true, kind: true }).extend({
   saveSentCopy: z.boolean().optional(),
+  /** Absent keeps the trusted certificate, null stops trusting it, a fingerprint trusts the presented one. */
+  imapTrustedCertificate: certificateFingerprintSchema.nullable().optional(),
+  smtpTrustedCertificate: certificateFingerprintSchema.nullable().optional(),
   password: z.string().min(1).optional(),
   smtpPassword: z.string().min(1).optional(),
 });
@@ -541,6 +567,7 @@ export type MailProviderId = (typeof mailProviderIds)[number];
 export type DiscoveredAccountSettings = z.infer<typeof discoveredAccountSettingsSchema>;
 export type AccountDiscovery = z.infer<typeof accountDiscoverySchema>;
 export type ConnectionTestResult = z.infer<typeof connectionTestResultSchema>;
+export type PresentedCertificate = z.infer<typeof presentedCertificateSchema>;
 export type OutboundAddress = z.infer<typeof outboundAddressSchema>;
 export type Identity = z.infer<typeof identitySchema>;
 export type Signature = z.infer<typeof signatureSchema>;

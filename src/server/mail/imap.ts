@@ -33,6 +33,7 @@ import type {
 } from "../../shared/contracts";
 import type { FolderMappings, SpecialFolderRole } from "../../shared/contracts";
 import { resolveSpecialUses, type ResolvedSpecialUse } from "../../shared/special-folders";
+import { imapTlsOptions, type TlsPin } from "./tls-trust";
 import type {
   AppliedMailAction,
   MailboxPage,
@@ -59,6 +60,8 @@ export interface ImapAccountConfig {
   secure: boolean;
   username: string;
   password: string;
+  /** A certificate the owner trusts explicitly; see tls-trust.ts. */
+  tlsPin?: TlsPin | undefined;
 }
 
 export interface ImapClient {
@@ -171,7 +174,7 @@ export class ImapMailProvider implements MailProvider {
   watchChanges(onChange: (mailbox: string) => void): ProviderWatch {
     return watchImapInbox({
       connection: { host: this.#config.host, port: this.#config.port, secure: this.#config.secure,
-        auth: { user: this.#config.username, pass: this.#config.password } },
+        auth: { user: this.#config.username, pass: this.#config.password }, ...imapTlsOptions(this.#config.host, this.#config.tlsPin) },
       createClient: this.#createIdleClient,
       onChange,
     });
@@ -790,6 +793,7 @@ export class ImapMailProvider implements MailProvider {
       auth: { user: this.#config.username, pass: this.#config.password },
       logger: searchEvidence?.logger ?? false,
       qresync: true,
+      ...imapTlsOptions(this.#config.host, this.#config.tlsPin),
       ...timeouts,
     });
 

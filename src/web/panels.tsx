@@ -12,6 +12,7 @@ import type {
   FolderMappings,
   Identity,
   OutboundAddress,
+  PresentedCertificate,
   Signature,
   SendReceipt,
   SpecialFolderRole,
@@ -19,7 +20,7 @@ import type {
 } from "../shared/contracts";
 import { specialFolderRoles } from "../shared/contracts";
 import { defaultSaveSentCopy } from "../shared/sent-copy";
-import { api } from "./api";
+import { api, ApiRequestError } from "./api";
 import { discoveryStatus, providerGuidance } from "./account-discovery";
 import {
   addressList,
@@ -934,6 +935,41 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   </Sheet>;
 }
 
+type CertificateService = PresentedCertificate["service"];
+
+function formatFingerprint(fingerprint: string): string {
+  return fingerprint.toUpperCase().match(/.{2}/g)?.join(":") ?? fingerprint;
+}
+
+/** Shows an unverified server certificate for review, or the stored trusted one, and records the owner's decision. */
+function CertificateTrust({ service, presented, stored, trusted, onChange }: {
+  service: CertificateService;
+  presented: PresentedCertificate | null;
+  stored: string | null;
+  trusted: string | null | undefined;
+  onChange: (value: string | null | undefined) => void;
+}) {
+  const label = service === "imap" ? "incoming mail (IMAP)" : "outgoing mail (SMTP)";
+  if (presented) {
+    const expired = new Date(presented.validTo).getTime() < Date.now();
+    return <div className="alert" style={{ marginTop: 10, display: "grid", gap: 6 }} role="group" aria-label={`${service.toUpperCase()} certificate`}>
+      <span className="t-ink">{presented.host}:{presented.port} presented a certificate Postreeve cannot verify{presented.selfSigned ? " (self-signed)" : ""}.</span>
+      <span className="t-dim">Compare the fingerprint with the one your server or Proton Mail Bridge shows before trusting it.</span>
+      <span>SHA-256 fingerprint: <code style={{ wordBreak: "break-all" }}>{formatFingerprint(presented.fingerprint)}</code></span>
+      <span>Subject: {presented.subject}</span>
+      <span>Issuer: {presented.issuer}</span>
+      <span>Valid {new Date(presented.validFrom).toLocaleDateString()} – {new Date(presented.validTo).toLocaleDateString()}{expired ? " (expired)" : ""}</span>
+      <label className="check"><input type="checkbox" checked={trusted === presented.fingerprint} onChange={(event) => onChange(event.target.checked ? presented.fingerprint : undefined)} /><span>Trust this certificate for {label}</span></label>
+    </div>;
+  }
+  if (!stored) return null;
+  return <div className="t-dim" style={{ marginTop: 10, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+    {trusted === null
+      ? <><span>The trusted certificate will be removed when you save.</span><button type="button" className="btn-underline" onClick={() => onChange(undefined)}>Keep trusting it</button></>
+      : <><span>Trusted certificate <code style={{ wordBreak: "break-all" }}>{formatFingerprint(stored)}</code></span><button type="button" className="btn-underline" onClick={() => onChange(null)}>Stop trusting</button></>}
+  </div>;
+}
+
 export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
   account: Account | null;
   onClose: () => void;
@@ -961,6 +997,10 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
   const [saveSentCopy, setSaveSentCopy] = useState(true);
   const [saveSentCopyEdited, setSaveSentCopyEdited] = useState(false);
   const [confirmRemoval, setConfirmRemoval] = useState(false);
+  /** Certificates the servers presented in the last failed test or save, by service. */
+  const [presented, setPresented] = useState<Partial<Record<CertificateService, PresentedCertificate>>>({});
+  /** Trust decisions to send: a fingerprint trusts, null stops trusting, absent keeps the stored trust. */
+  const [trusted, setTrusted] = useState<Partial<Record<CertificateService, string | null>>>({});
   const connectionFieldsComplete = [name, email, host, port, username, smtpHost, smtpPort, smtpUsername]
     .every((value) => value.trim().length > 0)
     && (Boolean(accountId) || Boolean(password && smtpPassword));
@@ -992,17 +1032,45 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
     setSaveSentCopy(settings.saveSentCopy);
   }, [settingsQuery.data]);
 
-  function updateInput(): UpdateAccountInput {
+  function connectionInput() {
     return {
       name: name.trim(), email: email.trim(), host: host.trim(), port: Number(port), secure,
-      username: username.trim(), ...(password ? { password } : {}),
-      smtpHost: smtpHost.trim(), smtpPort: Number(smtpPort), smtpSecure,
-      smtpUsername: smtpUsername.trim(), ...(smtpPassword ? { smtpPassword } : {}),
-      saveSentCopy,
+      username: username.trim(), smtpHost: smtpHost.trim(), smtpPort: Number(smtpPort), smtpSecure,
+      smtpUsername: smtpUsername.trim(), saveSentCopy,
+    };
+  }
+  function updateInput(): UpdateAccountInput {
+    return {
+      ...connectionInput(), ...(password ? { password } : {}), ...(smtpPassword ? { smtpPassword } : {}),
+      ...(trusted.imap !== undefined ? { imapTrustedCertificate: trusted.imap } : {}),
+      ...(trusted.smtp !== undefined ? { smtpTrustedCertificate: trusted.smtp } : {}),
     };
   }
   function createInput(): CreateAccountInput {
-    return { kind: "imap", ...updateInput(), password, smtpPassword };
+    return {
+      kind: "imap", ...connectionInput(), password, smtpPassword,
+      ...(trusted.imap ? { imapTrustedCertificate: trusted.imap } : {}),
+      ...(trusted.smtp ? { smtpTrustedCertificate: trusted.smtp } : {}),
+    };
+  }
+  function showPresentedCertificate(error: Error): void {
+    const certificate = error instanceof ApiRequestError ? error.certificate : null;
+    if (certificate) setPresented((current) => ({ ...current, [certificate.service]: certificate }));
+  }
+  function certificateTrust(service: CertificateService) {
+    const stored = service === "imap" ? settingsQuery.data?.imapTrustedCertificate : settingsQuery.data?.smtpTrustedCertificate;
+    return <CertificateTrust
+      service={service}
+      presented={presented[service] ?? null}
+      stored={stored ?? null}
+      trusted={trusted[service]}
+      onChange={(value) => setTrusted((current) => {
+        const next = { ...current };
+        if (value === undefined) delete next[service];
+        else next[service] = value;
+        return next;
+      })}
+    />;
   }
 
   const saveMutation = useMutation({
@@ -1013,9 +1081,12 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
         : [...accounts, saved]);
       onSaved(saved);
     },
+    onError: showPresentedCertificate,
   });
   const testMutation = useMutation({
     mutationFn: () => accountId ? api.testAccount(accountId, updateInput()) : api.testNewAccount(createInput()),
+    onSuccess: () => setPresented({}),
+    onError: showPresentedCertificate,
   });
   const currentEmail = useRef(email);
   currentEmail.current = email;
@@ -1120,6 +1191,7 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
           <label className="field"><span className="field-label">Username</span><input className="input" required autoComplete="username" value={username} onChange={(event) => { const value = event.target.value; setUsername(value); if (!smtpUsernameEdited) setSmtpUsername(value); }} /></label>
           <label className="field"><span className="field-label">Password {accountId ? "(leave blank to keep current)" : ""}</span><input className="input" required={!accountId} type="password" autoComplete="current-password" value={password} onChange={(event) => { const value = event.target.value; setPassword(value); if (!smtpPasswordEdited) setSmtpPassword(value); }} /></label>
         </div>
+        {certificateTrust("imap")}
       </fieldset>
       <fieldset>
         <legend>Outgoing mail (SMTP)</legend>
@@ -1135,6 +1207,7 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
         </div>
         <label className="check" style={{ marginTop: 10 }}><input type="checkbox" checked={saveSentCopy} onChange={(event) => { setSaveSentCopyEdited(true); setSaveSentCopy(event.target.checked); }} /><span>Save a copy to Sent</span></label>
         <p className="t-dim" style={{ margin: "6px 0 0" }}>Turn this off if your provider already files sent mail, as Gmail and Outlook do, to avoid duplicates.</p>
+        {certificateTrust("smtp")}
       </fieldset>
       {testMutation.isSuccess ? <div className="alert">IMAP and SMTP connections succeeded.</div> : null}
       {testMutation.isError ? <div className="alert error">{testMutation.error.message}</div> : null}

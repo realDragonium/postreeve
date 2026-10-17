@@ -132,6 +132,23 @@ describe("account settings discovery", () => {
     expect(await createAccountDiscovery({ fetch, resolveMx: mxAt("example-test.mail.protection.outlook.com") })("person@example.test"))
       .toEqual({ provider: "outlook", source: "mx", settings: null });
   });
+
+  test("fills Strato settings for a custom domain whose MX is under rzone.de", async () => {
+    const { fetch } = stubFetch({});
+    expect(await createAccountDiscovery({ fetch, resolveMx: mxAt("smtpin.rzone.de") })("info@shop.example")).toEqual({
+      provider: "strato", source: "mx", settings: {
+        host: "imap.strato.de", port: 993, secure: true, username: "info@shop.example",
+        smtpHost: "smtp.strato.de", smtpPort: 465, smtpSecure: true, smtpUsername: "info@shop.example",
+      },
+    });
+  });
+
+  test("fills Proton Mail Bridge's local defaults", async () => {
+    const { fetch } = stubFetch({});
+    expect((await createAccountDiscovery({ fetch, resolveMx: noMx })("person@proton.me")).settings).toMatchObject({
+      host: "127.0.0.1", port: 1143, secure: false, smtpHost: "127.0.0.1", smtpPort: 1025, smtpSecure: false,
+    });
+  });
 });
 
 describe("autoconfig documents", () => {

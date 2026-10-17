@@ -32,7 +32,7 @@ import {
 } from "../shared/contracts";
 import type { PostreeveService } from "./core/postreeve";
 import { attachmentDisposition } from "./core/attachment-reference";
-import { AccountConflictError, DraftConflictError, DraftDeletedError, DraftNotFoundError } from "./core/errors";
+import { AccountConflictError, CertificateTrustError, DraftConflictError, DraftDeletedError, DraftNotFoundError } from "./core/errors";
 import type { GoogleOAuth } from "./google/oauth";
 import { createAccountDiscovery, type DiscoverAccount } from "./accounts/discovery";
 import { resolveMx } from "node:dns/promises";
@@ -379,6 +379,9 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
       }
       if (error instanceof DraftConflictError) {
         return context.json({ error: error.message, code: "draft_conflict" as const }, 409);
+      }
+      if (error instanceof CertificateTrustError) {
+        return context.json({ error: error.message, code: "certificate_untrusted" as const, certificate: error.certificate }, 400);
       }
       return context.json({ error: error.message }, 400);
     });

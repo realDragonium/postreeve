@@ -142,8 +142,9 @@ describe("Gmail Send mail as import", () => {
   test("connecting imports verified aliases once and refreshing is idempotent", async () => {
     const { service } = await gmailService(sendAs);
     const gmail = await service.connectGmailAccount("person@gmail.test", "refresh-token");
-    expect((await service.listIdentities(gmail.id)).map(({ name, address }) => [name, address]))
-      .toEqual([["Team", "team@example.com"], ["Gmail", "domain-alias@example.com"]]);
+    // Identities created in the same millisecond order by their random ID.
+    expect((await service.listIdentities(gmail.id)).map(({ name, address }) => [name, address]).toSorted())
+      .toEqual([["Gmail", "domain-alias@example.com"], ["Team", "team@example.com"]]);
 
     const client = hc<AppType>("http://postreeve.local", { fetch: createApi(service).request });
     const refreshed = await client.api.accounts[":accountId"].identities.import.$post({ param: { accountId: gmail.id } });

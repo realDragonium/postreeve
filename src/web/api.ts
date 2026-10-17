@@ -8,6 +8,7 @@ import {
   accountSettingsSchema,
   connectionTestResultSchema,
   folderMappingsSchema,
+  presentedCertificateSchema,
   folderSchema,
   canonicalMessageDetailSchema,
   canonicalMessageSummarySchema,
@@ -34,6 +35,7 @@ import {
   type UnsubscribeResult,
   type Folder,
   type FolderMappings,
+  type PresentedCertificate,
   type IdentityImportResult,
   type CreateIdentityInput,
   type Identity,
@@ -58,22 +60,25 @@ import {
   type UpdateAccountInput,
 } from "../shared/contracts";
 
-export type ApiErrorCode = "account_conflict" | "draft_conflict" | "draft_deleted" | "draft_not_found";
+export type ApiErrorCode = "account_conflict" | "draft_conflict" | "draft_deleted" | "draft_not_found" | "certificate_untrusted";
 
 export class ApiRequestError extends Error {
   readonly status: number;
   readonly code: ApiErrorCode | null;
+  /** The certificate a mail server presented when a connection test failed to verify it. */
+  readonly certificate: PresentedCertificate | null;
 
-  constructor(message: string, status: number, code: ApiErrorCode | null) {
+  constructor(message: string, status: number, code: ApiErrorCode | null, certificate: PresentedCertificate | null = null) {
     super(message);
     this.name = "ApiRequestError";
     this.status = status;
     this.code = code;
+    this.certificate = certificate;
   }
 }
 
-function apiError(value: unknown): { message: string | null; code: ApiErrorCode | null } {
-  if (typeof value !== "object" || value === null) return { message: null, code: null };
+function apiError(value: unknown): { message: string | null; code: ApiErrorCode | null; certificate: PresentedCertificate | null } {
+  if (typeof value !== "object" || value === null) return { message: null, code: null, certificate: null };
   const message = "error" in value && typeof value.error === "string"
     ? value.error
     : "message" in value && typeof value.message === "string"
@@ -84,10 +89,12 @@ function apiError(value: unknown): { message: string | null; code: ApiErrorCode 
       || value.code === "draft_conflict"
       || value.code === "draft_deleted"
       || value.code === "draft_not_found"
+      || value.code === "certificate_untrusted"
   )
     ? value.code
     : null;
-  return { message, code };
+  const certificate = "certificate" in value ? presentedCertificateSchema.safeParse(value.certificate).data ?? null : null;
+  return { message, code, certificate };
 }
 
 async function request<T>(path: string, schema: ZodType<T>, init?: RequestInit): Promise<T> {
@@ -102,7 +109,7 @@ async function request<T>(path: string, schema: ZodType<T>, init?: RequestInit):
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
     const error = apiError(body);
-    throw new ApiRequestError(error.message ?? `Request failed (${response.status})`, response.status, error.code);
+    throw new ApiRequestError(error.message ?? `Request failed (${response.status})`, response.status, error.code, error.certificate);
   }
 
   const direct = schema.safeParse(body);
