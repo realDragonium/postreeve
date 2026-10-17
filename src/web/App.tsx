@@ -169,19 +169,27 @@ function App() {
     queries: accounts.map((account) => ({ queryKey: ["identities", account.id], queryFn: () => api.identities(account.id) })),
   });
   const identities: readonly Identity[] = identityResults.flatMap((result) => result.data ?? []);
+  /**
+   * Migrations run while the first list fetch may still be in flight. Invalidating a query that has no data yet joins
+   * that fetch instead of restarting it, so the pre-migration result would stick; cancel it first.
+   */
+  async function refetchAfterMigration(queryKey: readonly string[]): Promise<void> {
+    await queryClient.cancelQueries({ queryKey });
+    await queryClient.invalidateQueries({ queryKey });
+  }
   const migrationAccountSnapshot = accounts.map(({ id }) => id).sort().join("\0");
   const migratedAccountSnapshot = useRef<string | null>(null);
   useEffect(() => {
     if (!accountsQuery.isSuccess || migratedAccountSnapshot.current === migrationAccountSnapshot) return;
     migratedAccountSnapshot.current = migrationAccountSnapshot;
     void migrateLocalDraftsOnce(localStorage, accounts, api.createDraft).then(async ({ migrated }) => {
-      if (migrated > 0) await queryClient.invalidateQueries({ queryKey: ["drafts"] });
+      if (migrated > 0) await refetchAfterMigration(["drafts"]);
     }).catch((error: unknown) => {
       migratedAccountSnapshot.current = null;
       flash(error instanceof Error ? error.message : "Local draft migration failed");
     });
     void migrateLocalIdentitiesOnce(localStorage, accounts, api.addIdentity).then(async ({ migrated }) => {
-      if (migrated > 0) await queryClient.invalidateQueries({ queryKey: ["identities"] });
+      if (migrated > 0) await refetchAfterMigration(["identities"]);
     }).catch((error: unknown) => {
       flash(error instanceof Error ? error.message : "Local identity migration failed");
     });

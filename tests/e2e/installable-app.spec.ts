@@ -14,11 +14,9 @@ test("the production server serves an installable app whose worker caches only t
   try {
     await expect.poll(async () => (await fetch(`${base}/api/health`).catch(() => null))?.status ?? 0, { timeout: 15_000 }).toBe(200);
     const violations: string[] = [];
-    // The Google Fonts stylesheet in index.html is already blocked by style-src; that predates the installable app.
-    page.on("console", (message) => {
-      const text = message.text();
-      if (/Content Security Policy|Refused to/i.test(text) && !text.includes("fonts.googleapis.com")) violations.push(text);
-    });
+    const thirdParty: string[] = [];
+    page.on("console", (message) => { if (/Content Security Policy|Refused to/i.test(message.text())) violations.push(message.text()); });
+    page.on("request", (request) => { if (!request.url().startsWith(base) && !request.url().startsWith("data:")) thirdParty.push(request.url()); });
 
     await page.goto(base);
     await expect(page.locator(".brand")).toHaveText("POSTREEVE");
@@ -34,6 +32,10 @@ test("the production server serves an installable app whose worker caches only t
 
     const scope = await page.evaluate(async () => (await navigator.serviceWorker.ready).scope);
     expect(scope).toBe(`${base}/`);
+    // The interface font is bundled, loads under the CSP and needs no third-party request.
+    await expect.poll(() => page.evaluate(() => document.fonts.check('600 13px "Instrument Sans"'))).toBe(true);
+    expect(await page.evaluate(() => [...document.fonts].some((face) => face.family.includes("Instrument Sans") && face.status === "loaded"))).toBe(true);
+    expect(thirdParty).toEqual([]);
     await page.reload();
     await expect.poll(() => page.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
     await expect(page.locator(".brand")).toHaveText("POSTREEVE");

@@ -500,6 +500,15 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     applySignature(null, from);
   }, [signatures.data]);
 
+  // Identities can load after compose opens (a slow request, or a migration finishing). Until the person picks a
+  // From address, keep it on the address the message was delivered to rather than the one guessed at mount.
+  const defaultFrom = saved ? null : source ? defaultFromAddress(source, account, identities) : account.email;
+  useEffect(() => {
+    if (defaultFrom === null || edited.current.from || deliveryLocked || defaultFrom === from) return;
+    setFrom(defaultFrom);
+    if (signatures.data && signatureAddress.current !== null) applySignature(signatureAddress.current, defaultFrom);
+  }, [defaultFrom]);
+
   useEffect(() => {
     if (autosaveSuppressed.current) return;
     if (!hasUnsavedChanges(currentDraft())) return;

@@ -114,3 +114,42 @@ test("migrates local identities and replies from the alias the message was deliv
   await expect(page.getByText("sales@example.com", { exact: true })).toHaveCount(0);
   expect(identities.map(({ address }) => address)).toEqual(["support@example.com"]);
 });
+
+test("a reply follows the delivered alias when identities load after compose opens", async ({ page }) => {
+  let releaseIdentities: (() => void) | undefined;
+  const identitiesLoaded = new Promise<void>((resolve) => { releaseIdentities = resolve; });
+  const sales: Identity = { id: "identity-sales", accountId: account.id, name: "Sales desk", address: "sales@example.com", createdAt: "2026-08-29T09:00:00.000Z" };
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method();
+    if (method === "GET" && url.pathname === "/api/accounts") return json(route, [account]);
+    if (method === "GET" && url.pathname === "/api/oauth/google/status") return json(route, { configured: false });
+    if (method === "GET" && url.pathname === `/api/accounts/${account.id}/folders`) return json(route, folders);
+    if (method === "GET" && url.pathname === `/api/accounts/${account.id}/drafts`) return json(route, []);
+    if (method === "GET" && url.pathname === `/api/accounts/${account.id}/signatures`) return json(route, []);
+    if (method === "POST" && url.pathname === "/api/messages/query") {
+      return json(route, { messages: canonicalMessageSummarySchema.array().parse([message]), nextCursor: null,
+        coverage: { sources: [], complete: true, bodyTextLimit: 32768 } });
+    }
+    if (method === "POST" && url.pathname === "/api/messages/read") return json(route, [message]);
+    if (method === "GET" && url.pathname === `/api/accounts/${account.id}/identities`) {
+      await identitiesLoaded;
+      return json(route, [sales]);
+    }
+    if (method === "GET" && url.pathname === "/api/proposals") return json(route, []);
+    if (method === "GET" && url.pathname === "/api/batches") return json(route, []);
+    return json(route, { error: `Unhandled test route: ${method} ${url.pathname}` }, 404);
+  });
+
+  await page.goto("/");
+  await page.getByText(message.subject, { exact: true }).click();
+  await page.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect(page.getByLabel("From identity")).toHaveValue(account.email);
+  releaseIdentities?.();
+  await expect(page.getByLabel("From identity")).toHaveValue("sales@example.com");
+
+  // A From address the person chose stays chosen.
+  await page.getByLabel("From identity").selectOption(account.email);
+  await expect(page.getByLabel("From identity")).toHaveValue(account.email);
+});

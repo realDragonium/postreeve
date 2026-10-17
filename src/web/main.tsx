@@ -3,6 +3,12 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import App from "./App";
 import { ErrorBoundary } from "./ErrorBoundary";
+// Bundled rather than loaded from Google Fonts: the CSP allows only same-origin styles and fonts, the installed app
+// works offline, and opening Postreeve makes no third-party request.
+import "@fontsource/instrument-sans/400.css";
+import "@fontsource/instrument-sans/500.css";
+import "@fontsource/instrument-sans/600.css";
+import "@fontsource/instrument-sans/700.css";
 import "./styles.css";
 import { registerServiceWorker } from "./pwa";
 
