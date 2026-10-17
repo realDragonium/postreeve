@@ -1,4 +1,5 @@
 import { SyncStorageView } from "./SyncStorageView";
+import { MailServerView } from "./admin/MailServerView";
 import type { Account, Folder } from "../shared/contracts";
 import { assistantTools } from "./assistant-tools";
 import { railFor, type ThemePreference } from "./theme";
@@ -6,6 +7,7 @@ import type { NotificationAccess, NotificationPreferences } from "./notification
 
 export const settingsSections = [
   "Accounts",
+  "Mail server",
   "Assistant control",
   "Appearance",
   "Notifications",
@@ -268,6 +270,8 @@ export function SettingsView(props: SettingsViewProps) {
       </div></div>
     </>;
   }
+
+  if (props.section === "Mail server") return <MailServerView />;
 
   if (props.section === "Rules & filters") {
     return <NotBuilt

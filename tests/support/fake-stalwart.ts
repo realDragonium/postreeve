@@ -122,7 +122,7 @@ export class FakeStalwart {
     const accountId = String(args.accountId ?? this.adminAccountId);
     if (object === "AppPassword") return this.#appPasswordSet(accountId, args);
     switch (fn) {
-      case "query": return this.#query(object, (args.filter ?? {}) as Obj, Number(args.position ?? 0), Number(args.limit ?? 500), accountId);
+      case "query": return this.#query(object, (args.filter ?? {}) as Obj, Number(args.position ?? 0), args.limit === undefined ? Number.POSITIVE_INFINITY : Number(args.limit), accountId);
       case "get": return this.#get(object, args.ids as string[] | null, args.properties as string[] | undefined, accountId);
       case "set": return this.#set(object, args, accountId);
       default: throw { type: "unknownMethod", description: `Unknown method ${method}` };
@@ -133,11 +133,13 @@ export class FakeStalwart {
     if (object === "MemoryLookupKey" && Object.keys(filter).some((key) => key !== "namespace")) {
       throw { type: "unsupportedFilter", description: `Filter on property ${Object.keys(filter).find((key) => key !== "namespace")} is not supported or invalid` };
     }
-    if (limit > 500) throw { type: "requestTooLarge", description: "The number of ids requested by the client exceeds the maximum" };
     const ids = [...this.#table(object).entries()]
       .filter(([, value]) => Object.entries(filter).every(([key, wanted]) => value[key] === wanted))
       .map(([id]) => id);
-    return { accountId, queryState: "n", position, ids: ids.slice(position, position + limit), total: ids.length };
+    // Like v0.16.26, a filtered query ignores `position` and returns as many ids as remain, from the start.
+    const page = Object.keys(filter).length && position > 0
+      ? ids.slice(0, Math.min(limit, ids.length - position)) : ids.slice(position, position + limit);
+    return { accountId, queryState: "n", position, ids: page, total: ids.length };
   }
 
   #get(object: string, ids: string[] | null, properties: string[] | undefined, accountId: string): Obj {

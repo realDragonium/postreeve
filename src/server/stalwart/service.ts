@@ -105,6 +105,12 @@ export function isPrivateHost(hostname: string): boolean {
   return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
 }
 
+function mailHostname(value: string): string {
+  // TLS needs a name to verify the certificate against, so IMAP and SMTP cannot use an IP literal.
+  if (isIP(value.replace(/^\[|\]$/g, ""))) throw new MailServerError("Use the mail server's hostname for IMAP and SMTP, not an IP address");
+  return value;
+}
+
 function splitAddress(address: string): { localPart: string; domain: string } {
   const at = address.lastIndexOf("@");
   return { localPart: address.slice(0, at), domain: address.slice(at + 1) };
@@ -148,7 +154,7 @@ export class MailServerAdmin {
     const now = this.#now().toISOString();
     const server: StoredMailServer = {
       id: crypto.randomUUID(), name: input.name, baseUrl, credentialKind: input.credential.kind,
-      mailHostname: input.mailHostname ?? publicHost ?? new URL(baseUrl).hostname,
+      mailHostname: mailHostname(input.mailHostname ?? publicHost ?? new URL(baseUrl).hostname),
       createdAt: now, updatedAt: now, encryptedCredential: this.#vault.encryptSecret(JSON.stringify(input.credential)),
     };
     this.#store.insertServer(server);
@@ -162,7 +168,7 @@ export class MailServerAdmin {
     const updated: StoredMailServer = {
       ...server,
       name: input.name ?? server.name,
-      mailHostname: input.mailHostname ?? server.mailHostname,
+      mailHostname: input.mailHostname ? mailHostname(input.mailHostname) : server.mailHostname,
       credentialKind: input.credential?.kind ?? server.credentialKind,
       encryptedCredential: input.credential ? this.#vault.encryptSecret(JSON.stringify(input.credential)) : server.encryptedCredential,
       updatedAt: this.#now().toISOString(),

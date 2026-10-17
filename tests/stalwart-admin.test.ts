@@ -68,6 +68,12 @@ describe("connecting a Stalwart server", () => {
     expect(server.credentialKind).toBe("basic");
   });
 
+  test("needs a hostname, not an IP address, for IMAP and SMTP", async () => {
+    const { admin, fake } = harness();
+    await expect(admin.connect({ name: "IP", baseUrl: ADMIN_URL, mailHostname: "203.0.113.5", credential: { kind: "apiKey", apiKey: fake.apiKey } }))
+      .rejects.toThrow("not an IP address");
+  });
+
   test("rejects a wrong credential and stores nothing", async () => {
     const { admin, store } = harness();
     await expect(admin.connect({ name: "Bad", baseUrl: ADMIN_URL, credential: { kind: "apiKey", apiKey: "wrong" } }))
@@ -340,6 +346,15 @@ describe("mailing lists, DKIM, queue, reports and spam", () => {
     await expect(admin.removeSpamListEntry(server.id, "trusted", entry.id)).rejects.toThrow("not found in that list");
     await admin.removeSpamListEntry(server.id, "blocked", entry.id);
     expect(await admin.spamList(server.id, "blocked")).toEqual([]);
+  });
+
+  test("returns every entry of a long list despite Stalwart's paging quirk", async () => {
+    const { admin, fake, server } = await withDomain();
+    for (let index = 0; index < 600; index += 1) await admin.addSpamListEntry(server.id, "trusted", { domain: `d${String(index).padStart(3, "0")}.example.com` });
+    const entries = await admin.spamList(server.id, "trusted");
+    expect(entries).toHaveLength(602);
+    expect(new Set(entries.map(({ id }) => id)).size).toBe(602);
+    expect(fake.requests.filter(({ method, args }) => method === "x:MemoryLookupKey/get" && (args.ids as string[]).length > 500)).toEqual([]);
   });
 
   test("turns a Stalwart method error into a plain message", async () => {

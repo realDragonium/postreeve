@@ -89,15 +89,13 @@ export class StalwartJmap {
     return list;
   }
 
-  async query(object: string, filter: JmapObject = {}, limit = Number.POSITIVE_INFINITY): Promise<string[]> {
-    const ids: string[] = [];
-    for (;;) {
-      const pageLimit = Math.min(PAGE_SIZE, limit - ids.length);
-      const [result] = await this.call([[`x:${object}/query`, { filter, position: ids.length, limit: pageLimit }]]);
-      const page = result!.ids as string[];
-      ids.push(...page);
-      if (page.length < pageLimit || ids.length >= limit) return ids;
-    }
+  /**
+   * One query without `position`: Stalwart 0.16.26 returns overlapping pages when a filtered query is paged,
+   * while an unpaged query returns every id (up to its query limit, 5000 by default).
+   */
+  async query(object: string, filter: JmapObject = {}, limit?: number): Promise<string[]> {
+    const [result] = await this.call([[`x:${object}/query`, { filter, ...(limit === undefined ? {} : { limit }) }]]);
+    return result!.ids as string[];
   }
 
   async queryAndGet(object: string, filter: JmapObject = {}, properties?: readonly string[], limit?: number): Promise<JmapObject[]> {
