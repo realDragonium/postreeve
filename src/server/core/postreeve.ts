@@ -27,7 +27,10 @@ import type {
   DraftRecipientField,
   DraftVersionInput,
   Folder,
+  FolderMappings,
+  PresentedCertificate,
   Identity,
+  IdentityImportResult,
   RecipientSuggestion,
   RecipientSuggestionQuery,
   PutSignatureInput,
@@ -54,6 +57,8 @@ import {
   createFolderInputSchema,
   createDraftInputSchema,
   createIdentityInputSchema,
+  folderMappingsSchema,
+  presentedCertificateSchema,
   putSignatureInputSchema,
   createProposalInputSchema,
   deleteFolderInputSchema,
@@ -89,7 +94,8 @@ import {
   type OutgoingMessage,
   type MailSender,
 } from "../mail/sender";
-import { DraftConflictError, DraftDeletedError, DraftNotFoundError } from "./errors";
+import { CertificateTrustError, DraftConflictError, DraftDeletedError, DraftNotFoundError } from "./errors";
+import { inspectCertificate, isCertificateError, normalizeFingerprint, type InspectCertificate, type TlsEndpoint, type TlsPin } from "../mail/tls-trust";
 import {
   decodeAttachmentReference,
   encodeAttachmentReference,
@@ -98,7 +104,7 @@ import {
 } from "./attachment-reference";
 import { normalizeMessageId, normalizeMessageIdList, normalizeMessageIdLists } from "../mail/message-id";
 import { mailtoUnsubscribe, postOneClickUnsubscribe, type UnsubscribeFetch } from "../mail/unsubscribe";
-import { defaultFromAddress } from "../../shared/identities";
+import { defaultFromAddress, identityFor, isWildcardAddress } from "../../shared/identities";
 import {
   CredentialVault,
   type AccountCredentials,
@@ -122,6 +128,8 @@ export interface PostreeveContext {
   synchronization?: SynchronizationOptions;
   /** Performs RFC 8058 one-click POSTs; defaults to the global fetch. */
   unsubscribeFetch?: UnsubscribeFetch;
+  /** Reads the certificate an IMAP or SMTP server presents; defaults to a live TLS handshake. */
+  inspectCertificate?: InspectCertificate;
 }
 
 export const DEFAULT_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
@@ -237,7 +245,7 @@ export class PostreeveService {
     return { accountId, method: account.kind === "gmail" ? "google-consent" : "account-settings",
       instructions: account.kind === "gmail"
         ? "In Settings > Accounts choose Reauthorise for this Gmail account, then complete Google consent for the same email address."
-        : "In Settings > Accounts choose Manage for this account, update connection credentials, and save after the connection test succeeds." };
+        : "In Settings > Accounts choose Manage for this account, update connection credentials or review a changed server certificate, and save after the connection test succeeds." };
   }
 
   async listAccounts(): Promise<Account[]> {
@@ -247,24 +255,7 @@ export class PostreeveService {
   async createAccount(input: CreateAccountInput): Promise<Account> {
     const id = crypto.randomUUID();
     const publicAccount: Account & { kind: "imap" } = { id, name: input.name, email: input.email, kind: "imap" };
-    const credentials: ImapAccountCredentials = {
-      kind: "imap",
-      imap: {
-        host: input.host,
-        port: input.port,
-        secure: input.secure,
-        username: input.username,
-        password: input.password,
-      },
-      smtp: {
-        host: input.smtpHost,
-        port: input.smtpPort,
-        secure: input.smtpSecure,
-        username: input.smtpUsername,
-        password: input.smtpPassword,
-        saveSentCopy: input.saveSentCopy ?? defaultSaveSentCopy(input.host),
-      },
-    };
+    const credentials = await this.#newAccountCredentials(input);
     const clients = await this.#verifiedClients(publicAccount, credentials);
     const account: StoredAccount = {
       ...publicAccount,
@@ -277,23 +268,42 @@ export class PostreeveService {
 
   async testNewAccountConnection(input: CreateAccountInput): Promise<void> {
     const account: Account & { kind: "imap" } = { id: crypto.randomUUID(), name: input.name, email: input.email, kind: "imap" };
-    await this.#verifiedClients(account, {
+    await this.#verifiedClients(account, await this.#newAccountCredentials(input));
+  }
+
+  async #newAccountCredentials(input: CreateAccountInput): Promise<ImapAccountCredentials> {
+    const imap = { host: input.host, port: input.port, secure: input.secure };
+    const smtp = { host: input.smtpHost, port: input.smtpPort, secure: input.smtpSecure };
+    const imapPin = await this.#trustedPin({ protocol: "imap", ...imap }, input.imapTrustedCertificate);
+    const smtpPin = await this.#trustedPin({ protocol: "smtp", ...smtp }, input.smtpTrustedCertificate);
+    return {
       kind: "imap",
-      imap: {
-        host: input.host,
-        port: input.port,
-        secure: input.secure,
-        username: input.username,
-        password: input.password,
-      },
+      imap: { ...imap, username: input.username, password: input.password, ...imapPin ? { tlsPin: imapPin } : {} },
       smtp: {
-        host: input.smtpHost,
-        port: input.smtpPort,
-        secure: input.smtpSecure,
+        ...smtp,
         username: input.smtpUsername,
         password: input.smtpPassword,
+        saveSentCopy: input.saveSentCopy ?? defaultSaveSentCopy(input.host),
+        ...smtpPin ? { tlsPin: smtpPin } : {},
       },
-    });
+    };
+  }
+
+  /**
+   * Pins the certificate the server presents now, but only when it is the one the owner reviewed: a different
+   * certificate between review and save is refused rather than trusted.
+   */
+  async #trustedPin(endpoint: TlsEndpoint, fingerprint: string | undefined): Promise<TlsPin | undefined> {
+    if (fingerprint === undefined) return undefined;
+    const reviewed = normalizeFingerprint(fingerprint);
+    const presented = await (this.#context.inspectCertificate ?? inspectCertificate)(endpoint);
+    if (presented.fingerprint !== reviewed) {
+      throw new CertificateTrustError(
+        `The ${endpoint.protocol.toUpperCase()} server now presents a different certificate than the one you reviewed. Review it again before trusting it.`,
+        presentedCertificateSchema.parse(presented),
+      );
+    }
+    return { fingerprint: reviewed, certificate: presented.pem };
   }
 
   async getAccountSettings(id: string): Promise<AccountSettings> {
@@ -315,18 +325,20 @@ export class PostreeveService {
       smtpSecure: credentials.smtp.secure,
       smtpUsername: credentials.smtp.username,
       saveSentCopy: savesSentCopy(credentials.imap.host, credentials.smtp),
+      imapTrustedCertificate: credentials.imap.tlsPin?.fingerprint ?? null,
+      smtpTrustedCertificate: credentials.smtp.tlsPin?.fingerprint ?? null,
     };
   }
 
   async testAccountConnection(id: string, input: UpdateAccountInput): Promise<void> {
     const account = await this.#requireAccount(id);
-    const { publicAccount, credentials } = this.#updatedConnection(account, input);
+    const { publicAccount, credentials } = await this.#updatedConnection(account, input);
     await this.#verifiedClients(publicAccount, credentials);
   }
 
   async updateAccount(id: string, input: UpdateAccountInput): Promise<Account> {
     const account = await this.#requireAccount(id);
-    const { publicAccount, credentials } = this.#updatedConnection(account, input);
+    const { publicAccount, credentials } = await this.#updatedConnection(account, input);
     const clients = await this.#verifiedClients(publicAccount, credentials);
     await this.#store.updateAccount({
       ...publicAccount,
@@ -361,12 +373,41 @@ export class PostreeveService {
     if (existing) await this.#store.updateAccount(stored);
     else await this.#store.insertAccount(stored);
     this.#registerClients(publicAccount.id, clients);
+    // A connection must not fail because the Send mail as list is unreadable; the identity sheet can retry.
+    await this.importSendAsIdentities(publicAccount.id).catch(() => undefined);
     return publicAccount;
   }
 
   async listFolders(accountId: string): Promise<Folder[]> {
     await this.#requireAccount(accountId);
     return this.#providers.forAccount(accountId).listFolders(accountId);
+  }
+
+  async getFolderMappings(accountId: string): Promise<FolderMappings> {
+    await this.#requireAccount(accountId);
+    return this.#store.folderMappings(this.#context.tenantId, accountId);
+  }
+
+  /** Replaces the account's special-folder overrides and answers with the folder list they produce. */
+  async putFolderMappings(accountId: string, rawInput: FolderMappings): Promise<Folder[]> {
+    const mappings = folderMappingsSchema.parse(rawInput);
+    const account = await this.#requireAccount(accountId);
+    const provider = this.#providers.forAccount(accountId);
+    if (account.kind === "gmail") throw new Error("Gmail folders are fixed system labels");
+    if (!provider.setFolderOverrides) throw new Error("This account's folders cannot be mapped");
+    const folders = await provider.listFolders(accountId);
+    const used = new Set<string>();
+    for (const path of Object.values(mappings)) {
+      if (path === null || path === undefined) continue;
+      const folder = folders.find((candidate) => candidate.path === path);
+      if (!folder) throw new Error(`Folder ${path} does not exist`);
+      if (folder.specialUse === "inbox") throw new Error("The inbox cannot be used as another special folder");
+      if (used.has(path)) throw new Error(`Folder ${path} cannot be used for two special folders`);
+      used.add(path);
+    }
+    await this.#store.replaceFolderMappings(this.#context.tenantId, accountId, mappings, new Date().toISOString());
+    provider.setFolderOverrides(mappings);
+    return provider.listFolders(accountId);
   }
 
   async createFolder(rawInput: CreateFolderInput): Promise<Folder[]> {
@@ -586,6 +627,9 @@ export class PostreeveService {
     const input = createIdentityInputSchema.parse(rawInput);
     const account = await this.#requireAccount(accountId);
     if (input.address === account.email.toLowerCase()) throw new Error("The primary address is already an identity");
+    if (account.kind === "gmail" && isWildcardAddress(input.address)) {
+      throw new Error("Gmail sends only from verified addresses, so wildcard identities are IMAP-only");
+    }
     return this.#store.addIdentity(this.#context.tenantId, {
       id: crypto.randomUUID(),
       accountId,
@@ -593,6 +637,21 @@ export class PostreeveService {
       address: input.address,
       createdAt: new Date().toISOString(),
     }, identityLimit);
+  }
+
+  /** Adds the verified Gmail Send mail as addresses that are not identities yet; never removes or renames one. */
+  async importSendAsIdentities(accountId: string): Promise<IdentityImportResult> {
+    const account = await this.#requireAccount(accountId);
+    const provider = this.#providers.forAccount(accountId);
+    if (account.kind !== "gmail" || !provider.listSendAsIdentities) {
+      throw new Error("Only Gmail accounts have Send mail as addresses");
+    }
+    let imported = 0;
+    for (const { name, address } of await provider.listSendAsIdentities()) {
+      const { created } = await this.addIdentity(accountId, { name: name || account.name, address });
+      if (created) imported += 1;
+    }
+    return { imported, identities: await this.#store.listIdentities(this.#context.tenantId, accountId) };
   }
 
   async removeIdentity(accountId: string, id: string): Promise<void> {
@@ -1210,13 +1269,9 @@ export class PostreeveService {
 
   async #draftSender(accountId: string, identity: OutboundAddress): Promise<OutboundAddress> {
     const account = await this.#requireAccount(accountId);
-    const address = identity.address.toLowerCase();
-    const storedName = address === account.email.toLowerCase()
-      ? account.name
-      : (await this.#store.listIdentities(this.#context.tenantId, accountId))
-        .find((candidate) => candidate.address === address)?.name;
-    if (storedName === undefined) throw new Error("Draft identity does not belong to the selected account");
-    return { name: identity.name || storedName, address: identity.address };
+    const stored = identityFor(identity.address, account, await this.#store.listIdentities(this.#context.tenantId, accountId));
+    if (!stored) throw new Error("Draft identity does not belong to the selected account");
+    return { name: identity.name || stored.name, address: identity.address };
   }
 
   async #prepareMessageSend(sendInput: SendMessageInput, from?: OutboundAddress, html?: string): Promise<PreparedMessageSend> {
@@ -1699,36 +1754,46 @@ export class PostreeveService {
     return this.#vault.decrypt(account.encryptedCredentials);
   }
 
-  #updatedConnection(account: StoredAccount, input: UpdateAccountInput): {
+  async #updatedConnection(account: StoredAccount, input: UpdateAccountInput): Promise<{
     publicAccount: Account & { kind: "imap" };
     credentials: ImapAccountCredentials;
-  } {
+  }> {
     const current = this.#credentialsFor(account);
     if (account.kind !== "imap" || current.kind !== "imap") {
       throw new Error("Google account access is managed through Google authorization");
     }
     if (!current.smtp) throw new Error("This account has no outgoing-mail settings; add SMTP credentials to reconnect it");
+    const imap = { host: input.host, port: input.port, secure: input.secure };
+    const smtp = { host: input.smtpHost, port: input.smtpPort, secure: input.smtpSecure };
+    const imapPin = await this.#updatedPin({ protocol: "imap", ...imap }, input.imapTrustedCertificate, current.imap.tlsPin);
+    const smtpPin = await this.#updatedPin({ protocol: "smtp", ...smtp }, input.smtpTrustedCertificate, current.smtp.tlsPin);
     return {
       publicAccount: { id: account.id, name: input.name, email: input.email, kind: "imap" },
       credentials: {
         kind: "imap",
         imap: {
-          host: input.host,
-          port: input.port,
-          secure: input.secure,
+          ...imap,
           username: input.username,
           password: input.password ?? current.imap.password,
+          ...imapPin ? { tlsPin: imapPin } : {},
         },
         smtp: {
-          host: input.smtpHost,
-          port: input.smtpPort,
-          secure: input.smtpSecure,
+          ...smtp,
           username: input.smtpUsername,
           password: input.smtpPassword ?? current.smtp.password,
           saveSentCopy: input.saveSentCopy ?? savesSentCopy(current.imap.host, current.smtp),
+          ...smtpPin ? { tlsPin: smtpPin } : {},
         },
       },
     };
+  }
+
+  /** Absent keeps the stored pin, null drops it, and a new fingerprint pins the certificate presented now. */
+  async #updatedPin(endpoint: TlsEndpoint, fingerprint: string | null | undefined, current: TlsPin | undefined): Promise<TlsPin | undefined> {
+    if (fingerprint === undefined) return current;
+    if (fingerprint === null) return undefined;
+    if (current?.fingerprint === normalizeFingerprint(fingerprint)) return current;
+    return this.#trustedPin(endpoint, fingerprint);
   }
 
   #clientsFor(account: Account, credentials: AccountCredentials): { provider: MailProvider; sender: MailSender } {
@@ -1750,18 +1815,37 @@ export class PostreeveService {
     const clients = this.#clientsFor(account, credentials);
     try {
       await clients.provider.verifyConnection();
-    } catch {
+    } catch (error) {
+      await this.#throwCertificateProblem(error, tlsEndpoint("imap", credentials.imap), credentials.imap.tlsPin);
       throw new Error("IMAP connection failed. Check the server, port, TLS setting, username, and password.");
     }
     try {
       await clients.sender.verifyConnection();
-    } catch {
+    } catch (error) {
+      if (credentials.smtp) await this.#throwCertificateProblem(error, tlsEndpoint("smtp", credentials.smtp), credentials.smtp.tlsPin);
       throw new Error("SMTP connection failed. Check the server, port, TLS setting, username, and password.");
     }
     return clients;
   }
 
+  /** Turns a certificate verification failure into the presented certificate, so the owner can review and trust it. */
+  async #throwCertificateProblem(error: unknown, endpoint: TlsEndpoint, pin: TlsPin | undefined): Promise<void> {
+    if (!isCertificateError(error)) return;
+    let presented: PresentedCertificate;
+    try {
+      presented = presentedCertificateSchema.parse(await (this.#context.inspectCertificate ?? inspectCertificate)(endpoint));
+    } catch {
+      return;
+    }
+    const service = endpoint.protocol.toUpperCase();
+    throw new CertificateTrustError(pin
+      ? `The ${service} server's certificate changed and no longer matches the one you trusted. Trust the new certificate only if you know why it changed, for example a renewal you made.`
+      : `The ${service} server's certificate could not be verified. Compare its fingerprint with the one your server shows, then trust it to connect.`,
+    presented);
+  }
+
   #registerClients(accountId: string, clients: { provider: MailProvider; sender: MailSender }, replace = true): void {
+    clients.provider.setFolderOverrides?.(this.#store.folderMappings(this.#context.tenantId, accountId));
     this.#providers.register(accountId, clients.provider);
     this.synchronization.schedule(accountId, replace);
     this.#senders.register(accountId, clients.sender);
@@ -1772,6 +1856,10 @@ export class PostreeveService {
     if (!account) throw new Error("Account not found");
     return account;
   }
+}
+
+function tlsEndpoint(protocol: TlsEndpoint["protocol"], server: { host: string; port: number; secure: boolean }): TlsEndpoint {
+  return { protocol, host: server.host, port: server.port, secure: server.secure };
 }
 
 function replySubject(subject: string): string {

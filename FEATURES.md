@@ -23,8 +23,9 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Use multiple Gmail and IMAP/SMTP accounts | Complete | Complete | All mailbox tools are scoped by `accountId`. |
 | Connect Gmail through Google OAuth | Complete | Not covered | No matching WebMCP tool exists. The current UI uses an interactive Google login and consent flow. |
 | Add an IMAP/SMTP account | Complete | Not covered | No matching WebMCP tool exists. |
-| Propose IMAP/SMTP settings from an email address | Complete | Not covered | **Find settings** uses the built-in provider list, Thunderbird autoconfig, the ISPDB and MX matching, with fixed app-password guidance. No matching WebMCP tool exists. |
+| Propose IMAP/SMTP settings from an email address | Complete | Not covered | **Find settings** uses the built-in provider list (including Strato custom domains by MX and Proton Mail Bridge's local defaults), Thunderbird autoconfig, the ISPDB and MX matching, with fixed app-password guidance. No matching WebMCP tool exists. |
 | Test IMAP and SMTP settings | Complete | Not covered | No matching WebMCP tool exists. |
+| Trust a self-signed or IP-addressed server certificate | Complete | Not covered | A failed test shows the IMAP or SMTP certificate's SHA-256 fingerprint, subject and validity; the owner can pin it per account. Pinned connections verify the exact certificate, and a changed one pauses synchronization for review. Covers self-hosted servers such as poste.io and Proton Mail Bridge. |
 | Update or reconnect an IMAP/SMTP account | Complete | Not covered | No matching WebMCP tool exists. |
 | Reauthorize Gmail | Complete | Partial | `request_reauthorization` provides human guidance; Google login and consent remain interactive UI steps. |
 | Remove an account and its local history | Complete | Not covered | No matching WebMCP tool exists. Removing an account through the UI never deletes provider mail. |
@@ -50,7 +51,7 @@ WebMCP follows one product rule: it mirrors user mailbox workflows and must not 
 | Create provider folders or Gmail labels | Complete | Complete | `create_folder` updates the provider and the open UI. |
 | Rename custom provider folders or Gmail labels | Complete | Complete | `rename_folder` preserves an IMAP folder's parent path and updates the open UI. |
 | Delete custom provider folders or Gmail labels | Complete | Complete | `delete_folder`; IMAP folders must be empty, while deleting a Gmail label leaves messages in their other labels. System folders are protected. |
-| Configure special-folder mappings | Not available | Not available | Postreeve currently relies on provider special-use metadata. |
+| Configure special-folder mappings | Complete | Not covered | Manage folders > Special folders sets Archive, Sent, Drafts, Trash and Spam per IMAP account, or None. Automatic detection uses SPECIAL-USE, then common names in several languages (Sent Items, INBOX.Sent, Verzonden, Prullenbak…). `list_folders` returns the resolved `specialUse` and `specialUseSource`; no WebMCP tool changes the mapping. Gmail labels are fixed. |
 
 ## Reading, searching, and presentation
 
@@ -105,7 +106,7 @@ Every WebMCP mutation revalidates the stable message reference, records an audit
 | Reply | Complete | Draft only | Sent with `In-Reply-To` and `References` from the source message; Gmail keeps it in the thread. Agents prepare a reply with `create_draft` mode `reply`; the person sends it. |
 | Reply all | Complete | Draft only | Recipients come from the source message; threaded like Reply. `create_draft` mode `reply_all`. |
 | Forward | Complete | Draft only | Quotes the source message, including its HTML in rich-text mode. `create_draft` mode `forward`; the agent writes the quote. |
-| Send from an alternate identity or catch-all alias | Complete | Draft only | Drafts send from a stored identity over SMTP and Gmail. Gmail requires the address under Send mail as. Replies default to the identity the message was delivered to. `send_message` sends from the primary address only; `create_draft.from` picks an identity by address. |
+| Send from an alternate identity or catch-all alias | Complete | Draft only | Drafts send from a stored identity over SMTP and Gmail. Gmail requires the address under Send mail as. Replies default to the identity the message was delivered to, including the exact address a wildcard identity covers. `send_message` sends from the primary address only; `create_draft.from` picks an identity by address. |
 | Add attachments | Complete | Not available | Files upload into the saved draft on the server and are sent as attachments, within the upload and message size limits. Inline (CID) images are not supported. |
 | Compose rich text (bold, italic, links, lists, quotes) | Complete | Not available | Sent as `multipart/alternative`: HTML sanitized by the server against an allowlist plus a generated plain-text part. A plain-text mode remains. `send_message` stays plain text so agent-approved messages are exactly the text the person reviewed. |
 | Quote the original HTML in replies and forwards | Complete | Not available | Quoted with the reader's sanitizer; style sheets and remote images are dropped, so composing never fetches remote content. |
@@ -122,9 +123,11 @@ Sending is a real external side effect. WebMCP exposes only the narrowest send, 
 | Delete a draft | Complete | Not available | Also removes its provider copy. |
 | Mirror drafts to the provider | Complete | Not available | Each draft is copied to Gmail drafts or the IMAP Drafts mailbox; the Postreeve draft stays authoritative. Drafts created in other clients are not imported. |
 | List identities and signatures | Complete | Complete | `list_identities`, `list_signatures` |
-| Add or remove an identity | Complete | Not available | Stored per account on the server; browser-local identities migrate once. |
+| Add or remove an identity | Complete | Not available | Stored per account on the server; browser-local identities migrate once. Compose offers Add as identity for an unregistered Delivered-To address. |
+| Wildcard identities for catch-all domains | Complete | Not available | `*@example.com` on IMAP accounts covers every address on exactly that domain: replies leave from the delivered address, and other domains stay refused. |
+| Import Gmail Send mail as addresses | Complete | Not available | Imported once when the account connects and again with Import from Gmail in the identity sheet; additive, never removes identities. |
 | Select an alternate From identity | Complete | Not available | Sending is disabled for an address that is not an identity of the account. |
-| Per-identity signatures | Complete | Not available | One signature per sending address, edited in the identity sheet and stored on the server. Compose inserts it and swaps it when From changes, unless the signature was edited. |
+| Per-identity signatures | Complete | Not available | One signature per sending address, edited in the identity sheet and stored on the server. A wildcard identity's signature applies to every address it covers without its own. Compose inserts it and swaps it when From changes, unless the signature was edited. |
 
 Agents prepare drafts; only the person sends them, from the compose form.
 

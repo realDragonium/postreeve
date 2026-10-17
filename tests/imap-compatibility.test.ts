@@ -571,10 +571,10 @@ describe("Bun IMAP compatibility", () => {
     const folders = await provider.listFolders(config.accountId);
 
     expect(folders).toEqual([
-      { path: "INBOX", name: "Inbox", specialUse: "inbox", unread: 2, total: 3 },
-      { path: "Archive", name: "Archive", specialUse: "archive", unread: 0, total: 0 },
-      { path: "Bin", name: "Bin", specialUse: "trash", unread: 0, total: 0 },
-      { path: "Drafts", name: "Drafts", specialUse: "drafts", unread: 0, total: 0 },
+      { path: "INBOX", name: "Inbox", specialUse: "inbox", specialUseSource: "special-use", unread: 2, total: 3 },
+      { path: "Archive", name: "Archive", specialUse: "archive", specialUseSource: "special-use", unread: 0, total: 0 },
+      { path: "Bin", name: "Bin", specialUse: "trash", specialUseSource: "special-use", unread: 0, total: 0 },
+      { path: "Drafts", name: "Drafts", specialUse: "drafts", specialUseSource: "special-use", unread: 0, total: 0 },
     ]);
     expect(provider.listFolders("account-b")).rejects.toThrow("cannot access account account-b");
   });
@@ -1389,13 +1389,13 @@ describe("IMAP sent copies", () => {
     expect(sent.messages.size).toBe(1);
   });
 
-  test("fails without a selectable special-use Sent mailbox", async () => {
+  test("fails without a selectable Sent mailbox", async () => {
     const state = fakeState();
     state.mailboxes.set("Sent", { path: "Sent", name: "Sent", uidValidity: 1n, specialUse: "\\Sent", flags: new Set(["\\Noselect"]), nextUid: 1, messages: new Map() });
     const provider = new ImapMailProvider(config, fakeFactory(state));
 
     await expect(provider.appendSentMessage(config.accountId, sentMime, "2026-10-10T09:00:00.000Z"))
-      .rejects.toThrow("This account has no discoverable special-use Sent mailbox");
+      .rejects.toThrow("This account has no Sent folder; choose one under Manage folders");
   });
 });
 
@@ -1806,8 +1806,8 @@ class FakeImapClient implements ImapClient {
       pathAsListed: mailbox.path,
       name: mailbox.name,
       delimiter: "/",
-      parent: [],
-      parentPath: "",
+      parent: mailbox.path.split("/").slice(0, -1),
+      parentPath: mailbox.path.split("/").slice(0, -1).join("/"),
       flags: mailbox.flags ?? new Set<string>(),
       ...(mailbox.specialUse === undefined ? {} : { specialUse: mailbox.specialUse }),
       listed: true,

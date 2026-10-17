@@ -9,14 +9,18 @@ import type {
   DraftBodyFormat,
   DraftContent,
   Folder,
+  FolderMappings,
   Identity,
   OutboundAddress,
+  PresentedCertificate,
   Signature,
   SendReceipt,
+  SpecialFolderRole,
   UpdateAccountInput,
 } from "../shared/contracts";
+import { specialFolderRoles } from "../shared/contracts";
 import { defaultSaveSentCopy } from "../shared/sent-copy";
-import { api } from "./api";
+import { api, ApiRequestError } from "./api";
 import { discoveryStatus, providerGuidance } from "./account-discovery";
 import {
   addressList,
@@ -27,7 +31,7 @@ import {
   replySubject,
 } from "./format";
 import type { ComposeMode } from "./mail-ui-state";
-import { defaultFromAddress, ownAddresses } from "./identities";
+import { defaultFromAddress, identityFor, isOwnAddress, isWildcardAddress, signatureHtmlFor } from "./identities";
 import { DraftSaveQueue } from "./draft-state";
 import { RecipientInput } from "./RecipientInput";
 import { htmlForward, htmlReplyQuote, plainForward, swapPlainSignature, swapRichSignature, textToHtml } from "./compose-body";
@@ -135,7 +139,11 @@ export function IdentitySheet({ account, identities, onChange, onClose }: {
   const [signatureOpen, setSignatureOpen] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const signatures = useQuery({ queryKey: ["signatures", account.id], queryFn: () => api.signatures(account.id) });
-  const valid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  const wildcard = isWildcardAddress(email.trim());
+  const valid = wildcard
+    ? account.kind === "imap" && /^\*@[^\s@*]+\.[^\s@*]+$/.test(email.trim())
+    : /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+  const [importNote, setImportNote] = useState<string | null>(null);
   function signatureToggle(address: string) {
     const open = signatureOpen === address;
     return <button type="button" className="btn-underline" style={{ marginLeft: "auto" }} aria-expanded={open} aria-label={`Signature for ${address}`} onClick={() => setSignatureOpen(open ? null : address)}>Signature</button>;
@@ -173,8 +181,17 @@ export function IdentitySheet({ account, identities, onChange, onClose }: {
     onClose={onClose}
     footer={<span className="t-dim">{account.kind === "gmail"
       ? "Gmail sends only from addresses verified under Settings > Accounts > Send mail as."
-      : "Your outgoing mail server must accept these addresses as sender."}</span>}
+      : "Your outgoing mail server must accept these addresses as sender. Use *@domain for a catch-all domain: replies leave from the exact address the mail was sent to."}</span>}
   >
+    {account.kind === "gmail" ? <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <button type="button" className="chip" disabled={busy} onClick={() => void run(async () => {
+        setImportNote(null);
+        const result = await api.importSendAsIdentities(account.id);
+        onChange(result.identities);
+        setImportNote(result.imported === 0 ? "No new Send mail as addresses." : `Imported ${result.imported} Send mail as ${result.imported === 1 ? "address" : "addresses"}.`);
+      })}>Import from Gmail</button>
+      {importNote ? <span className="t-dim">{importNote}</span> : null}
+    </div> : null}
     <div>
       <div style={{ display: "flex", gap: 12, borderTop: "1px solid var(--div)", padding: "10px 0" }}>
         <span className="t-ink">{account.name}</span><span className="t-dim">{account.email} · primary</span>
@@ -182,7 +199,7 @@ export function IdentitySheet({ account, identities, onChange, onClose }: {
       </div>
       {signatureEditor(account.email)}
       {identities.map((identity) => <div key={identity.id} style={{ display: "flex", alignItems: "center", gap: 12, borderTop: "1px solid var(--div)", padding: "10px 0" }}>
-        <span className="t-ink">{identity.name}</span><span className="t-dim">{identity.address}</span>
+        <span className="t-ink">{identity.name}</span><span className="t-dim">{identity.address}{isWildcardAddress(identity.address) ? " · every address on this domain" : ""}</span>
         {signatureToggle(identity.address)}
         <button className="btn-danger" disabled={busy} aria-label={`Remove identity ${identity.address}`} onClick={() => void run(async () => {
           await api.removeIdentity(account.id, identity.id);
@@ -206,7 +223,7 @@ export function IdentitySheet({ account, identities, onChange, onClose }: {
       }}
     >
       <label className="field"><span className="field-label">Display name</span><input className="input" aria-label="Identity name" value={name} onChange={(event) => setName(event.target.value)} /></label>
-      <label className="field"><span className="field-label">Email address</span><input className="input" aria-label="Identity email address" type="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
+      <label className="field"><span className="field-label">Email address</span><input className="input" aria-label="Identity email address" placeholder={account.kind === "imap" ? "alias@example.com or *@example.com" : "alias@example.com"} value={email} onChange={(event) => setEmail(event.target.value)} /></label>
       <button className="chip" disabled={busy || !valid || !name.trim()}>Add identity</button>
     </form>
     {error ? <div className="alert error">{error}</div> : null}
@@ -221,6 +238,13 @@ function SignatureEditor({ initial, busy, onSave }: { initial: string; busy: boo
   </div>;
 }
 
+const specialFolderLabels: Record<SpecialFolderRole, string> = {
+  archive: "Archive", sent: "Sent", drafts: "Drafts", trash: "Trash", junk: "Spam",
+};
+/** Select values for the two non-folder choices; NUL cannot occur in an IMAP path. */
+const automaticFolder = "\u0000automatic";
+const noFolder = "\u0000none";
+
 export function FolderSheet({ account, folders, onChange, onClose }: {
   account: Account;
   folders: readonly Folder[];
@@ -233,6 +257,15 @@ export function FolderSheet({ account, folders, onChange, onClose }: {
   const [deletingPath, setDeletingPath] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const mappings = useQuery({
+    queryKey: ["folder-mappings", account.id],
+    queryFn: () => api.folderMappings(account.id),
+    enabled: account.kind === "imap",
+  });
+  /** Unsaved special-folder choices; null while the sheet shows the stored overrides. */
+  const [editedMappings, setEditedMappings] = useState<FolderMappings | null>(null);
+  const currentMappings = editedMappings ?? mappings.data ?? {};
 
   async function run(work: () => Promise<void>): Promise<void> {
     if (busy) return;
@@ -259,11 +292,12 @@ export function FolderSheet({ account, folders, onChange, onClose }: {
     <div>
       {folders.map((folder) => {
         const custom = folder.specialUse === null;
+        const source = folder.specialUseSource === "name" ? " · found by name" : folder.specialUseSource === "override" ? " · chosen by you" : "";
         const canDelete = custom && (account.kind === "gmail" || folder.total === 0);
         return <div key={folder.path} aria-label={folder.name} role="article" style={{ borderTop: "1px solid var(--div)", padding: "10px 0" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <span className="t-ink truncate">{folder.name}</span>
-            <span className="t-dim">{folder.total.toLocaleString()} messages · {custom ? "custom" : folder.specialUse}</span>
+            <span className="t-dim">{folder.total.toLocaleString()} messages · {custom ? "custom" : `${folder.specialUse}${source}`}</span>
             {custom ? <span style={{ display: "flex", gap: 12, marginLeft: "auto" }}>
               <button className="btn-quiet" disabled={busy} onClick={() => { setEditingPath(folder.path); setRenameName(folder.name); setDeletingPath(null); setError(null); }}>Rename</button>
               <button className="btn-danger" disabled={busy || !canDelete} title={canDelete ? undefined : "Move every message out before deleting this IMAP folder"} onClick={() => { setDeletingPath(folder.path); setEditingPath(null); setError(null); }}>Delete</button>
@@ -298,6 +332,51 @@ export function FolderSheet({ account, folders, onChange, onClose }: {
         </div>;
       })}
     </div>
+    {account.kind === "imap" ? <form
+      style={{ display: "grid", gap: 10, borderTop: "2px solid var(--ink)", paddingTop: 14 }}
+      onSubmit={(event) => {
+        event.preventDefault();
+        void run(async () => {
+          const next = await api.putFolderMappings(account.id, currentMappings);
+          queryClient.setQueryData<FolderMappings>(["folder-mappings", account.id], currentMappings);
+          setEditedMappings(null);
+          onChange(next);
+        });
+      }}
+    >
+      <span className="field-label">Special folders</span>
+      <span className="t-dim">Automatic uses the server's special-use flags, then common names such as Sent Items or Prullenbak.</span>
+      <div className="field-grid">
+        {specialFolderRoles.map((role) => {
+          const mapped = currentMappings[role];
+          const detected = folders.find((folder) => folder.specialUse === role && folder.specialUseSource !== "override");
+          return <label className="field" key={role}><span className="field-label">{specialFolderLabels[role]}</span>
+            <select
+              className="input"
+              aria-label={`${specialFolderLabels[role]} folder`}
+              disabled={busy || !mappings.data}
+              value={mapped === undefined ? automaticFolder : mapped === null ? noFolder : mapped}
+              onChange={(event) => {
+                const value = event.target.value;
+                const next: FolderMappings = { ...currentMappings };
+                if (value === automaticFolder) delete next[role];
+                else next[role] = value === noFolder ? null : value;
+                setEditedMappings(next);
+              }}
+            >
+              <option value={automaticFolder}>Automatic{mapped === undefined ? ` · ${detected?.name ?? "none found"}` : ""}</option>
+              <option value={noFolder}>None</option>
+              {folders.filter((folder) => folder.specialUse !== "inbox").map((folder) =>
+                <option key={folder.path} value={folder.path}>{folder.path}</option>)}
+            </select>
+          </label>;
+        })}
+      </div>
+      <span style={{ display: "flex", gap: 10 }}>
+        <button type="button" className="chip" disabled={busy || !editedMappings} onClick={() => setEditedMappings(null)}>Discard</button>
+        <button className="btn" disabled={busy || !editedMappings}>Save special folders</button>
+      </span>
+    </form> : null}
     <form
       style={{ display: "flex", alignItems: "end", gap: 10, borderTop: "2px solid var(--ink)", paddingTop: 14 }}
       onSubmit={(event) => {
@@ -338,19 +417,19 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     conversationId: source.conversationId,
     ...(source.providerConversationId ? { providerConversationId: source.providerConversationId } : {}),
   } : undefined);
-  const own = ownAddresses(account, identities);
+  const isOwn = (address: string) => isOwnAddress(address, account, identities);
   const replyRecipients = source
     ? (source.replyTo?.length ? source.replyTo : source.from)
-      .filter(({ address }) => !own.has(address.toLowerCase()))
+      .filter(({ address }) => !isOwn(address))
     : [];
   if (source && replyRecipients.length === 0) {
-    replyRecipients.push(...source.to.filter(({ address }) => !own.has(address.toLowerCase())));
+    replyRecipients.push(...source.to.filter(({ address }) => !isOwn(address)));
   }
   const replyRecipientAddresses = new Set(replyRecipients.map(({ address }) => address.toLowerCase()));
   const replyAllCc = source
     ? [...source.to, ...(source.cc ?? [])]
       .map(({ address }) => address)
-      .filter((address, index, all) => !own.has(address.toLowerCase())
+      .filter((address, index, all) => !isOwn(address)
         && !replyRecipientAddresses.has(address.toLowerCase())
         && all.findIndex((candidate) => candidate.toLowerCase() === address.toLowerCase()) === index)
       .join(", ")
@@ -383,11 +462,24 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   const uploadingNow = useRef(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const limits = useQuery({ queryKey: ["outgoing-mail-limits"], queryFn: api.outgoingMailLimits });
-  const fromIsOwn = own.has(from.toLowerCase());
+  const fromIsOwn = isOwn(from);
+  const exactIdentities = identities.filter(({ address }) => !isWildcardAddress(address));
+  /** Addresses a wildcard identity covers that this form may send from: the saved, source and current From addresses. */
+  const coveredOptions = [saved?.identity.address, ...source?.deliveredTo ?? [], ...source?.to.map(({ address }) => address) ?? [],
+    ...source?.cc?.map(({ address }) => address) ?? [], from]
+    .flatMap((address) => address ? [identityFor(address, account, identities)] : [])
+    .filter((identity): identity is OutboundAddress => identity !== null && identity.address !== account.email
+      && !exactIdentities.some(({ address }) => address === identity.address))
+    .filter((identity, index, all) => all.findIndex(({ address }) => address === identity.address) === index);
   const identityOptions: readonly OutboundAddress[] = [
-    ...saved && !own.has(saved.identity.address.toLowerCase()) ? [saved.identity] : [],
-    ...identities,
+    ...saved && !isOwn(saved.identity.address) ? [saved.identity] : [],
+    ...exactIdentities,
+    ...coveredOptions,
   ];
+  /** A catch-all address the source was delivered to that is not an identity yet. */
+  const unregisteredDelivered = source?.deliveredTo?.find((address) => !isOwn(address));
+  const [identityError, setIdentityError] = useState<string | null>(null);
+  const [addingIdentity, setAddingIdentity] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [receipt, setReceipt] = useState<SendReceipt | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(saved?.updatedAt ?? null);
@@ -436,7 +528,7 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   }
 
   function signatureFor(address: string | null, bodyFormat: DraftBodyFormat): string {
-    const html = address === null ? "" : signatures.data?.find((signature) => signature.address === address.toLowerCase())?.html ?? "";
+    const html = address === null ? "" : signatureHtmlFor(address, signatures.data ?? []);
     if (!html.trim()) return "";
     const sanitized = sanitizeComposeHtml(html);
     return bodyFormat === "html" ? sanitized : htmlToText(sanitized);
@@ -452,6 +544,27 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     if (swapped === null || swapped === body) return;
     if (pristineBody.current === body) pristineBody.current = swapped;
     setBody(swapped);
+  }
+
+  function changeFrom(address: string): void {
+    edited.current.from = true;
+    setFrom(address);
+    if (signatures.data && signatureAddress.current !== null) applySignature(signatureAddress.current, address);
+  }
+
+  async function addDeliveredIdentity(address: string): Promise<void> {
+    setAddingIdentity(true);
+    setIdentityError(null);
+    try {
+      const added = await api.addIdentity(account.id, { name: account.name, address });
+      queryClient.setQueryData<Identity[]>(["identities", account.id], (current = []) =>
+        [...current.filter(({ id }) => id !== added.id), added]);
+      changeFrom(added.address);
+    } catch (cause) {
+      setIdentityError(cause instanceof Error ? cause.message : "Adding the identity failed");
+    } finally {
+      setAddingIdentity(false);
+    }
   }
 
   function changeFormat(next: DraftBodyFormat): void {
@@ -755,15 +868,18 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
     </>}
   >
     <label className="field"><span className="field-label">From</span>
-      <select className="input" aria-label="From identity" value={from} disabled={formBusy} onChange={(event) => {
-        edited.current.from = true;
-        setFrom(event.target.value);
-        if (signatures.data && signatureAddress.current !== null) applySignature(signatureAddress.current, event.target.value);
-      }}>
+      <select className="input" aria-label="From identity" value={from} disabled={formBusy} onChange={(event) => changeFrom(event.target.value)}>
         <option value={account.email}>{account.email}</option>
         {identityOptions.map((identity) => <option value={identity.address} key={identity.address}>{identity.name} · {identity.address}</option>)}
       </select>
     </label>
+    {unregisteredDelivered && !formBusy ? <div className="t-dim" style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <span>Delivered to {unregisteredDelivered}, which is not one of your identities.</span>
+      <button type="button" className="btn-underline" disabled={addingIdentity} onClick={() => void addDeliveredIdentity(unregisteredDelivered)}>
+        {addingIdentity ? "Adding…" : "Add as identity"}
+      </button>
+    </div> : null}
+    {identityError ? <div className="alert error">{identityError}</div> : null}
     <RecipientInput label="To" autoFocus required placeholder="person@example.com, team@example.com" value={to} disabled={formBusy} onChange={(value) => { edited.current.to = true; setTo(value); }} />
     <div className="field-grid">
       <RecipientInput label="Cc" value={cc} disabled={formBusy} onChange={(value) => { edited.current.cc = true; setCc(value); }} />
@@ -819,6 +935,41 @@ export function ComposeModal({ account, identities, intent, onClose, onSaveDraft
   </Sheet>;
 }
 
+type CertificateService = PresentedCertificate["service"];
+
+function formatFingerprint(fingerprint: string): string {
+  return fingerprint.toUpperCase().match(/.{2}/g)?.join(":") ?? fingerprint;
+}
+
+/** Shows an unverified server certificate for review, or the stored trusted one, and records the owner's decision. */
+function CertificateTrust({ service, presented, stored, trusted, onChange }: {
+  service: CertificateService;
+  presented: PresentedCertificate | null;
+  stored: string | null;
+  trusted: string | null | undefined;
+  onChange: (value: string | null | undefined) => void;
+}) {
+  const label = service === "imap" ? "incoming mail (IMAP)" : "outgoing mail (SMTP)";
+  if (presented) {
+    const expired = new Date(presented.validTo).getTime() < Date.now();
+    return <div className="alert" style={{ marginTop: 10, display: "grid", gap: 6 }} role="group" aria-label={`${service.toUpperCase()} certificate`}>
+      <span className="t-ink">{presented.host}:{presented.port} presented a certificate Postreeve cannot verify{presented.selfSigned ? " (self-signed)" : ""}.</span>
+      <span className="t-dim">Compare the fingerprint with the one your server or Proton Mail Bridge shows before trusting it.</span>
+      <span>SHA-256 fingerprint: <code style={{ wordBreak: "break-all" }}>{formatFingerprint(presented.fingerprint)}</code></span>
+      <span>Subject: {presented.subject}</span>
+      <span>Issuer: {presented.issuer}</span>
+      <span>Valid {new Date(presented.validFrom).toLocaleDateString()} – {new Date(presented.validTo).toLocaleDateString()}{expired ? " (expired)" : ""}</span>
+      <label className="check"><input type="checkbox" checked={trusted === presented.fingerprint} onChange={(event) => onChange(event.target.checked ? presented.fingerprint : undefined)} /><span>Trust this certificate for {label}</span></label>
+    </div>;
+  }
+  if (!stored) return null;
+  return <div className="t-dim" style={{ marginTop: 10, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+    {trusted === null
+      ? <><span>The trusted certificate will be removed when you save.</span><button type="button" className="btn-underline" onClick={() => onChange(undefined)}>Keep trusting it</button></>
+      : <><span>Trusted certificate <code style={{ wordBreak: "break-all" }}>{formatFingerprint(stored)}</code></span><button type="button" className="btn-underline" onClick={() => onChange(null)}>Stop trusting</button></>}
+  </div>;
+}
+
 export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
   account: Account | null;
   onClose: () => void;
@@ -846,6 +997,10 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
   const [saveSentCopy, setSaveSentCopy] = useState(true);
   const [saveSentCopyEdited, setSaveSentCopyEdited] = useState(false);
   const [confirmRemoval, setConfirmRemoval] = useState(false);
+  /** Certificates the servers presented in the last failed test or save, by service. */
+  const [presented, setPresented] = useState<Partial<Record<CertificateService, PresentedCertificate>>>({});
+  /** Trust decisions to send: a fingerprint trusts, null stops trusting, absent keeps the stored trust. */
+  const [trusted, setTrusted] = useState<Partial<Record<CertificateService, string | null>>>({});
   const connectionFieldsComplete = [name, email, host, port, username, smtpHost, smtpPort, smtpUsername]
     .every((value) => value.trim().length > 0)
     && (Boolean(accountId) || Boolean(password && smtpPassword));
@@ -877,17 +1032,45 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
     setSaveSentCopy(settings.saveSentCopy);
   }, [settingsQuery.data]);
 
-  function updateInput(): UpdateAccountInput {
+  function connectionInput() {
     return {
       name: name.trim(), email: email.trim(), host: host.trim(), port: Number(port), secure,
-      username: username.trim(), ...(password ? { password } : {}),
-      smtpHost: smtpHost.trim(), smtpPort: Number(smtpPort), smtpSecure,
-      smtpUsername: smtpUsername.trim(), ...(smtpPassword ? { smtpPassword } : {}),
-      saveSentCopy,
+      username: username.trim(), smtpHost: smtpHost.trim(), smtpPort: Number(smtpPort), smtpSecure,
+      smtpUsername: smtpUsername.trim(), saveSentCopy,
+    };
+  }
+  function updateInput(): UpdateAccountInput {
+    return {
+      ...connectionInput(), ...(password ? { password } : {}), ...(smtpPassword ? { smtpPassword } : {}),
+      ...(trusted.imap !== undefined ? { imapTrustedCertificate: trusted.imap } : {}),
+      ...(trusted.smtp !== undefined ? { smtpTrustedCertificate: trusted.smtp } : {}),
     };
   }
   function createInput(): CreateAccountInput {
-    return { kind: "imap", ...updateInput(), password, smtpPassword };
+    return {
+      kind: "imap", ...connectionInput(), password, smtpPassword,
+      ...(trusted.imap ? { imapTrustedCertificate: trusted.imap } : {}),
+      ...(trusted.smtp ? { smtpTrustedCertificate: trusted.smtp } : {}),
+    };
+  }
+  function showPresentedCertificate(error: Error): void {
+    const certificate = error instanceof ApiRequestError ? error.certificate : null;
+    if (certificate) setPresented((current) => ({ ...current, [certificate.service]: certificate }));
+  }
+  function certificateTrust(service: CertificateService) {
+    const stored = service === "imap" ? settingsQuery.data?.imapTrustedCertificate : settingsQuery.data?.smtpTrustedCertificate;
+    return <CertificateTrust
+      service={service}
+      presented={presented[service] ?? null}
+      stored={stored ?? null}
+      trusted={trusted[service]}
+      onChange={(value) => setTrusted((current) => {
+        const next = { ...current };
+        if (value === undefined) delete next[service];
+        else next[service] = value;
+        return next;
+      })}
+    />;
   }
 
   const saveMutation = useMutation({
@@ -898,9 +1081,12 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
         : [...accounts, saved]);
       onSaved(saved);
     },
+    onError: showPresentedCertificate,
   });
   const testMutation = useMutation({
     mutationFn: () => accountId ? api.testAccount(accountId, updateInput()) : api.testNewAccount(createInput()),
+    onSuccess: () => setPresented({}),
+    onError: showPresentedCertificate,
   });
   const currentEmail = useRef(email);
   currentEmail.current = email;
@@ -1005,6 +1191,7 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
           <label className="field"><span className="field-label">Username</span><input className="input" required autoComplete="username" value={username} onChange={(event) => { const value = event.target.value; setUsername(value); if (!smtpUsernameEdited) setSmtpUsername(value); }} /></label>
           <label className="field"><span className="field-label">Password {accountId ? "(leave blank to keep current)" : ""}</span><input className="input" required={!accountId} type="password" autoComplete="current-password" value={password} onChange={(event) => { const value = event.target.value; setPassword(value); if (!smtpPasswordEdited) setSmtpPassword(value); }} /></label>
         </div>
+        {certificateTrust("imap")}
       </fieldset>
       <fieldset>
         <legend>Outgoing mail (SMTP)</legend>
@@ -1020,6 +1207,7 @@ export function AccountSetup({ account, onClose, onSaved, onRemoved }: {
         </div>
         <label className="check" style={{ marginTop: 10 }}><input type="checkbox" checked={saveSentCopy} onChange={(event) => { setSaveSentCopyEdited(true); setSaveSentCopy(event.target.checked); }} /><span>Save a copy to Sent</span></label>
         <p className="t-dim" style={{ margin: "6px 0 0" }}>Turn this off if your provider already files sent mail, as Gmail and Outlook do, to avoid duplicates.</p>
+        {certificateTrust("smtp")}
       </fieldset>
       {testMutation.isSuccess ? <div className="alert">IMAP and SMTP connections succeeded.</div> : null}
       {testMutation.isError ? <div className="alert error">{testMutation.error.message}</div> : null}

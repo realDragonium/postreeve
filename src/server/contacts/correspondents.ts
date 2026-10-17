@@ -8,7 +8,8 @@ import { recipientSuggestionQuerySchema, recipientSuggestionSchema, type Recipie
  */
 function contributions(row: string, from = ""): string {
   const sender = `lower(json_extract(${row}.content,'$.from[0].address'))`;
-  const own = `(${sender} IN (SELECT lower(email) FROM accounts) OR ${sender} IN (SELECT address FROM identities WHERE tenant_id=${row}.tenant_id))`;
+  const own = `(${sender} IN (SELECT lower(email) FROM accounts) OR ${sender} IN (SELECT address FROM identities WHERE tenant_id=${row}.tenant_id)
+    OR EXISTS (${wildcardCovers(sender, `${row}.tenant_id`)}))`;
   const recipients = (field: string) => `SELECT ${row}.tenant_id tenant_id,${row}.account_id account_id,${row}.message_id message_id,
     ${row}.received_at at,lower(json_extract(r.value,'$.address')) address,COALESCE(json_extract(r.value,'$.name'),'') name,1 sent
     FROM ${from} json_each(${row}.content,'$.${field}') r WHERE ${own}`;
@@ -17,6 +18,13 @@ function contributions(row: string, from = ""): string {
     SELECT ${row}.tenant_id,${row}.account_id,${row}.message_id,${row}.received_at,${sender},
       COALESCE(json_extract(${row}.content,'$.from[0].name'),''),0 ${from ? `FROM ${from.replace(/,\s*$/, "")}` : ""} WHERE NOT ${own}
   ) WHERE address IS NOT NULL AND address<>'' GROUP BY tenant_id,account_id,message_id,address`;
+}
+
+/** Rows when a wildcard identity `*@domain` covers `address`: it ends in `@domain` and has no other `@`. */
+function wildcardCovers(address: string, tenant: string): string {
+  return `SELECT 1 FROM identities w WHERE w.tenant_id=${tenant} AND substr(w.address,1,2)='*@'
+    AND length(${address})>length(w.address) AND substr(${address},1-length(w.address))=substr(w.address,2)
+    AND instr(substr(${address},1,length(${address})-length(w.address)+1),'@')=0`;
 }
 
 function add(row: string, from = ""): string {
@@ -49,6 +57,16 @@ const rebuild = `DELETE FROM correspondents; ${add("m", "indexed_messages m,")}`
 export function migrateCorrespondents(sqlite: Database): void {
   sqlite.transaction(() => {
     const exists = sqlite.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='correspondents'").get() !== null;
+    // Triggers created before wildcard identities embed an older own-address test, so replace them and recount.
+    const insertTrigger = sqlite.query("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='correspondents_insert'")
+      .get() as { sql: string } | null;
+    const outdated = insertTrigger !== null && !insertTrigger.sql.includes("substr(w.address,1,2)");
+    if (outdated) {
+      for (const trigger of ["correspondents_insert", "correspondents_delete", "correspondents_update", "correspondents_identity_insert",
+        "correspondents_identity_delete", "correspondents_identity_update", "correspondents_account_delete", "correspondents_account_update"]) {
+        sqlite.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
+      }
+    }
     sqlite.exec(`
       CREATE TABLE IF NOT EXISTS correspondents(tenant_id TEXT NOT NULL,account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
         address TEXT NOT NULL,name TEXT NOT NULL,name_at TEXT NOT NULL,sent_count INTEGER NOT NULL,received_count INTEGER NOT NULL,
@@ -63,7 +81,7 @@ export function migrateCorrespondents(sqlite: Database): void {
       CREATE TRIGGER IF NOT EXISTS correspondents_account_delete AFTER DELETE ON accounts BEGIN ${rebuild} END;
       CREATE TRIGGER IF NOT EXISTS correspondents_account_update AFTER UPDATE OF email ON accounts BEGIN ${rebuild} END;
     `);
-    if (!exists) sqlite.exec(rebuild);
+    if (!exists || outdated) sqlite.exec(rebuild);
   }).immediate();
 }
 
@@ -76,6 +94,7 @@ export function suggestRecipients(sqlite: Database, tenantId: string, input: Rec
       SELECT address,name,MAX(CASE WHEN name<>'' THEN name_at END) named_at,SUM(sent_count) sent,SUM(received_count) received,MAX(last_at) last_at
       FROM correspondents
       WHERE tenant_id=:tenant AND address NOT IN (SELECT lower(email) FROM accounts UNION SELECT address FROM identities WHERE tenant_id=:tenant)
+        AND NOT EXISTS (${wildcardCovers("correspondents.address", ":tenant")})
       GROUP BY address)
     WHERE instr(address,:query)>0 OR instr(lower(name),:query)>0
     ORDER BY (substr(address,1,length(:query))=:query OR instr(' '||lower(name),' '||:query)>0) DESC,

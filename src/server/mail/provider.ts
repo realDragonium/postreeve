@@ -3,6 +3,7 @@ import type { OutgoingContent } from "./outgoing-content";
 import type {
   Draft,
   Folder,
+  FolderMappings,
   MessageRef,
   MessageSummary,
   MessageDetail,
@@ -131,6 +132,10 @@ export interface MailProvider {
   watchChanges?(onChange: (mailbox: string) => void): ProviderWatch;
   verifyConnection(): Promise<void>;
   listFolders(accountId: string): Promise<Folder[]>;
+  /** Owner overrides for special folders, for providers whose folder roles can be configured. */
+  setFolderOverrides?(overrides: FolderMappings): void;
+  /** Verified addresses the provider lets the account send as, for providers that publish them. */
+  listSendAsIdentities?(): Promise<Array<{ name: string; address: string }>>;
   createFolder(accountId: string, name: string): Promise<void>;
   renameFolder(accountId: string, path: string, name: string): Promise<void>;
   deleteFolder(accountId: string, path: string): Promise<void>;

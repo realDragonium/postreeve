@@ -1,5 +1,6 @@
 import { composeMime, outgoingMessageId, type OutgoingContent } from "./outgoing-content";
 import { MailSendPreDispatchError } from "./sender";
+import { pinnedTlsOptions, tlsPinSchema } from "./tls-trust";
 import { createTransport } from "nodemailer";
 import type { SendMailOptions } from "nodemailer";
 import type SMTPTransport from "nodemailer/lib/smtp-transport";
@@ -21,6 +22,7 @@ const smtpAccountConfigSchema = z.object({
   secure: z.boolean(),
   username: z.string().min(1),
   password: z.string().min(1),
+  tlsPin: tlsPinSchema.optional(),
 });
 
 export type SmtpAccountConfig = z.infer<typeof smtpAccountConfigSchema>;
@@ -68,6 +70,7 @@ export class SmtpMailSender implements MailSender {
       },
       logger: false,
       debug: false,
+      ...pinnedTlsOptions(this.#config.tlsPin),
     });
   }
 

@@ -17,11 +17,14 @@ import {
   accountSchema,
   accountSettingsSchema,
   connectionTestResultSchema,
+  folderMappingsSchema,
+  presentedCertificateSchema,
   folderSchema,
   canonicalMessageDetailSchema,
   canonicalMessageSummarySchema,
   canonicalConversationSchema,
   draftSchema,
+  identityImportResultSchema,
   identitySchema,
   signatureSchema,
   outgoingMailLimitsSchema,
@@ -41,6 +44,9 @@ import {
   type UnsubscribeInput,
   type UnsubscribeResult,
   type Folder,
+  type FolderMappings,
+  type PresentedCertificate,
+  type IdentityImportResult,
   type CreateIdentityInput,
   type Identity,
   type PutSignatureInput,
@@ -64,22 +70,25 @@ import {
   type UpdateAccountInput,
 } from "../shared/contracts";
 
-export type ApiErrorCode = "account_conflict" | "draft_conflict" | "draft_deleted" | "draft_not_found" | "unauthenticated";
+export type ApiErrorCode = "account_conflict" | "draft_conflict" | "draft_deleted" | "draft_not_found" | "unauthenticated" | "certificate_untrusted";
 
 export class ApiRequestError extends Error {
   readonly status: number;
   readonly code: ApiErrorCode | null;
+  /** The certificate a mail server presented when a connection test failed to verify it. */
+  readonly certificate: PresentedCertificate | null;
 
-  constructor(message: string, status: number, code: ApiErrorCode | null) {
+  constructor(message: string, status: number, code: ApiErrorCode | null, certificate: PresentedCertificate | null = null) {
     super(message);
     this.name = "ApiRequestError";
     this.status = status;
     this.code = code;
+    this.certificate = certificate;
   }
 }
 
-function apiError(value: unknown): { message: string | null; code: ApiErrorCode | null } {
-  if (typeof value !== "object" || value === null) return { message: null, code: null };
+function apiError(value: unknown): { message: string | null; code: ApiErrorCode | null; certificate: PresentedCertificate | null } {
+  if (typeof value !== "object" || value === null) return { message: null, code: null, certificate: null };
   const message = "error" in value && typeof value.error === "string"
     ? value.error
     : "message" in value && typeof value.message === "string"
@@ -91,10 +100,12 @@ function apiError(value: unknown): { message: string | null; code: ApiErrorCode 
       || value.code === "draft_deleted"
       || value.code === "draft_not_found"
       || value.code === "unauthenticated"
+      || value.code === "certificate_untrusted"
   )
     ? value.code
     : null;
-  return { message, code };
+  const certificate = "certificate" in value ? presentedCertificateSchema.safeParse(value.certificate).data ?? null : null;
+  return { message, code, certificate };
 }
 
 async function request<T>(path: string, schema: ZodType<T>, init?: RequestInit): Promise<T> {
@@ -110,7 +121,7 @@ async function request<T>(path: string, schema: ZodType<T>, init?: RequestInit):
   if (!response.ok) {
     const error = apiError(body);
     if (error.code === "unauthenticated") notifyUnauthenticated();
-    throw new ApiRequestError(error.message ?? `Request failed (${response.status})`, response.status, error.code);
+    throw new ApiRequestError(error.message ?? `Request failed (${response.status})`, response.status, error.code, error.certificate);
   }
 
   const direct = schema.safeParse(body);
@@ -214,6 +225,14 @@ export const api = {
       ...jsonBody({ path: input.path }),
       ...withSignal(signal),
     }),
+  folderMappings: (accountId: string, signal?: AbortSignal): Promise<FolderMappings> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/folder-mappings`, folderMappingsSchema, withSignal(signal)),
+  putFolderMappings: (accountId: string, mappings: FolderMappings, signal?: AbortSignal): Promise<Folder[]> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/folder-mappings`, folderSchema.array(), {
+      method: "PUT",
+      ...jsonBody(mappings),
+      ...withSignal(signal),
+    }),
   recipientSuggestions: (query: string, signal?: AbortSignal): Promise<RecipientSuggestion[]> =>
     request(`/recipient-suggestions?${new URLSearchParams({ q: query })}`, recipientSuggestionSchema.array(), withSignal(signal)),
   identities: (accountId: string, signal?: AbortSignal): Promise<Identity[]> =>
@@ -222,6 +241,11 @@ export const api = {
     request(`/accounts/${encodeURIComponent(accountId)}/identities`, identitySchema, {
       method: "POST",
       ...jsonBody(input),
+      ...withSignal(signal),
+    }),
+  importSendAsIdentities: (accountId: string, signal?: AbortSignal): Promise<IdentityImportResult> =>
+    request(`/accounts/${encodeURIComponent(accountId)}/identities/import`, identityImportResultSchema, {
+      method: "POST",
       ...withSignal(signal),
     }),
   signatures: (accountId: string, signal?: AbortSignal): Promise<Signature[]> =>
