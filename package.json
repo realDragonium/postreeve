@@ -15,6 +15,7 @@
     "desktop:pack": "bun run build:desktop && electron-builder --dir",
     "desktop:dist": "bun run build:desktop && electron-builder",
     "start": "bun src/server/index.ts",
+    "backup": "bun scripts/backup.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun test --path-ignore-patterns='tests/e2e/**'",
     "test:e2e": "playwright test",

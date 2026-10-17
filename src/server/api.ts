@@ -67,6 +67,8 @@ export interface ApiOptions {
   readonly stillAuthorized?: (context: Context) => boolean;
   readonly eventKeepAliveMs?: number;
   readonly discoverAccount?: DiscoverAccount;
+  /** Aborted on shutdown so open event streams end and the HTTP server can drain. */
+  readonly shutdownSignal?: AbortSignal;
 }
 
 export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, options: ApiOptions = {}) {
@@ -105,7 +107,11 @@ export function createApi(service: PostreeveService, googleOAuth?: GoogleOAuth, 
       keepAlive.unref();
       try {
         await stream.write(": connected\n\n");
-        await new Promise<void>(resolve => stream.onAbort(resolve));
+        await new Promise<void>(resolve => {
+          stream.onAbort(resolve);
+          if (options.shutdownSignal?.aborted) resolve();
+          options.shutdownSignal?.addEventListener("abort", () => resolve(), { once: true });
+        });
       } finally {
         clearInterval(keepAlive);
         unsubscribe();

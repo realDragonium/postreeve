@@ -5,6 +5,31 @@ const AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const PROFILE_ENDPOINT = "https://gmail.googleapis.com/gmail/v1/users/me/profile";
 const SESSION_TTL_MS = 10 * 60 * 1000;
+export const GOOGLE_CALLBACK_PATH = "/api/oauth/google/callback";
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * Returns the OAuth redirect URI: the callback on `POSTREEVE_PUBLIC_URL` for a hosted server with a Google
+ * "Web application" client, or the loopback callback for a desktop client. `POSTREEVE_GOOGLE_REDIRECT=loopback`
+ * keeps the loopback callback on a hosted server, for when Google will not accept the public host.
+ */
+export function googleRedirectUri(environment: Record<string, string | undefined>, port: number): string {
+  const mode = environment.POSTREEVE_GOOGLE_REDIRECT?.trim() || "auto";
+  if (mode !== "auto" && mode !== "public" && mode !== "loopback") {
+    throw new Error("POSTREEVE_GOOGLE_REDIRECT must be public or loopback");
+  }
+  const configured = environment.POSTREEVE_PUBLIC_URL?.trim();
+  if (mode === "public" && !configured) throw new Error("POSTREEVE_GOOGLE_REDIRECT=public requires POSTREEVE_PUBLIC_URL");
+  if (mode === "loopback" || !configured) return `http://127.0.0.1:${port}${GOOGLE_CALLBACK_PATH}`;
+  const url = URL.parse(configured);
+  if (!url || (url.protocol !== "https:" && !(url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname)))) {
+    throw new Error("POSTREEVE_PUBLIC_URL must be an https:// origin such as https://postreeve.example.ts.net");
+  }
+  if ((url.pathname !== "/" && url.pathname !== "") || url.search || url.hash || url.username || url.password) {
+    throw new Error("POSTREEVE_PUBLIC_URL must be an origin without a path, query or credentials");
+  }
+  return `${url.origin}${GOOGLE_CALLBACK_PATH}`;
+}
 
 const tokenSchema = z.object({
   access_token: z.string().min(1),

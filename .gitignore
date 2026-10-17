@@ -117,3 +117,4 @@ test-results/
 
 # TernJS port file
 .tern-port
+backups/

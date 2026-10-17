@@ -454,7 +454,7 @@ describe("remote MCP endpoint", () => {
   });
 });
 
-describe("separate agent origin (Funnel port)", () => {
+describe("separate agent origin", () => {
   test("issuer, resource and token endpoints follow POSTREEVE_MCP_PUBLIC_URL; consent stays on the UI origin", async () => {
     const harness = await createTestHarness();
     const ui = "https://box.tail.ts.net";
