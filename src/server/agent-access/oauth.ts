@@ -24,6 +24,8 @@ export interface OAuthDependencies {
   readonly publicUrl?: string | undefined;
   /** Origin agents reach (`POSTREEVE_MCP_PUBLIC_URL`, e.g. a Funnel port); issuer and resource live here. */
   readonly mcpPublicUrl?: string | undefined;
+  /** false on the public listener: the consent page needs the owner's session and stays private. */
+  readonly authorize?: boolean;
 }
 
 export function publicOrigin(c: Context, publicUrl: string | undefined): string {
@@ -177,7 +179,9 @@ export function oauthRoutes(deps: OAuthDependencies) {
     return Object.fromEntries(Object.entries(body).flatMap(([key, value]) => typeof value === "string" ? [[key, value]] : []));
   }
 
-  return new Hono()
+  const app = new Hono();
+  // Agent-facing endpoints: served on the public listener too.
+  app
     .get("/.well-known/oauth-protected-resource/mcp", (c) => c.json(protectedResource(origin(c))))
     .get("/.well-known/oauth-protected-resource", (c) => c.json(protectedResource(origin(c))))
     .get("/.well-known/oauth-authorization-server", (c) => {
@@ -223,6 +227,71 @@ export function oauthRoutes(deps: OAuthDependencies) {
         ...(secret ? { client_secret: secret, client_secret_expires_at: 0 } : {}),
       }, 201);
     })
+    .post("/oauth/token", async (c) => {
+      const form = await formOf(c);
+      const client = authenticateClient(c, form);
+      if (!client) return oauthError(c, 401, "invalid_client", "Client authentication failed");
+      const issuer = origin(c);
+      const now = store.now().toISOString();
+
+      if (form.grant_type === "authorization_code") {
+        if (!form.code || !form.code_verifier || !pkceValue.test(form.code_verifier)) {
+          return oauthError(c, 400, "invalid_request", "code and a valid code_verifier are required");
+        }
+        const code = store.consumeCode(form.code);
+        if (!code) return oauthError(c, 400, "invalid_grant", "Unknown authorization code");
+        if (code.usedAt) {
+          // A replayed code may have been stolen: end everything issued from it.
+          store.revokeGrant(code.grantId);
+          return oauthError(c, 400, "invalid_grant", "Authorization code was already used");
+        }
+        if (code.expiresAt <= now || code.clientId !== client.id
+          || (form.redirect_uri !== undefined && form.redirect_uri !== code.redirectUri)
+          || pkceChallenge(form.code_verifier) !== code.codeChallenge) {
+          return oauthError(c, 400, "invalid_grant", "Authorization code is invalid, expired, or does not match");
+        }
+        const grant = store.getGrant(code.grantId);
+        if (!grant || grant.revokedAt) return oauthError(c, 400, "invalid_grant", "Authorization was revoked");
+        return tokenResponse(c, grant, grant.scopes, code.resource ?? resourceUrl(issuer));
+      }
+
+      if (form.grant_type === "refresh_token") {
+        const token = form.refresh_token ? store.findToken(form.refresh_token) : null;
+        if (!token || token.kind !== "refresh") return oauthError(c, 400, "invalid_grant", "Unknown refresh token");
+        const grant = store.getGrant(token.grantId);
+        if (!grant || grant.revokedAt || grant.clientId !== client.id) return oauthError(c, 400, "invalid_grant", "Authorization was revoked");
+        if (token.revokedAt) {
+          if (Date.parse(now) - Date.parse(token.revokedAt) > ROTATION_GRACE_MS) store.revokeGrant(grant.id);
+          return oauthError(c, 400, "invalid_grant", "Refresh token was already used");
+        }
+        if (token.expiresAt && token.expiresAt <= now) return oauthError(c, 400, "invalid_grant", "Refresh token expired");
+        let scopes = token.scopes;
+        if (form.scope !== undefined) {
+          const asked = requestedScopes(form.scope);
+          if (asked.length === 0 || asked.some((scope) => !token.scopes.includes(scope))) {
+            return oauthError(c, 400, "invalid_scope", "A refresh can only keep or narrow the granted scope");
+          }
+          scopes = asked;
+        }
+        store.revokeToken(token.hash);
+        return tokenResponse(c, grant, scopes, token.resource ?? resourceUrl(issuer));
+      }
+
+      return oauthError(c, 400, "unsupported_grant_type", "Use authorization_code or refresh_token");
+    })
+    .post("/oauth/revoke", async (c) => {
+      const form = await formOf(c);
+      const token = form.token ? store.findToken(form.token) : null;
+      if (token) {
+        if (token.kind === "access") store.revokeToken(token.hash);
+        else store.revokeGrant(token.grantId);
+      }
+      c.header("Cache-Control", "no-store");
+      return c.body(null, 200);
+    });
+  if (deps.authorize === false) return app;
+  // The consent page needs the owner's session, so it stays on the private (UI) listener.
+  app
     .get("/oauth/authorize", async (c) => {
       const query = c.req.query();
       const issuer = origin(c);
@@ -290,69 +359,8 @@ export function oauthRoutes(deps: OAuthDependencies) {
         resource: request.resource,
       }, CODE_LIFETIME_MS);
       return c.redirect(redirectWith(request.redirectUri, { code, state: request.state }, issuer), 303);
-    })
-    .post("/oauth/token", async (c) => {
-      const form = await formOf(c);
-      const client = authenticateClient(c, form);
-      if (!client) return oauthError(c, 401, "invalid_client", "Client authentication failed");
-      const issuer = origin(c);
-      const now = store.now().toISOString();
-
-      if (form.grant_type === "authorization_code") {
-        if (!form.code || !form.code_verifier || !pkceValue.test(form.code_verifier)) {
-          return oauthError(c, 400, "invalid_request", "code and a valid code_verifier are required");
-        }
-        const code = store.consumeCode(form.code);
-        if (!code) return oauthError(c, 400, "invalid_grant", "Unknown authorization code");
-        if (code.usedAt) {
-          // A replayed code may have been stolen: end everything issued from it.
-          store.revokeGrant(code.grantId);
-          return oauthError(c, 400, "invalid_grant", "Authorization code was already used");
-        }
-        if (code.expiresAt <= now || code.clientId !== client.id
-          || (form.redirect_uri !== undefined && form.redirect_uri !== code.redirectUri)
-          || pkceChallenge(form.code_verifier) !== code.codeChallenge) {
-          return oauthError(c, 400, "invalid_grant", "Authorization code is invalid, expired, or does not match");
-        }
-        const grant = store.getGrant(code.grantId);
-        if (!grant || grant.revokedAt) return oauthError(c, 400, "invalid_grant", "Authorization was revoked");
-        return tokenResponse(c, grant, grant.scopes, code.resource ?? resourceUrl(issuer));
-      }
-
-      if (form.grant_type === "refresh_token") {
-        const token = form.refresh_token ? store.findToken(form.refresh_token) : null;
-        if (!token || token.kind !== "refresh") return oauthError(c, 400, "invalid_grant", "Unknown refresh token");
-        const grant = store.getGrant(token.grantId);
-        if (!grant || grant.revokedAt || grant.clientId !== client.id) return oauthError(c, 400, "invalid_grant", "Authorization was revoked");
-        if (token.revokedAt) {
-          if (Date.parse(now) - Date.parse(token.revokedAt) > ROTATION_GRACE_MS) store.revokeGrant(grant.id);
-          return oauthError(c, 400, "invalid_grant", "Refresh token was already used");
-        }
-        if (token.expiresAt && token.expiresAt <= now) return oauthError(c, 400, "invalid_grant", "Refresh token expired");
-        let scopes = token.scopes;
-        if (form.scope !== undefined) {
-          const asked = requestedScopes(form.scope);
-          if (asked.length === 0 || asked.some((scope) => !token.scopes.includes(scope))) {
-            return oauthError(c, 400, "invalid_scope", "A refresh can only keep or narrow the granted scope");
-          }
-          scopes = asked;
-        }
-        store.revokeToken(token.hash);
-        return tokenResponse(c, grant, scopes, token.resource ?? resourceUrl(issuer));
-      }
-
-      return oauthError(c, 400, "unsupported_grant_type", "Use authorization_code or refresh_token");
-    })
-    .post("/oauth/revoke", async (c) => {
-      const form = await formOf(c);
-      const token = form.token ? store.findToken(form.token) : null;
-      if (token) {
-        if (token.kind === "access") store.revokeToken(token.hash);
-        else store.revokeGrant(token.grantId);
-      }
-      c.header("Cache-Control", "no-store");
-      return c.body(null, 200);
     });
+  return app;
 }
 
 function protectedResource(origin: string) {

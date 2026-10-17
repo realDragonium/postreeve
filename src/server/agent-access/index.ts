@@ -45,24 +45,37 @@ const publicCors = cors({
   maxAge: 600,
 });
 
-/**
- * Remote agent access: OAuth metadata and endpoints, the `/mcp` endpoint and the owner's
- * Connected agents API. Mounted at the root before the web bundle's fallback route.
- */
-export function createAgentAccess(options: AgentAccessOptions) {
+const defaultLimiters = new WeakMap<AgentAccessStore, RateLimiter>();
+
+function limiterFor(options: AgentAccessOptions): RateLimiter {
+  if (options.limiter) return options.limiter;
+  // Both listeners of one server must share counters, or a second listener doubles every limit.
+  const existing = defaultLimiters.get(options.store);
+  if (existing) return existing;
+  const created = new RateLimiter();
+  defaultLimiters.set(options.store, created);
+  return created;
+}
+
+function hideInternalErrors(app: Hono): void {
+  app.onError((error, c) => {
+    console.error(`Agent access request failed: ${(error instanceof Error ? error.message : String(error)).replace(/[\r\n]/g, " ").slice(0, 300)}`);
+    return c.json({ error: "server_error" }, 500);
+  });
+}
+
+/** OAuth metadata, registration, token, revocation and `/mcp`; with `authorize`, also the consent page. */
+function mountAgentEndpoints(app: Hono, options: AgentAccessOptions, authorize: boolean): void {
   const { service, store } = options;
   const getOwnerSession = options.getOwnerSession ?? defaultGetOwnerSession;
-  const requireOwner = options.requireOwner ?? defaultRequireOwner;
-  const app = new Hono();
-
-  const limiter = options.limiter ?? new RateLimiter();
+  const limiter = limiterFor(options);
   for (const path of ["/.well-known/*", "/oauth/register", "/oauth/token", "/oauth/revoke", "/mcp"]) app.use(path, publicCors);
-  // These paths face the internet when Funnel exposes them: bound size and rate before any parsing.
+  // These paths face the internet on the public listener: bound size and rate before any parsing.
   app.post("/oauth/register", limitBody(OAUTH_BODY_LIMIT), limitByAddress(limiter, "register", 10, 60 * MINUTE));
   app.post("/oauth/token", limitBody(OAUTH_BODY_LIMIT), limitByAddress(limiter, "token", 60, MINUTE));
   app.post("/oauth/revoke", limitBody(OAUTH_BODY_LIMIT), limitByAddress(limiter, "revoke", 60, MINUTE));
   app.post("/mcp", limitBody(MCP_BODY_LIMIT));
-  app.route("/", oauthRoutes({ store, listAccounts: () => service.listAccounts(), getOwnerSession, publicUrl: options.publicUrl, mcpPublicUrl: options.mcpPublicUrl }));
+  app.route("/", oauthRoutes({ store, listAccounts: () => service.listAccounts(), getOwnerSession, publicUrl: options.publicUrl, mcpPublicUrl: options.mcpPublicUrl, authorize }));
 
   app.post("/mcp", async (c) => {
     const origin = issuerOrigin(c, options);
@@ -90,6 +103,29 @@ export function createAgentAccess(options: AgentAccessOptions) {
     return c.json({ error: "This endpoint accepts POST only; server-sent streams and sessions are not offered" }, 405);
   });
 
+}
+
+/**
+ * Only the endpoints agents call from the internet, for a separate public listener
+ * (`POSTREEVE_PUBLIC_MCP_PORT`): no consent page, no owner API, no web bundle.
+ */
+export function createPublicAgentAccess(options: AgentAccessOptions) {
+  const app = new Hono();
+  mountAgentEndpoints(app, options, false);
+  hideInternalErrors(app);
+  return app;
+}
+
+/**
+ * Remote agent access for the private (UI) listener: the agent endpoints, the consent page and
+ * the owner's Connected agents API. Mounted at the root before the web bundle's fallback route.
+ */
+export function createAgentAccess(options: AgentAccessOptions) {
+  const { service, store } = options;
+  const requireOwner = options.requireOwner ?? defaultRequireOwner;
+  const app = new Hono();
+  mountAgentEndpoints(app, options, true);
+
   const agentApi = new Hono()
     .use("*", requireOwner)
     .get("/agents", (c) => c.json(store.listActiveGrants().map(toConnectedAgent)))
@@ -116,10 +152,6 @@ export function createAgentAccess(options: AgentAccessOptions) {
     .get("/events", zValidator("query", z.object({ limit: z.coerce.number().int().min(1).max(500).default(200) })), (c) =>
       c.json(store.listEvents(c.req.valid("query").limit)));
   app.route("/api/agent-access", agentApi);
-  app.onError((error, c) => {
-    console.error(`Agent access request failed: ${(error instanceof Error ? error.message : String(error)).replace(/[\r\n]/g, " ").slice(0, 300)}`);
-    return c.json({ error: "server_error" }, 500);
-  });
-
+  hideInternalErrors(app);
   return app;
 }

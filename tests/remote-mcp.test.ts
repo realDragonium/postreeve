@@ -3,7 +3,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { createAgentAccess } from "../src/server/agent-access";
+import { createAgentAccess, createPublicAgentAccess } from "../src/server/agent-access";
+import { clientAddress } from "../src/server/agent-access/limits";
 import { AgentAccessStore, migrateAgentAccess } from "../src/server/agent-access/store";
 import { getOwnerSession } from "../src/server/security/owner-auth";
 import { Store } from "../src/server/db/store";
@@ -504,6 +505,38 @@ describe("separate agent origin (Funnel port)", () => {
       .toBe(`Bearer resource_metadata="${agentOrigin}/.well-known/oauth-protected-resource/mcp"`);
     expect(await (await app.request(`${ui}/api/agent-access/endpoint`)).json()).toEqual({ mcpUrl: `${agentOrigin}/mcp` });
     harness.store.close();
+  });
+});
+
+describe("public listener", () => {
+  test("serves only the agent endpoints and shares rate limits with the private listener", async () => {
+    const harness = await createTestHarness();
+    const options = { service: harness.service, store: harness.store.agentAccess, publicUrl: "https://box.tail.ts.net", mcpPublicUrl: origin };
+    const publicApp = createPublicAgentAccess(options);
+    const privateApp = createAgentAccess({ ...options, getOwnerSession: () => ({ id: "owner" }), requireOwner: async (_c, next) => next() });
+    expect((await publicApp.request(`${origin}/.well-known/oauth-authorization-server`)).status).toBe(200);
+    expect((await publicApp.request(`${origin}/.well-known/oauth-protected-resource/mcp`)).status).toBe(200);
+    expect((await publicApp.request(`${origin}/mcp`, { method: "POST", body: "{}" })).status).toBe(401);
+    expect((await publicApp.request(`${origin}/oauth/authorize?client_id=x`)).status).toBe(404);
+    expect((await publicApp.request(`${origin}/api/agent-access/agents`)).status).toBe(404);
+    expect((await privateApp.request("https://box.tail.ts.net/api/agent-access/agents")).status).toBe(200);
+
+    const register = (app: typeof publicApp) => app.request(`${origin}/oauth/register`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ redirect_uris: [redirectUri] }),
+    });
+    for (let index = 0; index < 5; index += 1) expect((await register(publicApp)).status).toBe(201);
+    for (let index = 0; index < 5; index += 1) expect((await register(privateApp)).status).toBe(201);
+    expect((await register(publicApp)).status).toBe(429);
+    harness.store.close();
+  });
+
+  test("trusts X-Forwarded-For only from a loopback peer", async () => {
+    const { Hono } = await import("hono");
+    const app = new Hono().get("/", (c) => c.text(clientAddress(c)));
+    const ask = (peer: string, forwarded: string) => app.fetch(new Request("http://x/", { headers: { "X-Forwarded-For": forwarded } }),
+      { requestIP: () => ({ address: peer, family: peer.includes(":") ? "IPv6" : "IPv4", port: 1 }) });
+    expect(await (await ask("127.0.0.1", "198.51.100.1, 203.0.113.7")).text()).toBe("203.0.113.7");
+    expect(await (await ask("203.0.113.9", "10.0.0.1")).text()).toBe("203.0.113.9");
   });
 });
 

@@ -1,4 +1,5 @@
 import type { Context, MiddlewareHandler } from "hono";
+import { getConnInfo } from "hono/bun";
 import { bodyLimit } from "hono/body-limit";
 
 /**
@@ -27,10 +28,25 @@ export class RateLimiter {
   }
 }
 
-/** Behind one trusted proxy, the last forwarded entry is the one the proxy added; the first can be forged. */
+const loopbackPeers = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+
+function peerAddress(c: Context): string | null {
+  try {
+    return getConnInfo(c).remote.address ?? null;
+  } catch {
+    return null; // No Bun server in the environment, as in app.request tests.
+  }
+}
+
+/**
+ * The proxy (Caddy) replaces `X-Forwarded-For`, so its last entry is the client. It is trusted only
+ * from a loopback peer; anyone connecting directly is counted by their own address.
+ */
 export function clientAddress(c: Context): string {
+  const peer = peerAddress(c);
+  if (peer !== null && !loopbackPeers.has(peer)) return peer;
   const forwarded = c.req.header("X-Forwarded-For")?.split(",").map((entry) => entry.trim()).filter(Boolean);
-  return forwarded?.at(-1) ?? "direct";
+  return forwarded?.at(-1) ?? peer ?? "direct";
 }
 
 export function rateLimited(c: Context, retryAfter: number) {
