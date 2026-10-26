@@ -1,4 +1,4 @@
-import { execSync, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { expect, test as base, type Page } from "@playwright/test";
 
 const SETUP_TOKEN = "e2e-setup-token-0123456789";
@@ -24,14 +24,6 @@ const test = base.extend<{ server: string }>({
       child.kill();
     }
   },
-});
-
-// One worker builds the bundle once; parallel builds would rewrite dist while another test's server reads it.
-test.describe.configure({ mode: "serial" });
-
-test.beforeAll(() => {
-  // The real server serves the production bundle.
-  execSync("bun run build", { stdio: "ignore" });
 });
 
 async function addVirtualAuthenticator(page: Page): Promise<void> {

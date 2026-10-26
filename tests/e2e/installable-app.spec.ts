@@ -1,10 +1,9 @@
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
 // Runs the real production server, so the bundle, the security headers and the service worker meet as they do in use.
 test("the production server serves an installable app whose worker caches only the shell", async ({ page }) => {
-  execFileSync("bun", ["run", "build"], { stdio: "ignore" });
   const port = String(4300 + Math.floor(Math.random() * 500));
   const server = spawn("bun", ["--no-env-file", "src/server/index.ts"], {
     stdio: ["ignore", "pipe", "pipe"],
